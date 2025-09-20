@@ -111,10 +111,7 @@ class BitConv2dInfer(nn.Module):
         self.register_buffer("act_s", None if act_s is None else act_s)
         self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
         self.act_bits = act_bits
-        self.qmax = None
-        self.act_s = None
-        if self.act_bits:
-            self.qmax = (1 << (self.act_bits - 1)) - 1
+        self.qmax = (1 << (act_bits - 1)) - 1 if act_bits is not None else None
 
     def forward(self, x):
         if self.act_bits is not None:
@@ -304,49 +301,73 @@ class BitLinear(nn.Module):
             w_q=w_q, s_exp=s_exp, bias=(None if self.bias is None else self.bias.data.clone())
         )
 # ----------------------------
-# Simple BN-free BitNet block & model (optional)
+# Simple BitNet block & model (optional)
 # ----------------------------
 class InvertedResidualBit(nn.Module):
     def __init__(self, in_c, out_c, expand, stride, act_bits=None, scale_op="mean"):
         super().__init__()
         hid = in_c * expand
-        self.use_res = stride == 1 and in_c == out_c
+        self.use_res = (stride == 1 and in_c == out_c)
+
         self.pw1 = nn.Sequential(
-            BitConv2d(in_c, hid, 1, bias=False, act_bits=act_bits, scale_op=scale_op),
-            nn.ReLU()
+            BitConv2d(in_c, hid, kernel_size=1, bias=False,
+                      act_bits=act_bits, scale_op=scale_op),
+            nn.BatchNorm2d(hid),
+            nn.ReLU(inplace=True),
         )
         self.dw = nn.Sequential(
-            BitConv2d(hid, hid, 3, stride=stride, padding=1, groups=hid,
+            BitConv2d(hid, hid, kernel_size=3, stride=stride, padding=1, groups=hid,
                       bias=False, act_bits=act_bits, scale_op=scale_op),
-            nn.ReLU()
+            nn.BatchNorm2d(hid),
+            nn.ReLU(inplace=True),
         )
-        self.pw2 = BitConv2d(hid, out_c, 1, bias=False, act_bits=act_bits, scale_op=scale_op)
+        # no activation here
+        self.pw2 = nn.Sequential(
+            BitConv2d(hid, out_c, kernel_size=1, bias=False,
+                      act_bits=act_bits, scale_op=scale_op),
+            nn.BatchNorm2d(out_c),
+        )
 
     def forward(self, x):
         y = self.pw2(self.dw(self.pw1(x)))
         return x + y if self.use_res else y
 
+
 class BitNetCNN(nn.Module):
-    def __init__(self, in_channels=1, num_classes=10, act_bits=None, scale_op="mean"):
+    def __init__(self, in_channels=1, num_classes=10, act_bits=None, scale_op="mean",
+                 drop2d_p=0.3, drop_p=0.3):
         super().__init__()
         self.stem = nn.Sequential(
-            BitConv2d(in_channels, 32, 3, stride=1, padding=1, bias=False, act_bits=act_bits, scale_op=scale_op),
-            nn.ReLU()
+            BitConv2d(in_channels, 32, kernel_size=3, stride=1, padding=1,
+                      bias=False, act_bits=act_bits, scale_op=scale_op),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
         )
-        self.stage1 = InvertedResidualBit(32,  64,  expand=2, stride=2, act_bits=act_bits, scale_op=scale_op)
-        self.stage2 = InvertedResidualBit(64,  128, expand=2, stride=2, act_bits=act_bits, scale_op=scale_op)
-        self.stage3 = InvertedResidualBit(128, 256, expand=2, stride=2, act_bits=act_bits, scale_op=scale_op)
+
+        self.stage1 = InvertedResidualBit(32,   64,  expand=2, stride=2,
+                                          act_bits=act_bits, scale_op=scale_op)
+        self.sd1 = nn.Dropout2d(p=drop2d_p)
+
+        self.stage2 = InvertedResidualBit(64,   128, expand=2, stride=2,
+                                          act_bits=act_bits, scale_op=scale_op)
+        self.sd2 = nn.Dropout2d(p=drop2d_p)
+
+        self.stage3 = InvertedResidualBit(128,  256, expand=2, stride=2,
+                                          act_bits=act_bits, scale_op=scale_op)
+
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            BitLinear(256, num_classes, bias=False, act_bits=None, scale_op=scale_op)
+            nn.Dropout(p=drop_p),
+            BitLinear(256, num_classes, bias=False, act_bits=None, scale_op=scale_op),
         )
 
     def forward(self, x):
         x = self.stem(x)
-        x = self.stage1(x); x = self.stage2(x); x = self.stage3(x)
+        x = self.stage1(x); x = self.sd1(x)
+        x = self.stage2(x); x = self.sd2(x)
+        x = self.stage3(x)
         return self.head(x)
-
 # ----------------------------
 # Model-wide conversion helper
 # ----------------------------
@@ -357,9 +378,7 @@ def convert_to_ternary(module: nn.Module) -> nn.Module:
     Returns a new nn.Module (original left untouched if you deepcopy before).
     """
     for name, child in list(module.named_children()):
-        if isinstance(child, BitConv2d):
-            setattr(module, name, child.to_ternary())
-        elif isinstance(child, BitLinear):
+        if hasattr(child, 'to_ternary'):
             setattr(module, name, child.to_ternary())
         else:
             convert_to_ternary(child)
@@ -371,9 +390,7 @@ def convert_to_ternary_p2(module: nn.Module) -> nn.Module:
     Recursively replace BitConv2d/BitLinear with their PoT inference counterparts.
     """
     for name, child in list(module.named_children()):
-        if isinstance(child, BitConv2d):
-            setattr(module, name, child.to_ternary_p2())
-        elif isinstance(child, BitLinear):
+        if hasattr(child, 'to_ternary_p2'):
             setattr(module, name, child.to_ternary_p2())
         else:
             convert_to_ternary_p2(child)
@@ -443,6 +460,7 @@ def train(args):
 
     # 1-channel in, 10 classes out
     model = BitNetCNN(in_channels=1, num_classes=10, act_bits=args.act_bits, scale_op=args.scale_op).to(device)
+    best_model = copy.deepcopy(model)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {num_params/1e6:.2f}M  | Device: {device}")
 
@@ -468,13 +486,14 @@ def train(args):
             total_loss += loss.item() * y.size(0)
 
         train_loss = total_loss / total
-        test_loss, test_acc = evaluate(model, test_loader, device, use_ternary=args.eval_ternary)
+        test_loss, test_acc = evaluate(model, test_loader, device, use_ternary=not args.no_eval_ternary)
 
         print(f"Epoch {epoch:02d} | train_loss {train_loss:.4f} | test_loss {test_loss:.4f} | "
               f"test_acc {test_acc*100:.2f}% | epoch_time {time.time()-t0:.1f}s")
 
         # Save the best
         if test_acc > best_acc:
+            best_model = copy.deepcopy(model)
             best_acc = test_acc
             os.makedirs(args.out, exist_ok=True)
             ckpt_path = os.path.join(args.out, "mnist_bitnet.pt")
@@ -483,14 +502,14 @@ def train(args):
                         "acc": best_acc}, ckpt_path)
             print(f"✓ Saved checkpoint to {ckpt_path} (acc={best_acc*100:.2f}%)")
             # Also export a frozen ternary snapshot for pure inference
-            if args.eval_ternary:
+            if not args.no_eval_ternary:
                 ternary = convert_to_ternary_p2(copy.deepcopy(model)).cpu().eval()
                 ternary_path = os.path.join(args.out, "mnist_bitnet_ternary.pt")
                 torch.save({"model": ternary.state_dict(), "acc": best_acc}, ternary_path)
                 print(f"✓ Exported frozen ternary model to {ternary_path}")
 
     print(f"Best test acc: {best_acc*100:.2f}%")
-    return model
+    return best_model
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -505,7 +524,7 @@ def parse_args():
     p.add_argument("--amp", action="store_true", help="enable mixed precision on CUDA")
     p.add_argument("--cpu", action="store_true", help="force CPU")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--eval-ternary", action="store_true", help="evaluate using frozen ternary model")
+    p.add_argument("--no-eval-ternary", action="store_true", help="evaluate using frozen ternary model")
     args = p.parse_args()
     if args.act_bits < 0:
         args.act_bits = None
@@ -513,8 +532,8 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    model = train(args)
+    best_model = train(args)
     # Example: manual conversion after training (commented)
-    # ternary_model = convert_to_ternary_p2(copy.deepcopy(model)).cpu().eval()
+    # ternary_model = convert_to_ternary_p2(copy.deepcopy(best_model)).cpu().eval()
     # for n, b in ternary_model.named_buffers():
-    #     print(n, tuple(b.shape), b.dtype)
+    #     print(n, b.flatten()[:10], tuple(b.shape), b.dtype)
