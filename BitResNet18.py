@@ -439,3 +439,47 @@ if __name__ == "__main__":
         amp=True, scale_op="mean",
         first_last_float=True,
     )
+
+
+# ================================
+# == Distillation Run ==
+# ================================
+#               device: cuda
+#                  AMP: True
+#               epochs: 200
+#           batch_size: 1280
+#              init LR: 0.2
+#         weight_decay: 0.0005
+#             alpha_kd: 0.7
+#           alpha_hint: 0.05
+#               T (KD): 4.0
+#             scale_op: mean
+#     first_last_float: True
+#        train_batches: 39
+#          val_batches: 40
+#             cuda_mem: 87/108 MiB
+# ✓ saved ./ckpt_c100_kd/bit_resnet18_c100_kd_best.pt (top1=5.00)
+# ✓ exported ternary PoT → ./ckpt_c100_kd/bit_resnet18_c100_kd_ternary.pt
+# [001/200] loss 4.9688 (CE 4.0350 | KD 5.2924 | Hint 1.0722) | top1 5.00 | best 5.00 | teach_top1 79.28 | lr 0.2000 | time 32.7s | 1529 img/s | cuda 819/6296 MiB
+# ✓ saved ./ckpt_c100_kd/bit_resnet18_c100_kd_best.pt (top1=9.71)
+# ✓ exported ternary PoT → ./ckpt_c100_kd/bit_resnet18_c100_kd_ternary.pt
+# [002/200] loss 4.2185 (CE 3.3563 | KD 4.5172 | Hint 0.9923) | top1 9.71 | best 9.71 | teach_top1 79.28 | lr 0.2000 | time 32.8s | 1525 img/s | cuda 818/6296 MiB
+# ✓ saved ./ckpt_c100_kd/bit_resnet18_c100_kd_best.pt (top1=19.19)
+# ✓ exported ternary PoT → ./ckpt_c100_kd/bit_resnet18_c100_kd_ternary.pt
+# [003/200] loss 3.6535 (CE 2.9118 | KD 3.9046 | Hint 0.9358) | top1 19.19 | best 19.19 | teach_top1 79.28 | lr 0.1999 | time 33.2s | 1506 img/s | cuda 818/6296 MiB
+# ✓ saved ./ckpt_c100_kd/bit_resnet18_c100_kd_best.pt (top1=26.06)
+# ✓ exported ternary PoT → ./ckpt_c100_kd/bit_resnet18_c100_kd_ternary.pt
+# [004/200] loss 3.1588 (CE 2.5582 | KD 3.3533 | Hint 0.8811) | top1 26.06 | best 26.06 | teach_top1 79.28 | lr 0.1998 | time 33.2s | 1505 img/s | cuda 818/6296 MiB
+# ✓ saved ./ckpt_c100_kd/bit_resnet18_c100_kd_best.pt (top1=32.08)
+# ✓ exported ternary PoT → ./ckpt_c100_kd/bit_resnet18_c100_kd_ternary.pt
+# .
+# .
+# .
+# [133/200] loss 0.4076 (CE 1.1442 | KD 0.0808 | Hint 0.1553) | top1 62.00 | best 64.65 | teach_top1 79.28 | lr 0.0505 | time 32.9s | 1522 img/s | cuda 829/6298 MiB
+# [134/200] loss 0.4064 (CE 1.1447 | KD 0.0789 | Hint 0.1552) | top1 60.47 | best 64.65 | teach_top1 79.28 | lr 0.0491 | time 33.6s | 1487 img/s | cuda 830/6298 MiB
+# [135/200] loss 0.4058 (CE 1.1445 | KD 0.0781 | Hint 0.1552) | top1 60.33 | best 64.65 | teach_top1 79.28 | lr 0.0478 | time 33.1s | 1512 img/s | cuda 832/6298 MiB
+# [136/200] loss 0.4049 (CE 1.1448 | KD 0.0767 | Hint 0.1551) | top1 60.65 | best 64.65 | teach_top1 79.28 | lr 0.0464 | time 32.5s | 1541 img/s | cuda 829/6298 MiB
+# [137/200] loss 0.4044 (CE 1.1447 | KD 0.0761 | Hint 0.1551) | top1 58.38 | best 64.65 | teach_top1 79.28 | lr 0.0451 | time 33.0s | 1516 img/s | cuda 830/6298 MiB
+# [138/200] loss 0.4039 (CE 1.1454 | KD 0.0750 | Hint 0.1551) | top1 55.54 | best 64.65 | teach_top1 79.28 | lr 0.0438 | time 32.5s | 1536 img/s | cuda 832/6298 MiB
+# [139/200] loss 0.4033 (CE 1.1446 | KD 0.0745 | Hint 0.1550) | top1 56.73 | best 64.65 | teach_top1 79.28 | lr 0.0425 | time 33.2s | 1508 img/s | cuda 829/6298 MiB
+# [140/200] loss 0.4026 (CE 1.1451 | KD 0.0733 | Hint 0.1550) | top1 56.17 | best 64.65 | teach_top1 79.28 | lr 0.0412 | time 33.2s | 1507 img/s | cuda 830/6298 MiB
