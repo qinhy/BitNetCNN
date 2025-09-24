@@ -205,13 +205,15 @@ class BitConv2d(nn.Module):
         self.weight = nn.Parameter(torch.empty(out_c, in_c // groups, kh, kw))
         nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
         self.bias = nn.Parameter(torch.zeros(out_c)) if bias else None
-        self.act_q = ActQuant(bits=act_bits)
+        self.act_q = None
+        if act_bits:
+            self.act_q = ActQuant(bits=act_bits)
         self.w_q = Bit1p58Weight(dim=0, scale_op=scale_op)
         self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
         self.scale_op = scale_op
 
     def forward(self, x):
-        xq = self.act_q(x) if self.act_q.bits is not None else x
+        xq = self.act_q(x) if self.act_q is not None else x
         wq = self.w_q(self.weight)
         return F.conv2d(xq, wq, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
@@ -262,7 +264,7 @@ class BitConv2d(nn.Module):
             s_exp=s_exp,
             bias=(None if self.bias is None else self.bias.data.clone()),
             stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups,
-            act_bits=self.act_q.bits, act_exp=act_exp
+            act_bits=self.act_q.bits if self.act_q else None, act_exp=act_exp
         )
 
 class BitLinear(nn.Module):
@@ -271,12 +273,14 @@ class BitLinear(nn.Module):
         self.weight = nn.Parameter(torch.empty(out_f, in_f))
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         self.bias = nn.Parameter(torch.zeros(out_f)) if bias else None
-        self.act_q = ActQuant(bits=act_bits)  # often None for classifier input
+        self.act_q = None
+        if act_bits:
+            self.act_q = ActQuant(bits=act_bits)
         self.w_q = Bit1p58Weight(dim=0, scale_op=scale_op)
         self.scale_op = scale_op
 
     def forward(self, x):
-        xq = self.act_q(x) if self.act_q.bits is not None else x
+        xq = self.act_q(x) if self.act_q is not None else x
         wq = self.w_q(self.weight)
         return F.linear(xq, wq, self.bias)
 

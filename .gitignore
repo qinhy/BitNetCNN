@@ -181,3 +181,4 @@ cython_debug/
 .cursorindexingignore
 data/
 checkpoints/
+ckpt_c100_kd/

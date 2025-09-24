@@ -36,7 +36,7 @@ pip install -e .
 ### Training a BitNetCNN model on MNIST
 
 ```python
-python BitNetCNN.py --epochs 10 --batch-size 128 --act-bits 8 --eval-ternary
+python BitNetCNN.py --epochs 10 --batch-size 128 --act-bits 8
 ```
 
 ### Key Parameters
