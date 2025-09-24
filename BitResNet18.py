@@ -11,14 +11,14 @@ from BitNetCNN import BitConv2d, BitLinear, convert_to_ternary_p2
 # -------- BitResNet18 with CIFAR stem (3x3 s=1, no maxpool) --------
 class BasicBlockBit(nn.Module):
     expansion = 1
-    def __init__(self, inplanes, planes, stride=1, downsample=None, act_bits=8, scale_op="mean"):
+    def __init__(self, inplanes, planes, stride=1, downsample=None, scale_op="mean"):
         super().__init__()
         self.conv1 = BitConv2d(inplanes, planes, 3, stride=stride, padding=1,
-                               bias=False, act_bits=act_bits, scale_op=scale_op)
+                               bias=False, scale_op=scale_op)
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = BitConv2d(planes, planes, 3, stride=1, padding=1,
-                               bias=False, act_bits=act_bits, scale_op=scale_op)
+                               bias=False, scale_op=scale_op)
         self.bn2 = nn.BatchNorm2d(planes)
         self.downsample = downsample
 
@@ -31,7 +31,7 @@ class BasicBlockBit(nn.Module):
         return self.relu(out + identity)
 
 class BitResNetCIFAR(nn.Module):
-    def __init__(self, block, layers, num_classes=100, act_bits=8, scale_op="mean", in_ch=3,
+    def __init__(self, block, layers, num_classes=100, scale_op="mean", in_ch=3,
                  first_last_float=False):
         super().__init__()
         self.inplanes = 64
@@ -40,24 +40,24 @@ class BitResNetCIFAR(nn.Module):
             self.conv1 = nn.Conv2d(in_ch, 64, 3, stride=1, padding=1, bias=False)
         else:
             self.conv1 = BitConv2d(in_ch, 64, 3, stride=1, padding=1,
-                                   bias=False, act_bits=act_bits, scale_op=scale_op)
+                                   bias=False, scale_op=scale_op)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         # No maxpool for CIFAR
         # MaxPool2d(kernel_size=3, stride=2, padding=1, dilation=1, ceil_mode=False)
 
-        self.layer1 = self._make_layer(block, 64,  layers[0], stride=1, act_bits=act_bits, scale_op=scale_op)
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, act_bits=act_bits, scale_op=scale_op)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, act_bits=act_bits, scale_op=scale_op)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, act_bits=act_bits, scale_op=scale_op)
+        self.layer1 = self._make_layer(block, 64,  layers[0], stride=1, scale_op=scale_op)
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, scale_op=scale_op)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, scale_op=scale_op)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, scale_op=scale_op)
 
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         if first_last_float:
             self.fc = nn.Linear(512, num_classes, bias=True)
         else:
-            self.fc = BitLinear(512, num_classes, bias=True, act_bits=None, scale_op=scale_op)
+            self.fc = BitLinear(512, num_classes, bias=True, scale_op=scale_op)
 
-    def _make_layer(self, block, planes, blocks, stride, act_bits, scale_op):
+    def _make_layer(self, block, planes, blocks, stride, scale_op):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             if isinstance(self.conv1, nn.Conv2d):  # first_last_float -> keep downsample float too
@@ -68,13 +68,13 @@ class BitResNetCIFAR(nn.Module):
             else:
                 downsample = nn.Sequential(
                     BitConv2d(self.inplanes, planes * block.expansion, 1, stride=stride, bias=False,
-                              act_bits=act_bits, scale_op=scale_op),
+                              scale_op=scale_op),
                     nn.BatchNorm2d(planes * block.expansion),
                 )
-        layers = [block(self.inplanes, planes, stride, downsample, act_bits=act_bits, scale_op=scale_op)]
+        layers = [block(self.inplanes, planes, stride, downsample, scale_op=scale_op)]
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes, act_bits=act_bits, scale_op=scale_op))
+            layers.append(block(self.inplanes, planes, scale_op=scale_op))
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -84,8 +84,8 @@ class BitResNetCIFAR(nn.Module):
         x = torch.flatten(x, 1)
         return self.fc(x)
 
-def bit_resnet18_cifar(num_classes=100, act_bits=8, scale_op="mean", first_last_float=False):
-    return BitResNetCIFAR(BasicBlockBit, [2,2,2,2], num_classes, act_bits, scale_op,
+def bit_resnet18_cifar(num_classes=100, scale_op="mean", first_last_float=False):
+    return BitResNetCIFAR(BasicBlockBit, [2,2,2,2], num_classes, scale_op,
                           first_last_float=first_last_float)
 
 # -------------- KD losses --------------
@@ -248,8 +248,6 @@ def eval_top1(model, loader, device="cuda", amp=True, desc="eval"):
     use_amp = bool(amp and str(device).startswith("cuda"))
     iters = len(loader)
     iterator = loader
-    if _HAS_TQDM:
-        iterator = tqdm(loader, desc=f"{desc} (ternary)", leave=False, ncols=100)
     for x,y in iterator:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
@@ -264,7 +262,7 @@ def distill_cifar100(
     data_root="./data", out_dir="./checkpoints_c100",
     epochs=200, batch_size=128, lr=0.2, wd=5e-4, label_smoothing=0.1,
     alpha_kd=0.7, alpha_hint=0.05, T=4.0, amp=True,
-    act_bits=8, scale_op="mean", first_last_float=False, device=None
+    scale_op="mean", first_last_float=False, device=None
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -289,7 +287,7 @@ def distill_cifar100(
 
     # Student
     best_model = student = bit_resnet18_cifar(
-        num_classes=100, act_bits=act_bits, scale_op=scale_op, first_last_float=first_last_float
+        num_classes=100, scale_op=scale_op, first_last_float=first_last_float
     ).to(device)
 
     # KD components
@@ -319,7 +317,6 @@ def distill_cifar100(
         "alpha_kd": alpha_kd,
         "alpha_hint": alpha_hint,
         "T (KD)": T,
-        "act_bits": act_bits,
         "scale_op": scale_op,
         "first_last_float": first_last_float,
         "train_batches": len(train_loader),
@@ -342,11 +339,7 @@ def distill_cifar100(
         start = time.time()
 
         iterator = enumerate(train_loader, 1)
-        if _HAS_TQDM:
-            bar = tqdm(iterator, total=len(train_loader), ncols=110,
-                       desc=f"epoch {epoch:03d}/{epochs} | lr {_get_lr(opt):.4f}", leave=False)
-        else:
-            bar = iterator
+        bar = iterator
 
         end = time.time()
         for step, batch in bar:
@@ -463,6 +456,6 @@ if __name__ == "__main__":
         epochs=200, batch_size=128,
         lr=0.2, wd=5e-4, label_smoothing=0.1,
         alpha_kd=0.7, alpha_hint=0.05, T=4.0,
-        amp=True, act_bits=None, scale_op="mean",
+        amp=True, scale_op="mean",
         first_last_float=True
     )
