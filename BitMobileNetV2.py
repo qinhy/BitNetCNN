@@ -413,10 +413,6 @@ def distill_cifar100(
             opt.zero_grad(set_to_none=True)
             use_amp = bool(amp and str(device).startswith("cuda"))
 
-            # KD targets
-            with torch.inference_mode(), torch.amp.autocast("cuda", enabled=use_amp):
-                z_t = teacher(x)
-
             # Student step
             with torch.amp.autocast("cuda", enabled=use_amp):
                 z_s = student(x)
@@ -428,16 +424,22 @@ def distill_cifar100(
                     loss_ce = ce(z_s, y)
 
                 # KD in fp32
-                with torch.amp.autocast("cuda", enabled=False):
-                    loss_kd = kd(z_s.float(), z_t.float())
+                loss_kd = 0.0
+                if alpha_kd>0:
+                    # KD targets
+                    with torch.inference_mode():
+                        z_t = teacher(x)
+                    with torch.amp.autocast("cuda", enabled=False):
+                        loss_kd = kd(z_s.float(), z_t.float())
 
                 # Hints
                 loss_hint = 0.0
-                if (len(s_hint_points) > 0) and (len(t_hint_points) > 0):
-                    # pair by index
-                    for s_name, t_name in zip(s_hint_points, t_hint_points):
-                        if (s_name in s_feats) and (t_name in t_feats):
-                            loss_hint += hint(s_name, s_feats[s_name].float(), t_feats[t_name].float())
+                if alpha_hint>0:
+                    if (len(s_hint_points) > 0) and (len(t_hint_points) > 0):
+                        # pair by index
+                        for s_name, t_name in zip(s_hint_points, t_hint_points):
+                            if (s_name in s_feats) and (t_name in t_feats):
+                                loss_hint += hint(s_name, s_feats[s_name].float(), t_feats[t_name].float())
 
 
                 loss = (1.0 - alpha_kd) * loss_ce + alpha_kd * loss_kd + alpha_hint * loss_hint
@@ -449,8 +451,12 @@ def distill_cifar100(
             bs = x.size(0)
             m_loss.add(loss.item(), bs)
             m_ce.add(loss_ce.item(), bs)
-            m_kd.add(loss_kd.item(), bs)
-            m_hint.add(float(loss_hint), bs)
+
+            if alpha_kd>0:
+                m_kd.add(loss_kd.item(), bs)
+                
+            if alpha_hint>0:
+                m_hint.add(float(loss_hint), bs)
 
         sched.step()
 
@@ -480,9 +486,9 @@ def distill_cifar100(
 
         print(
             f"[{epoch:03d}/{epochs}] "
-            f"loss {m_loss.avg:.4f} (CE {m_ce.avg:.4f} | KD {m_kd.avg:.4f} | Hint {m_hint.avg:.4f}) | "
+            f"loss {m_loss.avg:.4f} (CE {m_ce.avg:.4f}, KD {m_kd.avg:.4f}, Hint {m_hint.avg:.4f}) | "
             f"top1 {top1:.2f} | float top1 {student_top1:.2f} | best {best:.2f} | "
-            f"teach_top1(est) {teach_top1_est:.2f} | "
+            f"teach_top1 {teach_top1_est:.2f} | "
             f"lr {_get_lr(opt):.4f} | "
             f"time {epoch_time:.1f}s | {ips:.0f} img/s | cuda { _cuda_mem() }"
         )
@@ -501,7 +507,7 @@ if __name__ == "__main__":
         out_dir="./ckpt_c100_kd_mbv2",
         epochs=200, batch_size=1024,
         lr=0.2, wd=5e-4, label_smoothing=0.1,
-        alpha_kd=0.7, alpha_hint=0.05, T=4.0,
+        alpha_kd=0.1, alpha_hint=0.05, T=4.0,
         amp=True, scale_op="median",
         width_mult=1.0,  # student width; try 1.0 or 0.75 for lighter
         teacher_variant="cifar100_mobilenetv2_x1_4"
