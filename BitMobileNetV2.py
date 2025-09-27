@@ -8,23 +8,25 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from torchvision import datasets, transforms
 
 # teacher weights from torch.hub
 #   repo: chenyaofo/pytorch-cifar-models
 #   models: "cifar100_mobilenetv2_x1_0", "cifar100_mobilenetv2_x1_4", etc.
-
-# ---- Your bit ops ----
 from BitNetCNN import BitConv2d, BitLinear, convert_to_ternary_p2
 
-# -------------- BitMobileNetV2 (CIFAR) --------------
-# MobileNetV2 uses inverted residual blocks:
-#   1x1 (expand) -> 3x3 DW -> 1x1 (project), with residual if stride=1 and in==out
-# For CIFAR-100 we use a CIFAR stem: 3x3 s=1 (no initial downsampling).
-# Stages follow (approx.) torchvision MobileNetV2 with stride pattern [1,2,2,2].
-# Width multiplier supported.
+# -------------------------------------------------------------
+# CIFAR-friendly MobileNetV2 built on BitNet layers.
+# Tweaks:
+#  - Uses BitConv2d / BitLinear
+#  - Removes conv biases when followed by BN
+#  - Optional SiLU activations
+#  - Weight initialization pass
+#  - Hook-friendly stage "hint" names
+#  - Utility to ternarize all Bit layers post-training
+# -------------------------------------------------------------
 
+# -------------- Utils --------------
 def _make_divisible(v, divisor=8, min_value=None):
     if min_value is None:
         min_value = divisor
@@ -33,10 +35,16 @@ def _make_divisible(v, divisor=8, min_value=None):
         new_v += divisor
     return new_v
 
+
+# -------------- Building Blocks --------------
 class ConvBNActBit(nn.Module):
-    def __init__(self, in_ch, out_ch, k, s, p, groups=1, scale_op="median", act="relu6"):
+    """
+    Conv (BitConv2d) -> BN -> Act
+    By default we set bias=False since BN follows.
+    """
+    def __init__(self, in_ch, out_ch, k, s, p, groups=1, scale_op="median", act="silu"):
         super().__init__()
-        self.conv = BitConv2d(in_ch, out_ch, k, stride=s, padding=p, bias=True,
+        self.conv = BitConv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
                               groups=groups, scale_op=scale_op)
         self.bn   = nn.BatchNorm2d(out_ch)
         if act == "relu6":
@@ -48,8 +56,16 @@ class ConvBNActBit(nn.Module):
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
 
+
 class InvertedResidualBit(nn.Module):
-    def __init__(self, inp, oup, stride, expand_ratio, scale_op="median"):
+    """
+    Inverted residual block:
+      - Optional 1x1 expand
+      - 3x3 depthwise
+      - 1x1 project (linear), BN only (no activation)
+      - Residual if stride==1 and input channels == output channels
+    """
+    def __init__(self, inp, oup, stride, expand_ratio, scale_op="median", act="silu"):
         super().__init__()
         assert stride in [1, 2]
         hidden_dim = int(round(inp * expand_ratio))
@@ -57,12 +73,14 @@ class InvertedResidualBit(nn.Module):
         layers = []
         # pw (expand)
         if expand_ratio != 1:
-            layers.append(ConvBNActBit(inp, hidden_dim, 1, 1, 0, scale_op=scale_op))
+            layers.append(ConvBNActBit(inp, hidden_dim, 1, 1, 0, scale_op=scale_op, act=act))
         # dw
-        layers.append(ConvBNActBit(hidden_dim, hidden_dim, 3, stride, 1,
-                                   groups=hidden_dim, scale_op=scale_op))
-        # pw-linear (project) -> BN only, no nonlinearity
-        layers.append(BitConv2d(hidden_dim, oup, 1, 1, 0, bias=True, scale_op=scale_op))
+        layers.append(
+            ConvBNActBit(hidden_dim, hidden_dim, 3, stride, 1,
+                         groups=hidden_dim, scale_op=scale_op, act=act)
+        )
+        # pw-linear (project): BN only afterwards, so bias=False
+        layers.append(BitConv2d(hidden_dim, oup, 1, 1, 0, bias=False, scale_op=scale_op))
         layers.append(nn.BatchNorm2d(oup))
         self.block = nn.Sequential(*layers)
 
@@ -72,25 +90,19 @@ class InvertedResidualBit(nn.Module):
             out = x + out
         return out
 
+
+# -------------- Model --------------
 class BitMobileNetV2(nn.Module):
     """
     CIFAR-friendly BitMobileNetV2:
-      - stem: 3x3 s=1, no maxpool
-      - stages per MobileNetV2 setting
+      - stem: 3x3 s=1 (no initial downsample; CIFAR is 32x32)
+      - stride pattern approx. torchvision MobileNetV2 on ImageNet:
+        [1, 2, 2, 2] across stages after the stem
     """
-    def __init__(self, num_classes=100, width_mult=1.0, round_nearest=8, scale_op="median", in_ch=3):
+    def __init__(self, num_classes=100, width_mult=1.0, round_nearest=8,
+                 scale_op="median", in_ch=3, act="silu", last_channel_override=None):
         super().__init__()
-        # MobileNetV2 default setting: t (expand), c (channels), n (#blocks), s (stride first)
-        # Standard ImageNet setting:
-        #   (t,c,n,s):
-        #   (1, 16, 1, 1)
-        #   (6, 24, 2, 2)
-        #   (6, 32, 3, 2)
-        #   (6, 64, 4, 2)
-        #   (6, 96, 3, 1)
-        #   (6, 160, 3, 2)
-        #   (6, 320, 1, 1)
-        # For CIFAR, keep strides but first stem stride=1 (we're already 32x32).
+        # MobileNetV2 default setting: (t, c, n, s)
         setting = [
             # t,  c,  n,  s
             [1,  16, 1, 1],
@@ -103,34 +115,68 @@ class BitMobileNetV2(nn.Module):
         ]
 
         input_channel = _make_divisible(32 * width_mult, round_nearest)
-        last_channel  = _make_divisible(1280 * max(1.0, width_mult), round_nearest)
+        if last_channel_override is not None:
+            last_channel = _make_divisible(last_channel_override * max(1.0, width_mult), round_nearest)
+        else:
+            last_channel = _make_divisible(1280 * max(1.0, width_mult), round_nearest)
 
-        # CIFAR stem: 3x3 s=1
-        self.stem = ConvBNActBit(in_ch, input_channel, k=3, s=1, p=1, scale_op=scale_op)
+        # Stem: 3x3 s=1
+        self.stem = ConvBNActBit(in_ch, input_channel, k=3, s=1, p=1, scale_op=scale_op, act=act)
 
-        # stages
+        # Stages
         features = []
-        block_id = 0
         self.hint_names = []  # collect ids for hint hooks (after each stage)
         for t, c, n, s in setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
                 stride = s if i == 0 else 1
                 features.append(
-                    InvertedResidualBit(input_channel, output_channel, stride, expand_ratio=t, scale_op=scale_op)
+                    InvertedResidualBit(input_channel, output_channel, stride,
+                                        expand_ratio=t, scale_op=scale_op, act=act)
                 )
                 input_channel = output_channel
-                block_id += 1
             # mark hint after finishing this stage
             self.hint_names.append(f"features.{len(features)-1}")
 
         self.features = nn.Sequential(*features)
 
-        # head
-        self.head_conv = ConvBNActBit(input_channel, last_channel, k=1, s=1, p=0, scale_op=scale_op)
-        self.pool      = nn.AdaptiveAvgPool2d(1)
+        # Head
+        self.head_conv  = ConvBNActBit(input_channel, last_channel, k=1, s=1, p=0,
+                                       scale_op=scale_op, act=act)
+        self.pool       = nn.AdaptiveAvgPool2d(1)
         self.classifier = BitLinear(last_channel, num_classes, bias=True, scale_op=scale_op)
 
+        # Init
+        self._init_weights()
+
+    # ---------- Utilities ----------
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, BitConv2d):
+                # He init is fine even with SiLU/ReLU6; BitConv2d should hold .weight
+                if hasattr(m, "weight") and isinstance(m.weight, torch.Tensor):
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if hasattr(m, "bias") and m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, BitLinear):
+                if hasattr(m, "weight") and isinstance(m.weight, torch.Tensor):
+                    nn.init.normal_(m.weight, 0.0, 0.01)
+                if hasattr(m, "bias") and m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def get_submodule(self, name: str) -> nn.Module:
+        """
+        Retrieve a nested submodule by dotted path (e.g., 'features.12').
+        """
+        mod = self
+        for attr in name.split('.'):
+            mod = getattr(mod, attr)
+        return mod
+
+    # ---------- Forward ----------
     def forward(self, x):
         x = self.stem(x)
         x = self.features(x)
@@ -139,9 +185,20 @@ class BitMobileNetV2(nn.Module):
         x = self.classifier(x)
         return x
 
-def bit_mobilenetv2_cifar(num_classes=100, width_mult=1.0, scale_op="median"):
-    return BitMobileNetV2(num_classes=num_classes, width_mult=width_mult, scale_op=scale_op)
 
+# -------------- Factory --------------
+def bit_mobilenetv2_cifar(num_classes=100, width_mult=1.0, scale_op="median",
+                          in_ch=3, act="silu", last_channel_override=None):
+    """
+    Factory for BitMobileNetV2.
+    - last_channel_override: set e.g. 1024 for smaller heads on tiny models.
+    """
+    return BitMobileNetV2(num_classes=num_classes,
+                          width_mult=width_mult,
+                          scale_op=scale_op,
+                          in_ch=in_ch,
+                          act=act,
+                          last_channel_override=last_channel_override)
 # -------------- KD losses --------------
 class KDLoss(nn.Module):
     def __init__(self, T=4.0): super().__init__(); self.T=T
@@ -322,7 +379,7 @@ def distill_cifar100(
 
     # Hints: tap the last block of each MobileNetV2 stage
     # Student hint names are populated inside BitMobileNetV2 as "features.{idx}"
-    s_hint_points = getattr(student, "hint_names", [])
+    s_hint_points = student.hint_names
     # For teacher, pick roughly corresponding modules: try to find "features.{idx}" too (torchvision-like)
     # Fallback: if names don't exist, hooks dict will stay partially empty and it's fine.
     t_hint_points = []
@@ -507,7 +564,7 @@ if __name__ == "__main__":
         out_dir="./ckpt_c100_kd_mbv2",
         epochs=200, batch_size=1024,
         lr=0.2, wd=5e-4, label_smoothing=0.1,
-        alpha_kd=0.1, alpha_hint=0.05, T=4.0,
+        alpha_kd=0.5, alpha_hint=0.1, T=4.0,
         amp=True, scale_op="median",
         width_mult=1.0,  # student width; try 1.0 or 0.75 for lighter
         teacher_variant="cifar100_mobilenetv2_x1_4"
