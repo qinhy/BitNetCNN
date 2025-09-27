@@ -183,3 +183,4 @@ data/
 checkpoints/
 ckpt_c100_kd/
 /mnist_ckpt
+/ckpt_c100_kd_mbv2
