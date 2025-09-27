@@ -182,3 +182,4 @@ cython_debug/
 data/
 checkpoints/
 ckpt_c100_kd/
+/mnist_ckpt
