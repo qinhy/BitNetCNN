@@ -353,9 +353,9 @@ def get_loaders_int8(data_dir, batch_size, Q=14, num_workers=0, pin_memory=False
                               collate_fn=int8_collate)
     return train_loader, test_loader
 
-def evaluate(model, loader, device, use_ternary=False):
+def evaluate(model, loader, device):
     # Build an eval copy so we never mutate the training graph
-    model_eval = convert_to_ternary_p2(copy.deepcopy(model)).to(device).eval() if use_ternary else model.eval()
+    model_eval = model.eval()
     total_loss, total_acc, n = 0.0, 0.0, 0
     crit = nn.CrossEntropyLoss()
     with torch.inference_mode():
@@ -369,13 +369,14 @@ def evaluate(model, loader, device, use_ternary=False):
             n += bs
     return total_loss / n, total_acc / n
 
-def train(args):
+def train(args,model=None):
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     torch.manual_seed(args.seed)
     train_loader, test_loader = get_loaders_int8(args.data, args.batch_size)
 
     # 1-channel in, 10 classes out
-    model = BitNetCNN(in_channels=1, num_classes=10, scale_op=args.scale_op).to(device)
+    if model is None:
+        model = BitNetCNN(in_channels=1, num_classes=10, scale_op=args.scale_op).to(device)
     best_model = copy.deepcopy(model)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {num_params/1e6:.2f}M  | Device: {device}")
@@ -402,10 +403,12 @@ def train(args):
             total_loss += loss.item() * y.size(0)
 
         train_loss = total_loss / total
-        test_loss, test_acc = evaluate(model, test_loader, device, use_ternary=not args.no_eval_ternary)
+        test_loss, test_acc = evaluate(convert_to_ternary_p2(copy.deepcopy(model)).to(device), test_loader, device)
+        train_val_loss, train_val_acc = evaluate(model, test_loader, device)
+        
 
         print(f"Epoch {epoch:02d} | train_loss {train_loss:.4f} | test_loss {test_loss:.4f} | "
-              f"test_acc {test_acc*100:.2f}% | epoch_time {time.time()-t0:.1f}s")
+              f"test_acc {test_acc*100:.2f}% | train_val_acc {train_val_acc*100:.2f}% | epoch_time {time.time()-t0:.1f}s")
 
         # Save the best
         if test_acc > best_acc:
@@ -430,7 +433,7 @@ def train(args):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--data", type=str, default="./data", help="MNIST data dir")
-    p.add_argument("--out",  type=str, default="./checkpoints", help="where to save checkpoints")
+    p.add_argument("--out",  type=str, default="./mnist_ckpt", help="where to save checkpoints")
     p.add_argument("--epochs", type=int, default=6)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=2e-3)
