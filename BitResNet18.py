@@ -226,8 +226,10 @@ class LitBitResNetKD(pl.LightningModule):
                                           'self._ternary_snapshot'])
         self.scale_op = scale_op
         self.student = BitResNetCIFAR(BasicBlockBit, [2,2,2,2], 100, scale_op)
-        self.teacher = make_resnet18_cifar_teacher_from_hf(device="cpu")  # will move in setup
-        for p in self.teacher.parameters(): p.requires_grad_(False)
+        self.teacher = None
+        if alpha_kd>0:
+            self.teacher = make_resnet18_cifar_teacher_from_hf(device="cpu")  # will move in setup
+            for p in self.teacher.parameters(): p.requires_grad_(False)
         self.ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing).eval()
         self.kd = KDLoss(T=T).eval()
         self.hint = AdaptiveHintLoss().eval()
@@ -240,12 +242,13 @@ class LitBitResNetKD(pl.LightningModule):
         self._s_feats = {}
 
     def setup(self, stage=None):
-        # move teacher to device once strategy is set
-        self.teacher = self.teacher.to(self.device).eval()
-        # register hooks AFTER moving
-        self._t_feats, self._s_feats = {}, {}
-        self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats)
-        self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats)
+        if self.teacher:
+            # move teacher to device once strategy is set
+            self.teacher = self.teacher.to(self.device).eval()
+            # register hooks AFTER moving
+            self._t_feats, self._s_feats = {}, {}
+            self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats)
+            self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats)
 
 
     def teardown(self, stage=None):
@@ -291,10 +294,6 @@ class LitBitResNetKD(pl.LightningModule):
             y_a, y_b, lam = y
         use_amp = bool(self.hparams.amp and "cuda" in str(self.device))
 
-        with torch.no_grad():
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                z_t = self.teacher(x)
-
         with torch.amp.autocast("cuda", enabled=use_amp):
             z_s = self.student(x)
             if is_mix:
@@ -302,9 +301,13 @@ class LitBitResNetKD(pl.LightningModule):
             else:
                 loss_ce = self.ce(z_s, y)
 
-            # KD in fp32 for stability
-            with torch.amp.autocast("cuda", enabled=False):
-                loss_kd = self.kd(z_s.float(), z_t.float())
+            loss_kd = 0.0
+            if self.hparams.alpha_kd>0:
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    z_t = self.teacher(x)
+                # KD in fp32 for stability
+                with torch.amp.autocast("cuda", enabled=False):
+                    loss_kd = self.kd(z_s.float(), z_t.float())
 
             loss_hint = 0.0
             if self.hparams.alpha_hint > 0:
@@ -337,7 +340,8 @@ class LitBitResNetKD(pl.LightningModule):
                         
             # logits_fp = self.teacher(x)
             # acc_fp = self.acc_fp(logits_fp.softmax(1), y)
-            self.log("val/t_acc_fp", 0.750, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+            if self.hparams.alpha_kd>0:
+                self.log("val/t_acc_fp", 0.750, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
     def configure_optimizers(self):
         opt = torch.optim.SGD(
@@ -394,11 +398,11 @@ def parse_args():
     p.add_argument("--out",  type=str, default="./ckpt_c100_kd")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=512)
-    p.add_argument("--lr", type=float, default=0.2)
+    p.add_argument("--lr", type=float, default=2e-1)
     p.add_argument("--wd", type=float, default=5e-4)
     p.add_argument("--label-smoothing", type=float, default=0.1)
-    p.add_argument("--alpha-kd", type=float, default=0.7)
-    p.add_argument("--alpha-hint", type=float, default=0.05)
+    p.add_argument("--alpha-kd", type=float, default=0.0)#0.7)
+    p.add_argument("--alpha-hint", type=float, default=0.0)#0.05)
     p.add_argument("--T", type=float, default=4.0)
     p.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
     p.add_argument("--amp", action="store_true")
