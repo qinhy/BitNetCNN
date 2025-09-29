@@ -293,7 +293,7 @@ class InvertedResidualBit(nn.Module):
 
 
 class NetCNN(nn.Module):
-    def __init__(self, in_channels=1, num_classes=10, scale_op="median",
+    def __init__(self, in_channels=1, num_classes=10, expand_ratio = 5,
                  drop2d_p=0.05, drop_p=0.1, mod=nn):
         super().__init__()
         if mod==nn:
@@ -301,27 +301,27 @@ class NetCNN(nn.Module):
         elif mod==Bit:
             self.is_bit = True
             
-        hid = 6
+        
         self.stem = nn.Sequential(
-            mod.Conv2d(in_channels, 2**hid, kernel_size=3, stride=1, padding=1,
+            mod.Conv2d(in_channels, 2**expand_ratio, kernel_size=3, stride=1, padding=1,
                       bias=True),
-            nn.BatchNorm2d(2**hid),
+            nn.BatchNorm2d(2**expand_ratio),
             nn.SiLU(inplace=True),
         )
 
-        self.stage1 = InvertedResidualBit(2**hid, 2**(hid+1), expand=2, stride=2)
+        self.stage1 = InvertedResidualBit(2**expand_ratio, 2**(expand_ratio+1), expand=2, stride=2)
         self.sd1 = nn.Dropout2d(p=drop2d_p)
 
-        self.stage2 = InvertedResidualBit(2**(hid+1), 2**(hid+2), expand=2, stride=2)
+        self.stage2 = InvertedResidualBit(2**(expand_ratio+1), 2**(expand_ratio+2), expand=2, stride=2)
         self.sd2 = nn.Dropout2d(p=drop2d_p)
 
-        self.stage3 = InvertedResidualBit(2**(hid+2), 2**(hid+3), expand=2, stride=2)
+        self.stage3 = InvertedResidualBit(2**(expand_ratio+2), 2**(expand_ratio+3), expand=2, stride=2)
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Dropout(p=drop_p),
-            mod.Linear(2**(hid+3), num_classes, bias=True),
+            mod.Linear(2**(expand_ratio+3), num_classes, bias=True),
         )
 
     def forward(self, x):
@@ -377,10 +377,10 @@ class MNISTDataModule(pl.LightningDataModule):
 # LightningModule
 # ----------------------------
 class LitNetCNN(pl.LightningModule):
-    def __init__(self, lr=2e-3, wd=1e-4, epochs=120, scale_op="median", eval_ternary=True, mod=Bit):
+    def __init__(self,lr, wd, epochs, expand_ratio=5, eval_ternary=True, mod=Bit):
         super().__init__()
         self.save_hyperparameters(ignore=['mod'])
-        self.model = NetCNN(in_channels=1, num_classes=10, scale_op=scale_op, mod=mod)
+        self.model = NetCNN(in_channels=1, num_classes=10, mod=mod, expand_ratio=expand_ratio)
         self.crit = nn.CrossEntropyLoss()
         self.acc_fp = MulticlassAccuracy(num_classes=10)
         self.acc_tern = MulticlassAccuracy(num_classes=10) if eval_ternary else None
@@ -417,6 +417,7 @@ class LitNetCNN(pl.LightningModule):
         return loss
 
     def on_validation_epoch_start(self):
+        print()
         # Build one frozen ternary snapshot per epoch (like your evaluate(model.ternary_p2()))
         if self.hparams.eval_ternary:
             self._ternary_snapshot = self.model.ternary_p2().to(self.device).eval()
@@ -512,9 +513,10 @@ def train(mod=Bit):
 
     # Model
     lit_model = LitNetCNN(
-        lr=args.lr, wd=args.wd, epochs=args.epochs, scale_op=args.scale_op,
+        lr=args.lr, wd=args.wd, epochs=args.epochs,
         eval_ternary=not args.no_eval_ternary,
-        mod=mod
+        mod=mod,
+        expand_ratio=5,
     )
 
     # Logging & callbacks
@@ -522,7 +524,6 @@ def train(mod=Bit):
     logger = CSVLogger(save_dir=args.out, name="logs")
     monitor_metric = "val_acc_ternary" if not args.no_eval_ternary else "val_acc"
     ckpt_cb = ModelCheckpoint(
-        dirpath=args.out, filename="mnist_bitnet",
         monitor=monitor_metric, mode="max", save_top_k=1, save_last=True
     )
     lr_cb = LearningRateMonitor(logging_interval="epoch")
