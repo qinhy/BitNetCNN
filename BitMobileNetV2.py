@@ -42,14 +42,12 @@ class ConvBNActBit(nn.Module):
         self.conv = Bit.Conv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
                               groups=groups, scale_op=scale_op)
         self.bn   = nn.BatchNorm2d(out_ch)
-
         if act == "relu6":
             self.act = nn.ReLU6(inplace=True)
         elif act == "silu":
             self.act = nn.SiLU(inplace=True)
         else:
             self.act = nn.Identity()
-            
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
 
@@ -403,13 +401,10 @@ class LitBitMBv2KD(pl.LightningModule):
                 self.log("val/t_acc_fp", 0.760, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
     def configure_optimizers(self):
-        # opt = torch.optim.SGD(
-        #     list(self.student.parameters()) + list(self.hint.parameters()),
-        #     lr=self.hparams.lr, momentum=0.9, weight_decay=self.hparams.wd, nesterov=True
-        # )
-        
-        opt = torch.optim.AdamW(self.student.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.wd)
-
+        opt = torch.optim.SGD(
+            list(self.student.parameters()) + list(self.hint.parameters()),
+            lr=self.hparams.lr, momentum=0.9, weight_decay=self.hparams.wd, nesterov=True
+        )
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.hparams.epochs)
         return {
             "optimizer": opt,
@@ -456,8 +451,8 @@ def parse_args():
     p.add_argument("--out",  type=str, default="./ckpt_c100_kd_mbv2")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=512)
-    p.add_argument("--lr", type=float, default=8e-4)
-    p.add_argument("--wd", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=2e-1)
+    p.add_argument("--wd", type=float, default=5e-4)
     p.add_argument("--label-smoothing", type=float, default=0.1)
     p.add_argument("--alpha-kd", type=float, default=0.0)   # set >0 to enable KD
     p.add_argument("--alpha-hint", type=float, default=0.0) # set >0 to enable feature hints
