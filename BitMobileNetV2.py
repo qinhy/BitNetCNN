@@ -1,32 +1,33 @@
 # ===============================================
-# CIFAR-100 KD: MobileNetV2 (teacher) -> BitMobileNetV2 (student)
+# CIFAR-100 KD (PyTorch Lightning):
+#   MobileNetV2 (teacher, torch.hub)
+#   -> BitMobileNetV2 (student, Bit.Conv2d/Bit.Linear)
 # ===============================================
-import os
-import time
-import math
-import copy
+import os, math, copy, argparse
+from functools import partial
+
 import torch
+torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-# teacher weights from torch.hub
-#   repo: chenyaofo/pytorch-cifar-models
-#   models: "cifar100_mobilenetv2_x1_0", "cifar100_mobilenetv2_x1_4", etc.
-from BitNetCNN import BitConv2d, BitLinear, convert_to_ternary_p2
+# --- Lightning ---
+import pytorch_lightning as pl
+from pytorch_lightning import Callback
+from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from torchmetrics.classification import MulticlassAccuracy
 
-# -------------------------------------------------------------
-# CIFAR-friendly MobileNetV2 built on BitNet layers.
-# Tweaks:
-#  - Uses BitConv2d / BitLinear
-#  - Removes conv biases when followed by BN
-#  - Optional SiLU activations
-#  - Weight initialization pass
-#  - Hook-friendly stage "hint" names
-#  - Utility to ternarize all Bit layers post-training
-# -------------------------------------------------------------
+# --- your bit modules ---
+from BitNetCNN import Bit, convert_to_ternary_p2
 
-# -------------- Utils --------------
+EPS = 1e-12
+
+# ----------------------------
+# MobileNetV2 (Bit) blocks
+# ----------------------------
 def _make_divisible(v, divisor=8, min_value=None):
     if min_value is None:
         min_value = divisor
@@ -35,52 +36,35 @@ def _make_divisible(v, divisor=8, min_value=None):
         new_v += divisor
     return new_v
 
-
-# -------------- Building Blocks --------------
 class ConvBNActBit(nn.Module):
-    """
-    Conv (BitConv2d) -> BN -> Act
-    By default we set bias=False since BN follows.
-    """
     def __init__(self, in_ch, out_ch, k, s, p, groups=1, scale_op="median", act="silu"):
         super().__init__()
-        self.conv = BitConv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
+        self.conv = Bit.Conv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
                               groups=groups, scale_op=scale_op)
         self.bn   = nn.BatchNorm2d(out_ch)
+
         if act == "relu6":
             self.act = nn.ReLU6(inplace=True)
         elif act == "silu":
             self.act = nn.SiLU(inplace=True)
         else:
             self.act = nn.Identity()
+            
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
 
-
 class InvertedResidualBit(nn.Module):
-    """
-    Inverted residual block:
-      - Optional 1x1 expand
-      - 3x3 depthwise
-      - 1x1 project (linear), BN only (no activation)
-      - Residual if stride==1 and input channels == output channels
-    """
     def __init__(self, inp, oup, stride, expand_ratio, scale_op="median", act="silu"):
         super().__init__()
         assert stride in [1, 2]
         hidden_dim = int(round(inp * expand_ratio))
         self.use_res_connect = (stride == 1 and inp == oup)
         layers = []
-        # pw (expand)
         if expand_ratio != 1:
             layers.append(ConvBNActBit(inp, hidden_dim, 1, 1, 0, scale_op=scale_op, act=act))
-        # dw
-        layers.append(
-            ConvBNActBit(hidden_dim, hidden_dim, 3, stride, 1,
-                         groups=hidden_dim, scale_op=scale_op, act=act)
-        )
-        # pw-linear (project): BN only afterwards, so bias=False
-        layers.append(BitConv2d(hidden_dim, oup, 1, 1, 0, bias=False, scale_op=scale_op))
+        layers.append(ConvBNActBit(hidden_dim, hidden_dim, 3, stride, 1,
+                                   groups=hidden_dim, scale_op=scale_op, act=act))
+        layers.append(Bit.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False, scale_op=scale_op))
         layers.append(nn.BatchNorm2d(oup))
         self.block = nn.Sequential(*layers)
 
@@ -90,21 +74,17 @@ class InvertedResidualBit(nn.Module):
             out = x + out
         return out
 
-
-# -------------- Model --------------
 class BitMobileNetV2(nn.Module):
     """
     CIFAR-friendly BitMobileNetV2:
-      - stem: 3x3 s=1 (no initial downsample; CIFAR is 32x32)
-      - stride pattern approx. torchvision MobileNetV2 on ImageNet:
-        [1, 2, 2, 2] across stages after the stem
+      - 3x3 s=1 stem
+      - MobileNetV2 setting (CIFAR-sized)
+      - Collects stage-end names in self.hint_names for hooks
     """
     def __init__(self, num_classes=100, width_mult=1.0, round_nearest=8,
                  scale_op="median", in_ch=3, act="silu", last_channel_override=None):
         super().__init__()
-        # MobileNetV2 default setting: (t, c, n, s)
         setting = [
-            # t,  c,  n,  s
             [1,  16, 1, 1],
             [6,  24, 2, 2],
             [6,  32, 3, 2],
@@ -113,19 +93,16 @@ class BitMobileNetV2(nn.Module):
             [6, 160, 3, 2],
             [6, 320, 1, 1],
         ]
-
         input_channel = _make_divisible(32 * width_mult, round_nearest)
         if last_channel_override is not None:
             last_channel = _make_divisible(last_channel_override * max(1.0, width_mult), round_nearest)
         else:
             last_channel = _make_divisible(1280 * max(1.0, width_mult), round_nearest)
 
-        # Stem: 3x3 s=1
         self.stem = ConvBNActBit(in_ch, input_channel, k=3, s=1, p=1, scale_op=scale_op, act=act)
 
-        # Stages
         features = []
-        self.hint_names = []  # collect ids for hint hooks (after each stage)
+        self.hint_names = []
         for t, c, n, s in setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
@@ -135,437 +112,407 @@ class BitMobileNetV2(nn.Module):
                                         expand_ratio=t, scale_op=scale_op, act=act)
                 )
                 input_channel = output_channel
-            # mark hint after finishing this stage
             self.hint_names.append(f"features.{len(features)-1}")
-
         self.features = nn.Sequential(*features)
 
-        # Head
         self.head_conv  = ConvBNActBit(input_channel, last_channel, k=1, s=1, p=0,
                                        scale_op=scale_op, act=act)
         self.pool       = nn.AdaptiveAvgPool2d(1)
-        self.classifier = BitLinear(last_channel, num_classes, bias=True, scale_op=scale_op)
+        self.classifier = Bit.Linear(last_channel, num_classes, bias=True, scale_op=scale_op)
 
-        # Init
         self._init_weights()
 
-    # ---------- Utilities ----------
     def _init_weights(self):
         for m in self.modules():
-            if isinstance(m, BitConv2d):
-                # He init is fine even with SiLU/ReLU6; BitConv2d should hold .weight
+            if isinstance(m, Bit.Conv2d):
                 if hasattr(m, "weight") and isinstance(m.weight, torch.Tensor):
                     nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if hasattr(m, "bias") and m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, BitLinear):
+                nn.init.ones_(m.weight); nn.init.zeros_(m.bias)
+            elif isinstance(m, Bit.Linear):
                 if hasattr(m, "weight") and isinstance(m.weight, torch.Tensor):
                     nn.init.normal_(m.weight, 0.0, 0.01)
                 if hasattr(m, "bias") and m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def get_submodule(self, name: str) -> nn.Module:
-        """
-        Retrieve a nested submodule by dotted path (e.g., 'features.12').
-        """
-        mod = self
-        for attr in name.split('.'):
-            mod = getattr(mod, attr)
-        return mod
-
-    # ---------- Forward ----------
     def forward(self, x):
         x = self.stem(x)
         x = self.features(x)
         x = self.head_conv(x)
         x = self.pool(x).flatten(1)
-        x = self.classifier(x)
-        return x
+        return self.classifier(x)
 
-
-# -------------- Factory --------------
 def bit_mobilenetv2_cifar(num_classes=100, width_mult=1.0, scale_op="median",
                           in_ch=3, act="silu", last_channel_override=None):
-    """
-    Factory for BitMobileNetV2.
-    - last_channel_override: set e.g. 1024 for smaller heads on tiny models.
-    """
     return BitMobileNetV2(num_classes=num_classes,
                           width_mult=width_mult,
                           scale_op=scale_op,
                           in_ch=in_ch,
                           act=act,
                           last_channel_override=last_channel_override)
-# -------------- KD losses --------------
+
+# ----------------------------
+# KD losses & feature hints
+# ----------------------------
 class KDLoss(nn.Module):
     def __init__(self, T=4.0): super().__init__(); self.T=T
     def forward(self, z_s, z_t):
         T = self.T
         return F.kl_div(F.log_softmax(z_s/T,1), F.softmax(z_t/T,1), reduction="batchmean") * (T*T)
 
-# Optional: feature hints (stage outputs)
 class AdaptiveHintLoss(nn.Module):
-    """
-    Per-point learnable 1x1 projection + adaptive pooling so student feature
-    matches teacher's (N, C_t, H_t, W_t) before SmoothL1.
-    Stored in a ModuleDict using sanitized keys (no dots).
-    """
+    """Learnable 1x1 per hint; auto matches spatial size then SmoothL1."""
     def __init__(self):
         super().__init__()
-        self.proj = nn.ModuleDict()  # safe_key -> Conv2d
-
-    @staticmethod
-    def _safe(name: str) -> str:
-        # Module names cannot contain dots in ModuleDict keys
+        self.proj = nn.ModuleDict()
+    def _safe(self, name: str) -> str:
         return name.replace(".", "_")
-
     def forward(self, name, f_s, f_t):
-        # 1) spatial match
         f_s = F.adaptive_avg_pool2d(f_s, f_t.shape[-2:])
-
-        # 2) get/create a 1x1 projection for this hint point
         c_s, c_t = f_s.shape[1], f_t.shape[1]
         key = self._safe(name)
-
-        if key not in self.proj:
+        if key not in self.proj or \
+           self.proj[key].in_channels != c_s or self.proj[key].out_channels != c_t:
             self.proj[key] = nn.Conv2d(c_s, c_t, kernel_size=1, bias=True).to(f_s.device)
-        else:
-            # if channels changed across re-runs / width multipliers, rebuild
-            need_reset = (
-                self.proj[key].in_channels  != c_s or
-                self.proj[key].out_channels != c_t
-            )
-            if need_reset:
-                self.proj[key] = nn.Conv2d(c_s, c_t, kernel_size=1, bias=True).to(f_s.device)
-
         f_s = self.proj[key](f_s)
         return F.smooth_l1_loss(f_s, f_t.detach())
 
-def make_feature_hooks(module, names):
-    feats = {}
+class SaveOutputHook:
+    __slots__ = ("store", "key")
+    def __init__(self, store: dict, key: str):
+        self.store = store; self.key = key
+    def __call__(self, module, module_in, module_out):
+        self.store[self.key] = module_out
+
+def make_feature_hooks(module: nn.Module, names, store: dict):
     handles = []
-    def hook(name):
-        def fwd_hook(_m, _inp, out): feats[name] = out
-        return fwd_hook
+    name_set = set(names)
     for n, sub in module.named_modules():
-        if n in names:
-            handles.append(sub.register_forward_hook(hook(n)))
-    return feats, handles
+        if n in name_set:
+            handles.append(sub.register_forward_hook(SaveOutputHook(store, n)))
+    return handles
 
-# -------------- Data (CIFAR-100) --------------
-def cifar100_loaders(root, batch_size=128, workers=4, aug_cutmix=False, aug_mixup=False):
-    mean = (0.5071,0.4867,0.4408); std=(0.2675,0.2565,0.2761)
-    train_tf = [transforms.RandomHorizontalFlip(),
-                transforms.RandomCrop(32, padding=4),
-                transforms.RandomRotation(10),
-                transforms.ToTensor(),
-                transforms.Normalize(mean,std),
-                ]
-    val_tf   = [transforms.ToTensor(), 
-                transforms.Normalize(mean,std),
-                ]
-    train = datasets.CIFAR100(root=root, train=True, download=True, transform=transforms.Compose(train_tf))
-    val   = datasets.CIFAR100(root=root, train=False, download=True, transform=transforms.Compose(val_tf))
+# ----------------------------
+# CIFAR-100 DataModule (mixup/cutmix optional)
+# ----------------------------
+def mix_collate(batch, *, aug_cutmix: bool, aug_mixup: bool, alpha: float):
+    xs, ys = zip(*batch)
+    x = torch.stack(xs); y = torch.tensor(ys)
+    if not (aug_cutmix or aug_mixup):
+        return x, y
+    import random
+    if aug_cutmix and random.random() < 0.5:
+        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        idx = torch.randperm(x.size(0))
+        h, w = x.size(2), x.size(3)
+        rx, ry = torch.randint(w, (1,)).item(), torch.randint(h, (1,)).item()
+        rw = int(w * math.sqrt(1 - lam)); rh = int(h * math.sqrt(1 - lam))
+        x1, y1 = max(rx - rw//2, 0), max(ry - rh//2, 0)
+        x2, y2 = min(rx + rw//2, w), min(ry + rh//2, h)
+        x[:, :, y1:y2, x1:x2] = x[idx, :, y1:y2, x1:x2]
+        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
+        return x, (y, y[idx], lam)
+    else:
+        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        idx = torch.randperm(x.size(0))
+        x = lam * x + (1 - lam) * x[idx]
+        return x, (y, y[idx], lam)
 
-    loader_train = torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True,
-                                               num_workers=workers, pin_memory=True, drop_last=True,
-                                               persistent_workers=True if workers > 0 else False)
-    loader_val   = torch.utils.data.DataLoader(val, batch_size=256, shuffle=False,
-                                               num_workers=workers, pin_memory=True,
-                                               persistent_workers=True if workers > 0 else False)
+class CIFAR100DataModule(pl.LightningDataModule):
+    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
+                 aug_mixup: bool = False, aug_cutmix: bool = False, alpha: float = 1.0):
+        super().__init__()
+        self.data_dir, self.batch_size, self.num_workers = data_dir, batch_size, num_workers
+        self.aug_mixup, self.aug_cutmix, self.alpha = aug_mixup, aug_cutmix, alpha
 
-    if aug_cutmix or aug_mixup:
-        def mix_collate(batch, alpha=1.0, cutmix=aug_cutmix, mixup=aug_mixup):
-            import random
-            xs, ys = zip(*batch); x = torch.stack(xs); y = torch.tensor(ys)
-            if cutmix and random.random() < 0.5:
-                lam = torch.distributions.Beta(alpha,alpha).sample().item()
-                idx = torch.randperm(x.size(0))
-                h,w = x.size(2), x.size(3)
-                rx, ry = torch.randint(w,(1,)).item(), torch.randint(h,(1,)).item()
-                rw = int(w*math.sqrt(1-lam)); rh = int(h*math.sqrt(1-lam))
-                x1, y1 = max(rx-rw//2,0), max(ry-rh//2,0)
-                x2, y2 = min(rx+rw//2,w), min(ry+rh//2,h)
-                x[:, :, y1:y2, x1:x2] = x[idx, :, y1:y2, x1:x2]
-                lam = 1 - ((x2-x1)*(y2-y1)/(w*h))
-                y = (y, y[idx], lam)
-            elif mixup:
-                lam = torch.distributions.Beta(alpha,alpha).sample().item()
-                idx = torch.randperm(x.size(0))
-                x = lam*x + (1-lam)*x[idx]
-                y = (y, y[idx], lam)
-            return x, y
-        loader_train = torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True,
-                                                   num_workers=workers, pin_memory=True, drop_last=True,
-                                                   collate_fn=mix_collate)
-    return loader_train, loader_val
+    def setup(self, stage=None):
+        mean = (0.5071,0.4867,0.4408); std=(0.2675,0.2565,0.2761)
+        train_tf = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomRotation(10),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        val_tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
+        self.train_ds = datasets.CIFAR100(root=self.data_dir, train=True,  download=True, transform=train_tf)
+        self.val_ds   = datasets.CIFAR100(root=self.data_dir, train=False, download=True, transform=val_tf)
 
-# ---------- utils: pretty logging ----------
-class AvgMeter:
-    __slots__ = ("n","sum")
-    def __init__(self): self.n=0; self.sum=0.0
-    def add(self, v, k=1): self.sum += float(v)*k; self.n += int(k)
-    @property
-    def avg(self): return (self.sum / max(self.n,1))
+    def train_dataloader(self):
+        collate = partial(mix_collate, aug_cutmix=self.aug_cutmix, aug_mixup=self.aug_mixup, alpha=self.alpha)
+        return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True,
+                          num_workers=self.num_workers, pin_memory=True, drop_last=True,
+                          persistent_workers=True if self.num_workers > 0 else False,
+                          collate_fn=collate)
 
-def _cuda_mem():
-    if torch.cuda.is_available():
-        i = torch.cuda.current_device()
-        alloc = torch.cuda.memory_allocated(i)/1024**2
-        rsv   = torch.cuda.memory_reserved(i)/1024**2
-        return f"{alloc:.0f}/{rsv:.0f} MiB"
-    return "-"
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=256, shuffle=False,
+                          num_workers=self.num_workers, pin_memory=True,
+                          persistent_workers=True if self.num_workers > 0 else False)
 
-def _banner(title, kv):
-    bar = "="*max(32, len(title)+6)
-    lines = [bar, f"== {title} ==", bar]
-    for k,v in kv.items(): lines.append(f"{k:>20}: {v}")
-    print("\n".join(lines))
-
-def _get_lr(optim):
-    return optim.param_groups[0]["lr"]
-
-# -------------- Eval --------------
-@torch.inference_mode()
-def eval_top1(model, loader, renorm=None, device="cuda", amp=True):
-    model = model.to(device).eval()
-    tot = 0; corr = 0
-    use_amp = bool(amp and str(device).startswith("cuda"))
-    for x, y in loader:
-        x,y=x.to(device,non_blocking=True), y.to(device,non_blocking=True)
-        x_t = renorm(x) if renorm else x
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            logits = model(x_t)
-        pred = logits.argmax(1)
-        tot += y.size(0); corr += (pred == y).sum().item()
-    return 100.0 * corr / max(1, tot)
-
-# -------------- Teacher: MobileNetV2 (torch.hub) --------------
+# ----------------------------
+# Teacher: MobileNetV2 from torch.hub
+# ----------------------------
 def make_mobilenetv2_teacher_from_hub(variant="cifar100_mobilenetv2_x1_4", device="cuda"):
-    # fallback if hub not available: user can change variant to "cifar100_mobilenetv2_x1_0"
     teacher = torch.hub.load("chenyaofo/pytorch-cifar-models", variant, pretrained=True)
     return teacher.to(device).eval()
 
-# -------------- Train & Distill --------------
-def distill_cifar100(
-    data_root="./data", out_dir="./checkpoints_c100_mbv2",
-    epochs=200, batch_size=128, lr=0.2, wd=5e-4, label_smoothing=0.1,
-    alpha_kd=0.7, alpha_hint=0.05, T=4.0, amp=True,
-    scale_op="median", width_mult=1.0, device=None,
-    teacher_variant="cifar100_mobilenetv2_x1_4"
-):
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+def _choose_teacher_hint_points(teacher: nn.Module, n_points: int):
+    # collect top-level "features.{i}" modules if present; pick evenly spaced n_points
+    candidates = sorted([n for n,_ in teacher.named_modules() if n.count(".")==1 and n.startswith("features.")],
+                        key=lambda x: int(x.split(".")[1]) if x.split(".")[1].isdigit() else 0)
+    if n_points <= 0 or len(candidates) == 0:
+        return []
+    if len(candidates) >= n_points:
+        step = len(candidates)/n_points
+        chosen = [candidates[int(round(step*(i+1))-1)] for i in range(n_points)]
+        return chosen
+    # fallback to last few
+    return candidates[-n_points:]
 
-    # -------------------- Data --------------------
-    train_loader, val_loader = cifar100_loaders(data_root, batch_size=batch_size, workers=1)
+# ----------------------------
+# LightningModule: KD + hints + ternary eval/export
+# ----------------------------
+class LitBitMBv2KD(pl.LightningModule):
+    def __init__(self, lr, wd, epochs, label_smoothing=0.1,
+                 alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
+                 width_mult=1.0, amp=True, teacher_variant="cifar100_mobilenetv2_x1_4",
+                 export_dir="./checkpoints_c100_mbv2"):
+        super().__init__()
+        self.save_hyperparameters(ignore=['teacher','_t_feats','_s_feats','_t_handles','_s_handles','_ternary_snapshot'])
+        self.scale_op = scale_op
+        self.student = bit_mobilenetv2_cifar(num_classes=100, width_mult=width_mult, scale_op=scale_op)
+        self.teacher = None
+        if alpha_kd>0:
+            self.teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu")  # move in setup
+            for p in self.teacher.parameters(): p.requires_grad_(False)
 
-    # -------------------- Teacher --------------------
-    teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device)
+        self.ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing).eval()
+        self.kd = KDLoss(T=T).eval()
+        self.hint = AdaptiveHintLoss().eval()
+        self.s_hint_points = list(self.student.hint_names)  # e.g., ["features.0", "features.2", ...]
+        self.t_hint_points = []  # decided in setup by inspecting teacher
+        self.acc_fp = MulticlassAccuracy(num_classes=100).eval()
+        self.acc_tern = MulticlassAccuracy(num_classes=100).eval()
+        self._ternary_snapshot = None
+        self._t_feats = {}
+        self._s_feats = {}
 
-    # Freeze teacher
-    for p in teacher.parameters():
-        p.requires_grad_(False)
-    teacher.eval()
+    def setup(self, stage=None):
+        if self.teacher:
+            self.teacher = self.teacher.to(self.device).eval()
+            # choose teacher hint points to match number of student points
+            self.t_hint_points = _choose_teacher_hint_points(self.teacher, len(self.s_hint_points))
+            # register hooks
+            self._t_feats, self._s_feats = {}, {}
+            self._t_handles = make_feature_hooks(self.teacher, self.t_hint_points, self._t_feats)
+            self._s_handles = make_feature_hooks(self.student, self.s_hint_points, self._s_feats)
 
-    # -------------------- Student --------------------
-    best_model = student = bit_mobilenetv2_cifar(num_classes=100, width_mult=width_mult, scale_op=scale_op).to(device)
+    def teardown(self, stage=None):
+        for h in getattr(self, "_t_handles", []):
+            try: h.remove()
+            except: pass
+        for h in getattr(self, "_s_handles", []):
+            try: h.remove()
+            except: pass
 
-    # -------------------- Losses --------------------
-    ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    kd = KDLoss(T=T)
+    def forward(self, x):
+        return self.student(x)
 
-    # Hints: tap the last block of each MobileNetV2 stage
-    # Student hint names are populated inside BitMobileNetV2 as "features.{idx}"
-    s_hint_points = student.hint_names
-    # For teacher, pick roughly corresponding modules: try to find "features.{idx}" too (torchvision-like)
-    # Fallback: if names don't exist, hooks dict will stay partially empty and it's fine.
-    t_hint_points = []
-    for n, _m in teacher.named_modules():
-        if n.startswith("features."):
-            t_hint_points.append(n)
-    # choose a coarse stage boundary subset for teacher: last block indices of similar stages
-    # We'll map by counting lengths.
-    # Build teacher stage ends by scanning changes in stride or channel if available is complex;
-    # for simplicity, pick evenly spaced 7 marks if possible.
-    t_feature_names_sorted = sorted([n for n in t_hint_points if n.count(".")==1], key=lambda x:int(x.split(".")[1]))
-    # pick up to len(s_hint_points) from the end of each teacher stage-ish division
-    if len(t_feature_names_sorted) >= len(s_hint_points) and len(s_hint_points)>0:
-        step = len(t_feature_names_sorted)/len(s_hint_points)
-        chosen = [t_feature_names_sorted[int(round(step*(i+1))-1)] for i in range(len(s_hint_points))]
-        t_hint_points = chosen
-    else:
-        # fallback to last N features
-        t_hint_points = t_feature_names_sorted[-len(s_hint_points):] if len(s_hint_points)>0 else []
+    def on_fit_start(self):
+        n_params = sum(p.numel() for p in self.student.parameters())
+        acc_name = self.trainer.accelerator.__class__.__name__
+        strategy_name = self.trainer.strategy.__class__.__name__
+        num_devices = getattr(self.trainer, "num_devices", None) or len(self.trainer.devices or [])
+        dev_str = str(self.device)
+        cuda_name = ""
+        if torch.cuda.is_available() and "cuda" in dev_str:
+            try: cuda_name = f" | CUDA: {torch.cuda.get_device_name(self.device.index or 0)}"
+            except: pass
+        self.print(f"Model params: {n_params/1e6:.2f}M | Accelerator: {acc_name} | Devices: {num_devices} | Strategy: {strategy_name} | Device: {dev_str}{cuda_name}")
 
-    t_feats, t_handles = make_feature_hooks(teacher, t_hint_points)
-    s_feats, s_handles = make_feature_hooks(student, s_hint_points)
-    hint = AdaptiveHintLoss()
+    @torch.no_grad()
+    def _clone_student(self):
+        clone = bit_mobilenetv2_cifar(num_classes=100, width_mult=self.hparams.width_mult, scale_op=self.scale_op)
+        clone.load_state_dict(self.student.state_dict(), strict=True)
+        clone = convert_to_ternary_p2(clone)
+        return clone.eval().to(self.device)
 
-    # -------------------- Optim/Sched/Scaler --------------------
-    opt = torch.optim.SGD(
-        list(student.parameters()) + list(hint.parameters()),
-        lr=lr, momentum=0.9, weight_decay=wd, nesterov=True
-    )
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    scaler = torch.amp.GradScaler("cuda", enabled=(amp and str(device).startswith("cuda")))
+    def on_validation_epoch_start(self):
+        print()
+        self._ternary_snapshot = self._clone_student()
 
-    # -------------------- Banner --------------------
-    _banner("Distillation Run (MBv2 -> BitMBv2)", {
-        "device": device,
-        "AMP": amp,
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "init LR": lr,
-        "weight_decay": wd,
-        "alpha_kd": alpha_kd,
-        "alpha_hint": alpha_hint,
-        "T (KD)": T,
-        "scale_op": scale_op,
-        "width_mult": width_mult,
-        "teacher": teacher_variant,
-        "train_batches": len(train_loader),
-        "val_batches": len(val_loader),
-        "cuda_mem": _cuda_mem()
-    })
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        is_mix = isinstance(y, tuple)
+        if is_mix:
+            y_a, y_b, lam = y
+        use_amp = bool(self.hparams.amp and "cuda" in str(self.device))
 
-    best = 0.0
-    os.makedirs(out_dir, exist_ok=True)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            z_s = self.student(x)
 
-    if str(device).startswith("cuda"):
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        student = student.to(memory_format=torch.channels_last)
-        try:
-            teacher = teacher.to(memory_format=torch.channels_last)
-        except Exception:
-            pass
-
-    # (Optional) cache an estimated teacher acc (for prints only)
-    try:
-        teach_top1_est = 75.98 if "x1_4" in teacher_variant else 74.0
-    except Exception:
-        teach_top1_est = -1
-
-    for epoch in range(1, epochs+1):
-        m_loss, m_ce, m_kd, m_hint = AvgMeter(), AvgMeter(), AvgMeter(), AvgMeter()
-        start = time.time()
-
-        student.train()
-        teacher.eval()
-
-        for step, batch in enumerate(train_loader, 1):
-            x, y = batch
-            x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
-
-            is_mix = isinstance(y, tuple)
+            # CE
             if is_mix:
-                y_a, y_b, lam = y
-                y_a, y_b = y_a.to(device), y_b.to(device)
+                loss_ce = lam * self.ce(z_s, y_a) + (1 - lam) * self.ce(z_s, y_b)
             else:
-                y = y.to(device)
+                loss_ce = self.ce(z_s, y)
 
-            opt.zero_grad(set_to_none=True)
-            use_amp = bool(amp and str(device).startswith("cuda"))
+            # KD (compute in fp32 for stability)
+            loss_kd = 0.0
+            if self.hparams.alpha_kd>0:
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    z_t = self.teacher(x)
+                with torch.amp.autocast("cuda", enabled=False):
+                    loss_kd = self.kd(z_s.float(), z_t.float())
 
-            # Student step
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                z_s = student(x)
+            # Hints
+            loss_hint = 0.0
+            if self.hparams.alpha_hint>0 and len(self.s_hint_points)>0 and len(self.t_hint_points)>0:
+                for s_name, t_name in zip(self.s_hint_points, self.t_hint_points):
+                    if (s_name in self._s_feats) and (t_name in self._t_feats):
+                        loss_hint = loss_hint + self.hint(s_name, self._s_feats[s_name].float(), self._t_feats[t_name].float())
 
-                # CE
-                if is_mix:
-                    loss_ce = lam * ce(z_s, y_a) + (1 - lam) * ce(z_s, y_b)
-                else:
-                    loss_ce = ce(z_s, y)
+            loss = (1.0 - self.hparams.alpha_kd) * loss_ce + self.hparams.alpha_kd * loss_kd + self.hparams.alpha_hint * loss_hint
 
-                # KD in fp32
-                loss_kd = 0.0
-                if alpha_kd>0:
-                    # KD targets
-                    with torch.inference_mode():
-                        z_t = teacher(x)
-                    with torch.amp.autocast("cuda", enabled=False):
-                        loss_kd = kd(z_s.float(), z_t.float())
+        self.log_dict({
+            "train/loss": loss,
+            "train/ce": loss_ce,
+            "train/kd": loss_kd,
+            "train/hint": torch.as_tensor(loss_hint, device=self.device, dtype=torch.float32),
+            "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
+        }, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=x.size(0))
+        return loss
 
-                # Hints
-                loss_hint = 0.0
-                if alpha_hint>0:
-                    if (len(s_hint_points) > 0) and (len(t_hint_points) > 0):
-                        # pair by index
-                        for s_name, t_name in zip(s_hint_points, t_hint_points):
-                            if (s_name in s_feats) and (t_name in t_feats):
-                                loss_hint += hint(s_name, s_feats[s_name].float(), t_feats[t_name].float())
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        with torch.no_grad():
+            logits_fp = self.student(x)
+            acc_fp = self.acc_fp(logits_fp.softmax(1), y)
+            self.log("val/acc_fp", acc_fp, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
+            if self._ternary_snapshot is not None:
+                logits_t = self._ternary_snapshot(x)
+                acc_t = self.acc_tern(logits_t.softmax(1), y)
+                self.log("val/acc_tern", acc_t, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
-                loss = (1.0 - alpha_kd) * loss_ce + alpha_kd * loss_kd + alpha_hint * loss_hint
+            if self.hparams.alpha_kd>0:
+                # optional: show a static teacher acc estimate as in the other script
+                self.log("val/t_acc_fp", 0.760, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
+    def configure_optimizers(self):
+        # opt = torch.optim.SGD(
+        #     list(self.student.parameters()) + list(self.hint.parameters()),
+        #     lr=self.hparams.lr, momentum=0.9, weight_decay=self.hparams.wd, nesterov=True
+        # )
+        
+        opt = torch.optim.AdamW(self.student.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.wd)
 
-            bs = x.size(0)
-            m_loss.add(loss.item(), bs)
-            m_ce.add(loss_ce.item(), bs)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.hparams.epochs)
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
+        }
 
-            if alpha_kd>0:
-                m_kd.add(loss_kd.item(), bs)
-                
-            if alpha_hint>0:
-                m_hint.add(float(loss_hint), bs)
+# ----------------------------
+# Export callback (save best FP & ternary)
+# ----------------------------
+class ExportBestTernary(Callback):
+    def __init__(self, out_dir: str, monitor: str = "val/acc_tern", mode: str = "max"):
+        super().__init__()
+        self.out_dir, self.monitor, self.mode = out_dir, monitor, mode
+        self.best = None
+        os.makedirs(out_dir, exist_ok=True)
 
-        sched.step()
+    def _is_better(self, current, best):
+        if best is None: return True
+        return (current > best) if self.mode == "max" else (current < best)
 
-        # Metrics
-        student_top1 = eval_top1(student, val_loader, device=device, amp=amp)
-        tern = convert_to_ternary_p2(copy.deepcopy(student))
-        top1 = eval_top1(tern, val_loader, device=device, amp=amp)
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: LitBitMBv2KD):
+        metrics = trainer.callback_metrics
+        if self.monitor not in metrics: return
+        current = metrics[self.monitor].item()
+        if self._is_better(current, self.best):
+            self.best = current
+            # save FP student
+            best_fp = copy.deepcopy(pl_module.student).cpu().eval()
+            fp_path = os.path.join(self.out_dir, "bit_mbv2_c100_kd_best_fp.pt")
+            torch.save({"model": best_fp.state_dict(), "acc_tern": current}, fp_path)
+            pl_module.print(f"✓ saved {fp_path} (val/acc_tern={current*100:.2f}%)")
+            # save ternary PoT export
+            tern = convert_to_ternary_p2(copy.deepcopy(best_fp)).cpu().eval()
+            tern_path = os.path.join(self.out_dir, "bit_mbv2_c100_kd_ternary.pt")
+            torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
+            pl_module.print(f"✓ exported ternary PoT → {tern_path}")
 
-        # Save best (float + ternary export)
-        is_best = top1 > best
-        if is_best:
-            best = top1
-            best_model = copy.deepcopy(student).cpu().eval()
+# ----------------------------
+# CLI / main
+# ----------------------------
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--data", type=str, default="./data")
+    p.add_argument("--out",  type=str, default="./ckpt_c100_kd_mbv2")
+    p.add_argument("--epochs", type=int, default=200)
+    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--lr", type=float, default=8e-4)
+    p.add_argument("--wd", type=float, default=1e-3)
+    p.add_argument("--label-smoothing", type=float, default=0.1)
+    p.add_argument("--alpha-kd", type=float, default=0.0)   # set >0 to enable KD
+    p.add_argument("--alpha-hint", type=float, default=0.0) # set >0 to enable feature hints
+    p.add_argument("--T", type=float, default=4.0)
+    p.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
+    p.add_argument("--width-mult", type=float, default=1.0)
+    p.add_argument("--teacher-variant", type=str, default="cifar100_mobilenetv2_x1_4")
+    p.add_argument("--amp", action="store_true")
+    p.add_argument("--cpu", action="store_true")
+    p.add_argument("--mixup", action="store_true")
+    p.add_argument("--cutmix", action="store_true")
+    p.add_argument("--mix-alpha", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=42)
+    return p.parse_args()
 
-            ckpt = f"{out_dir}/bit_mbv2_c100_kd_best.pt"
-            torch.save({"model": best_model.state_dict(), "top1": best}, ckpt)
-            print(f"✓ saved {ckpt} (top1={best:.2f})")
+def main():
+    args = parse_args()
+    pl.seed_everything(args.seed, workers=True)
 
-            tern = tern.cpu().eval()
-            tpath = f"{out_dir}/bit_mbv2_c100_kd_ternary.pt"
-            torch.save({"model": tern.state_dict(), "top1": best}, tpath)
-            print(f"✓ exported ternary PoT → {tpath}")
-
-        epoch_time = time.time() - start
-        imgs = len(train_loader.dataset)
-        ips = imgs / max(epoch_time, 1e-6)
-
-        print(
-            f"[{epoch:03d}/{epochs}] "
-            f"loss {m_loss.avg:.4f} (CE {m_ce.avg:.4f}, KD {m_kd.avg:.4f}, Hint {m_hint.avg:.4f}) | "
-            f"top1 {top1:.2f} | float top1 {student_top1:.2f} | best {best:.2f} | "
-            f"teach_top1 {teach_top1_est:.2f} | "
-            f"lr {_get_lr(opt):.4f} | "
-            f"time {epoch_time:.1f}s | {ips:.0f} img/s | cuda { _cuda_mem() }"
-        )
-
-    for h in t_handles + s_handles:
-        try: h.remove()
-        except Exception: pass
-
-    print(f"Best Top-1 (ternary eval): {best:.2f}")
-    return best_model
-
-# --- quick run (adjust paths & hparams) ---
-if __name__ == "__main__":
-    best_model = distill_cifar100(
-        data_root="./data",
-        out_dir="./ckpt_c100_kd_mbv2",
-        epochs=200, batch_size=1024,
-        lr=0.2, wd=5e-4, label_smoothing=0.1,
-        alpha_kd=0.5, alpha_hint=0.1, T=4.0,
-        amp=True, scale_op="median",
-        width_mult=1.0,  # student width; try 1.0 or 0.75 for lighter
-        teacher_variant="cifar100_mobilenetv2_x1_4"
+    dm = CIFAR100DataModule(
+        data_dir=args.data, batch_size=args.batch_size, num_workers=4,
+        aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
     )
+
+    lit = LitBitMBv2KD(
+        lr=args.lr, wd=args.wd, epochs=args.epochs,
+        label_smoothing=args.label_smoothing,
+        alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
+        scale_op=args.scale_op, width_mult=args.width_mult,
+        amp=args.amp, teacher_variant=args.teacher_variant,
+        export_dir=args.out
+    )
+
+    os.makedirs(args.out, exist_ok=True)
+    logger = CSVLogger(save_dir=args.out, name="logs")
+    ckpt_cb = ModelCheckpoint(monitor="val/acc_tern", mode="max", save_top_k=1, save_last=True)
+    lr_cb = LearningRateMonitor(logging_interval="epoch")
+    export_cb = ExportBestTernary(args.out, monitor="val/acc_tern", mode="max")
+    callbacks = [ckpt_cb, lr_cb, export_cb]
+
+    accelerator = "cpu" if args.cpu else "auto"
+    precision = "16-mixed" if args.amp else "32-true"
+    trainer = pl.Trainer(
+        max_epochs=args.epochs,
+        accelerator=accelerator,
+        devices=1,
+        precision=precision,
+        logger=logger,
+        callbacks=callbacks,
+        log_every_n_steps=50,
+        deterministic=False,
+    )
+
+    trainer.fit(lit, datamodule=dm)
+    trainer.validate(lit, datamodule=dm)
+
+if __name__ == "__main__":
+    main()

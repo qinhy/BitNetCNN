@@ -395,7 +395,7 @@ class ExportBestTernary(Callback):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--data", type=str, default="./data")
-    p.add_argument("--out",  type=str, default="./ckpt_c100_kd")
+    p.add_argument("--out",  type=str, default="./ckpt_c100_kd_rn18")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--lr", type=float, default=2e-1)
