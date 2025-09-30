@@ -17,7 +17,7 @@ from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torchmetrics.classification import MulticlassAccuracy
 
-from BitNetCNN import Bit, convert_to_ternary_p2
+from BitNetCNN import Bit, convert_to_ternary
 
 EPS = 1e-12
 
@@ -283,7 +283,7 @@ class LitBitResNet50KD(pl.LightningModule):
     def _clone_student(self):
         clone = BitResNet50CIFAR(100, self.scale_op)
         clone.load_state_dict(self.student.state_dict(), strict=True)
-        clone = convert_to_ternary_p2(clone)
+        clone = convert_to_ternary(clone)
         return clone.eval().to(self.device)
 
     def on_validation_epoch_start(self):
@@ -384,7 +384,7 @@ class ExportBestTernary(Callback):
             torch.save({"model": best_fp.state_dict(), "acc_tern": current}, fp_path)
             pl_module.print(f"✓ saved {fp_path} (val/acc_tern={current*100:.2f}%)")
             # save ternary PoT export
-            tern = convert_to_ternary_p2(copy.deepcopy(best_fp)).cpu().eval()
+            tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu().eval()
             tern_path = os.path.join(self.out_dir, "bit_resnet50_c100_kd_ternary.pt")
             torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
             pl_module.print(f"✓ exported ternary PoT → {tern_path}")

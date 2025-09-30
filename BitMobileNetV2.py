@@ -21,7 +21,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torchmetrics.classification import MulticlassAccuracy
 
 # --- your bit modules ---
-from BitNetCNN import Bit, convert_to_ternary_p2
+from BitNetCNN import Bit, convert_to_ternary
 
 EPS = 1e-12
 
@@ -335,7 +335,7 @@ class LitBitMBv2KD(pl.LightningModule):
     def _clone_student(self):
         clone = bit_mobilenetv2_cifar(num_classes=100, width_mult=self.hparams.width_mult, scale_op=self.scale_op)
         clone.load_state_dict(self.student.state_dict(), strict=True)
-        clone = convert_to_ternary_p2(clone)
+        clone = convert_to_ternary(clone)
         return clone.eval().to(self.device)
 
     def on_validation_epoch_start(self):
@@ -437,7 +437,7 @@ class ExportBestTernary(Callback):
             torch.save({"model": best_fp.state_dict(), "acc_tern": current}, fp_path)
             pl_module.print(f"✓ saved {fp_path} (val/acc_tern={current*100:.2f}%)")
             # save ternary PoT export
-            tern = convert_to_ternary_p2(copy.deepcopy(best_fp)).cpu().eval()
+            tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu().eval()
             tern_path = os.path.join(self.out_dir, "bit_mbv2_c100_kd_ternary.pt")
             torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
             pl_module.print(f"✓ exported ternary PoT → {tern_path}")
@@ -454,11 +454,11 @@ def parse_args():
     p.add_argument("--lr", type=float, default=2e-1)
     p.add_argument("--wd", type=float, default=5e-4)
     p.add_argument("--label-smoothing", type=float, default=0.1)
-    p.add_argument("--alpha-kd", type=float, default=0.0)   # set >0 to enable KD
-    p.add_argument("--alpha-hint", type=float, default=0.0) # set >0 to enable feature hints
+    p.add_argument("--alpha-kd", type=float, default=0.3)   # set >0 to enable KD
+    p.add_argument("--alpha-hint", type=float, default=0.05) # set >0 to enable feature hints
     p.add_argument("--T", type=float, default=4.0)
     p.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
-    p.add_argument("--width-mult", type=float, default=1.0)
+    p.add_argument("--width-mult", type=float, default=1.4)
     p.add_argument("--teacher-variant", type=str, default="cifar100_mobilenetv2_x1_4")
     p.add_argument("--amp", action="store_true")
     p.add_argument("--cpu", action="store_true")
