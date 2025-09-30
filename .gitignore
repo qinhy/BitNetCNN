@@ -186,3 +186,5 @@ ckpt_c100_kd/
 /ckpt_c100_kd_mbv2
 /ckpt_c100_kd_rn18
 /ckpt_c100_kd_rn50
+/ckpt_c100_convnextv2
+run.bat

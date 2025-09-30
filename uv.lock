@@ -116,6 +116,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "pytorch-lightning" },
+    { name = "timm" },
     { name = "torch" },
     { name = "torchvision" },
 ]
@@ -130,6 +131,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pytorch-lightning", specifier = ">=2.5.5" },
+    { name = "timm", specifier = ">=1.0.20" },
     { name = "torch", specifier = "==2.4.1+cu124", index = "https://download.pytorch.org/whl/cu124" },
     { name = "torchvision", specifier = "==0.19.1+cu124", index = "https://download.pytorch.org/whl/cu124" },
 ]
