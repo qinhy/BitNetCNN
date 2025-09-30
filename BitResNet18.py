@@ -1,25 +1,15 @@
-# cifar100_kd_lightning.py
-from functools import partial
-import os, math, copy, argparse
+import os, argparse
 from common_utils import *
 import torch
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from torchvision.models.resnet import ResNet, BasicBlock
 from huggingface_hub import hf_hub_download
 
 # --- Lightning ---
 import pytorch_lightning as pl
-from pytorch_lightning import Callback
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from torchmetrics.classification import MulticlassAccuracy
-
-# Import common utilities
-from common_utils import Bit, convert_to_ternary, convert_to_ternary_p2, KDLoss, EPS
 
 # ----------------------------
 # BitResNet-18 (CIFAR stem)

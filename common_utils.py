@@ -399,8 +399,8 @@ class CIFAR100DataModule(pl.LightningDataModule):
         )
 
 
-    def val_dataloader(self):
-        return DataLoader(self.val_ds, batch_size=256, shuffle=False,
+    def val_dataloader(self,batch_size=256):
+        return DataLoader(self.val_ds, batch_size=batch_size, shuffle=False,
                           num_workers=self.num_workers, pin_memory=True,
                           persistent_workers=True if self.num_workers > 0 else False)
 
@@ -474,6 +474,7 @@ class LitBit(pl.LightningModule):
         self._ternary_snapshot = None
         self._t_feats = {}
         self._s_feats = {}
+        self.t_acc_fp = None
 
     def setup(self, stage=None):
         if self.teacher:
@@ -520,35 +521,34 @@ class LitBit(pl.LightningModule):
         is_mix = isinstance(y, tuple)
         if is_mix:
             y_a, y_b, lam = y
-        use_amp = bool(self.hparams.amp and "cuda" in str(self.device))
 
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            z_s = self.student(x)
-            if is_mix:
-                loss_ce = lam * self.ce(z_s, y_a) + (1 - lam) * self.ce(z_s, y_b)
-            else:
-                loss_ce = self.ce(z_s, y)
+        # use_amp = bool(self.hparams.amp and "cuda" in str(self.device))
 
-            if self.teacher:
-                with torch.amp.autocast("cuda", enabled=use_amp):
-                    z_t = self.teacher(x)
+        z_s = self.student(x)
+        
+        if is_mix:
+            loss_ce = lam * self.ce(z_s, y_a) + (1 - lam) * self.ce(z_s, y_b)
+        else:
+            loss_ce = self.ce(z_s, y)
 
-            loss_kd = 0.0
-            if self.hparams.alpha_kd > 0:
-                with torch.amp.autocast("cuda", enabled=False):
-                    loss_kd = self.kd(z_s.float(), z_t.float())
+        if self.teacher:
+            z_t = self.teacher(x)
 
-            # Hints
-            loss_hint = 0.0
-            if self.hparams.alpha_hint>0 and len(self.hint_points)>0:
-                for n in self.hint_points:
-                    if n not in self._s_feats:
-                        raise ValueError(f"Hint point {n} not found in student features of {self._s_feats}.")
-                    if n not in self._t_feats:
-                        raise ValueError(f"Hint point {n} not found in teacher features of {self._t_feats}.")
-                    loss_hint = loss_hint + self.hint(n, self._s_feats[n].float(), self._t_feats[n].float())
+        loss_kd = 0.0
+        if self.hparams.alpha_kd > 0:
+            loss_kd = self.kd(z_s.float(), z_t.float())
 
-            loss = (1.0 - self.hparams.alpha_kd) * loss_ce + self.hparams.alpha_kd * loss_kd + self.hparams.alpha_hint * loss_hint
+        # Hints
+        loss_hint = 0.0
+        if self.hparams.alpha_hint>0 and len(self.hint_points)>0:
+            for n in self.hint_points:
+                if n not in self._s_feats:
+                    raise ValueError(f"Hint point {n} not found in student features of {self._s_feats}.")
+                if n not in self._t_feats:
+                    raise ValueError(f"Hint point {n} not found in teacher features of {self._t_feats}.")
+                loss_hint = loss_hint + self.hint(n, self._s_feats[n].float(), self._t_feats[n].float())
+
+        loss = (1.0 - self.hparams.alpha_kd) * loss_ce + self.hparams.alpha_kd * loss_kd + self.hparams.alpha_hint * loss_hint
 
         logd = {}
         logd["train/loss"] = loss
@@ -561,19 +561,23 @@ class LitBit(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
+        def log_val(n,acc,):
+            self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
         with torch.no_grad():
             logits_fp = self.student(x)
             acc_fp = self.acc_fp(logits_fp.softmax(1), y)
-            self.log("val/acc_fp", acc_fp, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+            log_val("acc_fp", acc_fp)
 
             if self._ternary_snapshot is not None:
                 logits_t = self._ternary_snapshot(x)
                 acc_t = self.acc_tern(logits_t.softmax(1), y)
-                self.log("val/acc_tern", acc_t, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+                log_val("acc_tern", acc_t)
 
             if self.hparams.alpha_kd>0:
-                # optional: show a static teacher acc estimate as in the other script
-                self.log("val/t_acc_fp", 0.760, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+                if self.t_acc_fp is None and self.teacher:
+                    logits_t = self.teacher(x)
+                    self.t_acc_fp = self.acc_fp(logits_t.softmax(1), y)
+                log_val("t_acc_fp", self.t_acc_fp)
 
     def configure_optimizers(self):
         opt = torch.optim.SGD(
