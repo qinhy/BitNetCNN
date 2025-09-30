@@ -184,3 +184,5 @@ checkpoints/
 ckpt_c100_kd/
 /mnist_ckpt
 /ckpt_c100_kd_mbv2
+/ckpt_c100_kd_rn18
+/ckpt_c100_kd_rn50

@@ -1,4 +1,4 @@
-# cifar100_kd_lightning.py
+# cifar100_kd_lightning_rn50.py
 from functools import partial
 import os, math, copy, argparse
 import torch
@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torchvision.models.resnet import ResNet, BasicBlock
+from torchvision.models.resnet import ResNet, BasicBlock, Bottleneck
 from huggingface_hub import hf_hub_download
 
 # --- Lightning ---
@@ -22,29 +22,34 @@ from BitNetCNN import Bit, convert_to_ternary_p2
 EPS = 1e-12
 
 # ----------------------------
-# BitResNet-18 (CIFAR stem)
+# BitResNet-50 (CIFAR stem, Bottleneck)
 # ----------------------------
 class BottleneckBit(nn.Module):
-    expansion = 1
+    expansion = 4
     def __init__(self, inplanes, planes, stride=1, downsample=None, scale_op="median"):
         super().__init__()
-        self.conv1 = Bit.Conv2d(inplanes, planes, 3, stride=stride, padding=1, bias=True, scale_op=scale_op)
-        self.bn1 = nn.BatchNorm2d(planes)
+        width = planes
+        self.conv1 = Bit.Conv2d(inplanes, width, kernel_size=1, stride=1, padding=0, bias=True, scale_op=scale_op)
+        self.bn1 = nn.BatchNorm2d(width)
+        self.conv2 = Bit.Conv2d(width, width, kernel_size=3, stride=stride, padding=1, bias=True, scale_op=scale_op)
+        self.bn2 = nn.BatchNorm2d(width)
+        self.conv3 = Bit.Conv2d(width, planes * self.expansion, kernel_size=1, stride=1, padding=0, bias=True, scale_op=scale_op)
+        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
         self.act = nn.SiLU(inplace=True)
-        self.conv2 = Bit.Conv2d(planes, planes, 3, stride=1, padding=1, bias=True, scale_op=scale_op)
-        self.bn2 = nn.BatchNorm2d(planes)
         self.downsample = downsample
 
     def forward(self, x):
         identity = x
         out = self.act(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.act(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
         if self.downsample is not None:
             identity = self.downsample(x)
         return self.act(out + identity)
 
 class BitResNet50CIFAR(nn.Module):
-    def __init__(self, block, layers, num_classes=100, scale_op="median", in_ch=3):
+    """ResNet-50 for CIFAR-sized inputs: 3x3 conv stem (no pool), then layers [3,4,6,3]."""
+    def __init__(self, num_classes=100, scale_op="median", in_ch=3):
         super().__init__()
         self.inplanes = 64
         self.stem = nn.Sequential(
@@ -52,27 +57,28 @@ class BitResNet50CIFAR(nn.Module):
             nn.BatchNorm2d(self.inplanes),
             nn.SiLU(inplace=True),
         )
-        self.layer1 = self._make_layer(block, 64,  layers[0], stride=1, scale_op=scale_op)
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, scale_op=scale_op)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, scale_op=scale_op)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, scale_op=scale_op)
+        self.layer1 = self._make_layer(BottleneckBit, 64,  3, stride=1, scale_op=scale_op)  # 64 -> 256
+        self.layer2 = self._make_layer(BottleneckBit, 128, 4, stride=2, scale_op=scale_op)  # 128 -> 512
+        self.layer3 = self._make_layer(BottleneckBit, 256, 6, stride=2, scale_op=scale_op)  # 256 -> 1024
+        self.layer4 = self._make_layer(BottleneckBit, 512, 3, stride=2, scale_op=scale_op)  # 512 -> 2048
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            Bit.Linear(512, num_classes, bias=True, scale_op=scale_op)
+            Bit.Linear(512 * BottleneckBit.expansion, num_classes, bias=True, scale_op=scale_op),
         )
 
     def _make_layer(self, block, planes, blocks, stride, scale_op):
         downsample = None
-        if stride != 1 or self.inplanes != planes * block.expansion:
+        out_channels = planes * block.expansion
+        if stride != 1 or self.inplanes != out_channels:
             downsample = nn.Sequential(
-                Bit.Conv2d(self.inplanes, planes * block.expansion, 1, stride=stride, bias=True, scale_op=scale_op),
-                nn.BatchNorm2d(planes * block.expansion),
+                Bit.Conv2d(self.inplanes, out_channels, kernel_size=1, stride=stride, bias=True, scale_op=scale_op),
+                nn.BatchNorm2d(out_channels),
             )
-        layers = [block(self.inplanes, planes, stride, downsample, scale_op=scale_op)]
-        self.inplanes = planes * block.expansion
+        layers = [block(self.inplanes, planes, stride=stride, downsample=downsample, scale_op=scale_op)]
+        self.inplanes = out_channels
         for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes, scale_op=scale_op))
+            layers.append(block(self.inplanes, planes, stride=1, downsample=None, scale_op=scale_op))
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -121,7 +127,6 @@ def make_feature_hooks(module: nn.Module, names, store: dict):
             handles.append(sub.register_forward_hook(SaveOutputHook(store, n)))
     return handles
 
-
 # ----------------------------
 # CIFAR-100 DataModule (mixup/cutmix optional)
 # ----------------------------
@@ -149,7 +154,7 @@ def mix_collate(batch, *, aug_cutmix: bool, aug_mixup: bool, alpha: float):
         idx = torch.randperm(x.size(0))
         x = lam * x + (1 - lam) * x[idx]
         return x, (y, y[idx], lam)
-    
+
 class CIFAR100DataModule(pl.LightningDataModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
                  aug_mixup: bool = False, aug_cutmix: bool = False, alpha: float = 1.0):
@@ -188,46 +193,48 @@ class CIFAR100DataModule(pl.LightningDataModule):
             collate_fn=collate,
         )
 
-
     def val_dataloader(self):
         return DataLoader(self.val_ds, batch_size=256, shuffle=False,
                           num_workers=self.num_workers, pin_memory=True,
                           persistent_workers=True if self.num_workers > 0 else False)
 
 # ----------------------------
-# Teacher: ResNet-18 (CIFAR stem) from HF
+# Teacher: ResNet-50 (CIFAR stem) from HF
 # ----------------------------
-class ResNet18CIFAR(ResNet):
+from torchvision.models.resnet import ResNet, Bottleneck  # ensure Bottleneck is imported
+
+class ResNet50CIFAR(ResNet):
     def __init__(self, num_classes=100):
-        super().__init__(block=BasicBlock, layers=[2,2,2,2], num_classes=num_classes)
+        super().__init__(block=Bottleneck, layers=[3, 4, 6, 3], num_classes=num_classes)
+        # CIFAR stem: 3x3, stride=1, no maxpool
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=True)
         self.maxpool = nn.Identity()
-        
-def make_resnet18_cifar_teacher_from_hf(device="cuda"):
-    model = ResNet18CIFAR(num_classes=100)
-    ckpt_path = hf_hub_download(repo_id="edadaltocg/resnet18_cifar100", filename="pytorch_model.bin")
+
+def make_resnet50_cifar_teacher_from_hf(device="cuda"):
+    model = ResNet50CIFAR(num_classes=100)
+    ckpt_path = hf_hub_download(repo_id="edadaltocg/resnet50_cifar100", filename="pytorch_model.bin")
     state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing:   print(f"[teacher] Missing keys: {missing}")
+    if missing:    print(f"[teacher] Missing keys: {missing}")
     if unexpected: print(f"[teacher] Unexpected keys: {unexpected}")
     return model.eval().to(device)
 
 # ----------------------------
 # LightningModule: KD + hints + ternary eval/export
 # ----------------------------
-class LitBitResNetKD(pl.LightningModule):
+class LitBitResNet50KD(pl.LightningModule):
     def __init__(self, lr, wd, epochs, label_smoothing=0.1,
                  alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
-                 amp=True, export_dir="./checkpoints_c100"):
+                 amp=True, export_dir="./checkpoints_c100_rn50"):
         super().__init__()
         self.save_hyperparameters(ignore=['self._t_feats','self._s_feats',
                                           'self._t_handles','self._s_handles','self.teacher',
                                           'self._ternary_snapshot'])
         self.scale_op = scale_op
-        self.student = BitResNet50CIFAR(BottleneckBit, [2,2,2,2], 100, scale_op)
+        self.student = BitResNet50CIFAR(100, scale_op)
         self.teacher = None
         if alpha_kd>0:
-            self.teacher = make_resnet18_cifar_teacher_from_hf(device="cpu")  # will move in setup
+            self.teacher = make_resnet50_cifar_teacher_from_hf(device="cpu")  # will move in setup
             for p in self.teacher.parameters(): p.requires_grad_(False)
         self.ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing).eval()
         self.kd = KDLoss(T=T).eval()
@@ -249,10 +256,8 @@ class LitBitResNetKD(pl.LightningModule):
             self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats)
             self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats)
 
-
     def teardown(self, stage=None):
-        # clean hooks
-        for h in getattr(self, "_t_handles", []): 
+        for h in getattr(self, "_t_handles", []):
             try: h.remove()
             except: pass
         for h in getattr(self, "_s_handles", []):
@@ -276,14 +281,13 @@ class LitBitResNetKD(pl.LightningModule):
 
     @torch.no_grad()
     def _clone_student(self):
-        clone = BitResNet50CIFAR(BottleneckBit, [2,2,2,2], 100, self.scale_op)
+        clone = BitResNet50CIFAR(100, self.scale_op)
         clone.load_state_dict(self.student.state_dict(), strict=True)
         clone = convert_to_ternary_p2(clone)
         return clone.eval().to(self.device)
-    
+
     def on_validation_epoch_start(self):
         print()
-        # build ternary PoT snapshot for this epoch
         self._ternary_snapshot = self._clone_student()
 
     def training_step(self, batch, batch_idx):
@@ -304,7 +308,6 @@ class LitBitResNetKD(pl.LightningModule):
             if self.hparams.alpha_kd>0:
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     z_t = self.teacher(x)
-                # KD in fp32 for stability
                 with torch.amp.autocast("cuda", enabled=False):
                     loss_kd = self.kd(z_s.float(), z_t.float())
 
@@ -336,11 +339,9 @@ class LitBitResNetKD(pl.LightningModule):
                 logits_t = self._ternary_snapshot(x)
                 acc_t = self.acc_tern(logits_t.softmax(1), y)
                 self.log("val/acc_tern", acc_t, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
-                        
-            # logits_fp = self.teacher(x)
-            # acc_fp = self.acc_fp(logits_fp.softmax(1), y)
+
             if self.hparams.alpha_kd>0:
-                self.log("val/t_acc_fp", 0.750, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+                self.log("val/t_acc_fp", 0.8093, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
     def configure_optimizers(self):
         opt = torch.optim.SGD(
@@ -371,7 +372,7 @@ class ExportBestTernary(Callback):
         if best is None: return True
         return (current > best) if self.mode == "max" else (current < best)
 
-    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: LitBitResNetKD):
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: LitBitResNet50KD):
         metrics = trainer.callback_metrics
         if self.monitor not in metrics: return
         current = metrics[self.monitor].item()
@@ -379,12 +380,12 @@ class ExportBestTernary(Callback):
             self.best = current
             # save FP student
             best_fp = copy.deepcopy(pl_module.student).cpu().eval()
-            fp_path = os.path.join(self.out_dir, "bit_resnet18_c100_kd_best_fp.pt")
+            fp_path = os.path.join(self.out_dir, "bit_resnet50_c100_kd_best_fp.pt")
             torch.save({"model": best_fp.state_dict(), "acc_tern": current}, fp_path)
             pl_module.print(f"✓ saved {fp_path} (val/acc_tern={current*100:.2f}%)")
             # save ternary PoT export
             tern = convert_to_ternary_p2(copy.deepcopy(best_fp)).cpu().eval()
-            tern_path = os.path.join(self.out_dir, "bit_resnet18_c100_kd_ternary.pt")
+            tern_path = os.path.join(self.out_dir, "bit_resnet50_c100_kd_ternary.pt")
             torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
             pl_module.print(f"✓ exported ternary PoT → {tern_path}")
 
@@ -394,14 +395,14 @@ class ExportBestTernary(Callback):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--data", type=str, default="./data")
-    p.add_argument("--out",  type=str, default="./ckpt_c100_kd_rn18")
+    p.add_argument("--out",  type=str, default="./ckpt_c100_kd_rn50")
     p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=2e-1)
     p.add_argument("--wd", type=float, default=5e-4)
     p.add_argument("--label-smoothing", type=float, default=0.1)
-    p.add_argument("--alpha-kd", type=float, default=0.0)#0.7)
-    p.add_argument("--alpha-hint", type=float, default=0.0)#0.05)
+    p.add_argument("--alpha-kd", type=float, default=0.3)  # keep default off; teacher optional
+    p.add_argument("--alpha-hint", type=float, default=0.05)
     p.add_argument("--T", type=float, default=4.0)
     p.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
     p.add_argument("--amp", action="store_true")
@@ -421,7 +422,7 @@ def main():
         aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
     )
 
-    lit = LitBitResNetKD(
+    lit = LitBitResNet50KD(
         lr=args.lr, wd=args.wd, epochs=args.epochs,
         label_smoothing=args.label_smoothing,
         alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
