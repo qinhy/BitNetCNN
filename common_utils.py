@@ -4,21 +4,17 @@ This module contains shared components used across different BitNet model implem
 """
 
 from functools import partial
-import os, math, copy, argparse
+import os, math, copy
 import torch
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torchvision.models.resnet import ResNet, BasicBlock, Bottleneck
-from huggingface_hub import hf_hub_download
 
 # --- Lightning ---
 import pytorch_lightning as pl
 from pytorch_lightning import Callback
-from pytorch_lightning.loggers import CSVLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torchmetrics.classification import MulticlassAccuracy
 
 import math
