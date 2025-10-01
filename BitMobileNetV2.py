@@ -1,18 +1,7 @@
-# ===============================================
-# CIFAR-100 KD (PyTorch Lightning):
-#   MobileNetV2 (teacher, torch.hub)
-#   -> BitMobileNetV2 (student, Bit.Conv2d/Bit.Linear)
-# ===============================================
 import argparse
-from common_utils import *
 import torch
-torch.set_float32_matmul_precision('high')
 import torch.nn as nn
-
-# --- Lightning ---
-import pytorch_lightning as pl
-from pytorch_lightning.loggers import CSVLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from common_utils import *
 
 # ----------------------------
 # MobileNetV2 (Bit) blocks
@@ -168,35 +157,14 @@ class LitBitMBv2KD(LitBit):
 # ----------------------------
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--data", type=str, default="./data")
-    p.add_argument("--out",  type=str, default="./ckpt_c100_kd_mbv2")
-    p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--batch-size", type=int, default=512)
-    p.add_argument("--lr", type=float, default=2e-1)
-    p.add_argument("--wd", type=float, default=5e-4)
-    p.add_argument("--label-smoothing", type=float, default=0.1)
-    p.add_argument("--alpha-kd", type=float, default=0.3)   # set >0 to enable KD
-    p.add_argument("--alpha-hint", type=float, default=0.05) # set >0 to enable feature hints
-    p.add_argument("--T", type=float, default=4.0)
-    p.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
+    p = add_common_args(p)
+    p.set_defaults(out="./ckpt_c100_kd_mbv2", batch_size=512)
     p.add_argument("--width-mult", type=float, default=1.4)
     p.add_argument("--teacher-variant", type=str, default="cifar100_mobilenetv2_x1_4")
-    p.add_argument("--amp", action="store_true")
-    p.add_argument("--cpu", action="store_true")
-    p.add_argument("--mixup", action="store_true")
-    p.add_argument("--cutmix", action="store_true")
-    p.add_argument("--mix-alpha", type=float, default=1.0)
-    p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
 def main():
     args = parse_args()
-    pl.seed_everything(args.seed, workers=True)
-
-    dm = CIFAR100DataModule(
-        data_dir=args.data, batch_size=args.batch_size, num_workers=4,
-        aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
-    )
 
     lit = LitBitMBv2KD(
         lr=args.lr, wd=args.wd, epochs=args.epochs,
@@ -207,26 +175,7 @@ def main():
         export_dir=args.out
     )
 
-    os.makedirs(args.out, exist_ok=True)
-    logger = CSVLogger(save_dir=args.out, name="logs")
-    ckpt_cb = ModelCheckpoint(monitor="val/acc_tern", mode="max", save_top_k=1, save_last=True)
-    lr_cb = LearningRateMonitor(logging_interval="epoch")
-    export_cb = ExportBestTernary(args.out, monitor="val/acc_tern", mode="max")
-    callbacks = [ckpt_cb, lr_cb, export_cb]
-
-    accelerator = "cpu" if args.cpu else "auto"
-    precision = "16-mixed" if args.amp else "32-true"
-    trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        accelerator=accelerator,
-        devices=1,
-        precision=precision,
-        logger=logger,
-        callbacks=callbacks,
-        log_every_n_steps=50,
-        deterministic=False,
-    )
-
+    trainer, dm = setup_trainer(args, lit)
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)
 

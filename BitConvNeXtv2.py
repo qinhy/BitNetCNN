@@ -1,22 +1,9 @@
-# cifar100_convnextv2_lightning.py
-from functools import partial
-import os, math, copy, argparse
+import argparse
 import torch
-
-from common_utils import *
-torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from timm.layers import trunc_normal_, DropPath
-
-# --- Lightning ---
-import pytorch_lightning as pl
-from pytorch_lightning import Callback
-from pytorch_lightning.loggers import CSVLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from torchmetrics.classification import MulticlassAccuracy
+from common_utils import *
 
 EPS = 1e-12
 
@@ -212,34 +199,14 @@ class LitConvNeXtV2KD(LitBit):
 # ----------------------------
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--data", type=str, default="./data")
-    p.add_argument("--out",  type=str, default="./ckpt_c100_convnextv2")
-    p.add_argument("--epochs", type=int, default=200)
-    p.add_argument("--batch-size", type=int, default=1024)
-    p.add_argument("--lr", type=float, default=0.2)  # works well for SGD + cosine on CIFAR
-    p.add_argument("--wd", type=float, default=5e-4)
-    p.add_argument("--label-smoothing", type=float, default=0.1)
-    p.add_argument("--alpha-kd", type=float, default=0.0)   # enable to use teacher
-    p.add_argument("--alpha-hint", type=float, default=0.1) # enable to use feature hints
-    p.add_argument("--T", type=float, default=4.0)
-    p.add_argument("--amp", action="store_true")
-    p.add_argument("--cpu", action="store_true")
-    p.add_argument("--mixup", action="store_true")
-    p.add_argument("--cutmix", action="store_true")
-    p.add_argument("--mix-alpha", type=float, default=1.0)
-    p.add_argument("--seed", type=int, default=42)
+    p = add_common_args(p)
+    p.set_defaults(out="./ckpt_c100_convnextv2", batch_size=1024, lr=0.2, alpha_kd=0.0, alpha_hint=0.1)
     p.add_argument("--model-size", type=str, default="nano", choices=["atto","femto","pico","nano","tiny","base","large","huge"])
     p.add_argument("--drop-path", type=float, default=0.1)
     return p.parse_args()
 
 def main():
     args = parse_args()
-    pl.seed_everything(args.seed, workers=True)
-
-    dm = CIFAR100DataModule(
-        data_dir=args.data, batch_size=args.batch_size, num_workers=4,
-        aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
-    )
 
     lit = LitConvNeXtV2KD(
         lr=args.lr, wd=args.wd, epochs=args.epochs,
@@ -249,26 +216,7 @@ def main():
         amp=args.amp, export_dir=args.out, drop_path_rate=args.drop_path
     )
 
-    os.makedirs(args.out, exist_ok=True)
-    logger = CSVLogger(save_dir=args.out, name="logs")
-    ckpt_cb = ModelCheckpoint(monitor="val/acc_tern", mode="max", save_top_k=1, save_last=True)
-    lr_cb = LearningRateMonitor(logging_interval="epoch")
-    export_cb = ExportBestTernary(args.out, monitor="val/acc_tern", mode="max")
-    callbacks = [ckpt_cb, lr_cb, export_cb]
-
-    accelerator = "cpu" if args.cpu else "auto"
-    precision = "16-mixed" if args.amp else "32-true"
-    trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        accelerator=accelerator,
-        devices=1,
-        precision=precision,
-        logger=logger,
-        callbacks=callbacks,
-        log_every_n_steps=50,
-        deterministic=False,
-    )
-
+    trainer, dm = setup_trainer(args, lit)
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)
 

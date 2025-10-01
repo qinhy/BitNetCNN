@@ -4,24 +4,21 @@ This module contains shared components used across different BitNet model implem
 """
 
 from functools import partial
-import os, math, copy
+import os
+import math
+import copy
+import argparse
 import torch
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-
-# --- Lightning ---
 import pytorch_lightning as pl
 from pytorch_lightning import Callback
+from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torchmetrics.classification import MulticlassAccuracy
-
-import math
-import copy
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 # Constants
 EPS = 1e-12
@@ -432,12 +429,12 @@ class ExportBestTernary(Callback):
             best_fp = copy.deepcopy(pl_module.student).cpu().eval()
             fp_path = os.path.join(self.out_dir, f"bit_{model_name}_{model_size}_{dataset_name}_best_fp.pt")
             torch.save({"model": best_fp.state_dict(), "acc_tern": current}, fp_path)
-            pl_module.print(f"✓ saved {fp_path} (val/acc_tern={current*100:.2f}%)")
+            pl_module.print(f"[OK] saved {fp_path} (val/acc_tern={current*100:.2f}%)")
             # save ternary PoT export
             tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu().eval()
             tern_path = os.path.join(self.out_dir, f"bit_{model_name}_{model_size}_{dataset_name}_ternary.pt")
             torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
-            pl_module.print(f"✓ exported ternary PoT → {tern_path}")
+            pl_module.print(f"[OK] exported ternary PoT -> {tern_path}")
 
 # ----------------------------
 # LightningModule: KD + hints + ternary eval/export
@@ -589,3 +586,67 @@ class LitBit(pl.LightningModule):
             "optimizer": opt,
             "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
         }
+
+# ----------------------------
+# Common CLI utilities
+# ----------------------------
+def add_common_args(parser):
+    """Add common training arguments to an argument parser."""
+    parser.add_argument("--data", type=str, default="./data")
+    parser.add_argument("--out",  type=str, default="./ckpt_c100")
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--lr", type=float, default=2e-1)
+    parser.add_argument("--wd", type=float, default=5e-4)
+    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument("--alpha-kd", type=float, default=0.3)
+    parser.add_argument("--alpha-hint", type=float, default=0.05)
+    parser.add_argument("--T", type=float, default=4.0)
+    parser.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--mixup", action="store_true")
+    parser.add_argument("--cutmix", action="store_true")
+    parser.add_argument("--mix-alpha", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser
+
+def setup_trainer(args, lit_module):
+    """
+    Setup common PyTorch Lightning training components.
+
+    Args:
+        args: Parsed command-line arguments
+        lit_module: Lightning module to train
+
+    Returns:
+        tuple: (trainer, datamodule)
+    """
+    pl.seed_everything(args.seed, workers=True)
+
+    dm = CIFAR100DataModule(
+        data_dir=args.data, batch_size=args.batch_size, num_workers=4,
+        aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
+    )
+
+    os.makedirs(args.out, exist_ok=True)
+    logger = CSVLogger(save_dir=args.out, name="logs")
+    ckpt_cb = ModelCheckpoint(monitor="val/acc_tern", mode="max", save_top_k=1, save_last=True)
+    lr_cb = LearningRateMonitor(logging_interval="epoch")
+    export_cb = ExportBestTernary(args.out, monitor="val/acc_tern", mode="max")
+    callbacks = [ckpt_cb, lr_cb, export_cb]
+
+    accelerator = "cpu" if args.cpu else "auto"
+    precision = "16-mixed" if args.amp else "32-true"
+    trainer = pl.Trainer(
+        max_epochs=args.epochs,
+        accelerator=accelerator,
+        devices=1,
+        precision=precision,
+        logger=logger,
+        callbacks=callbacks,
+        log_every_n_steps=50,
+        deterministic=False,
+    )
+
+    return trainer, dm
