@@ -189,3 +189,4 @@ ckpt_c100_kd/
 /ckpt_c100_convnextv2
 run.bat
 /ckpt_mnist
+/.claude
