@@ -202,3 +202,4 @@ run.bat
 # models/*.pth
 # Allow .zip files (compressed, smaller)
 # models/*.zip will be tracked
+/checkpoints_c100_rn50

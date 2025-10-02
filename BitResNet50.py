@@ -157,6 +157,7 @@ class LitBitResNet50KD(LitBit):
 def parse_args():
     p = argparse.ArgumentParser()
     p = add_common_args(p)
+    p.add_argument("--model_size", type=str, default="50")
     p.add_argument("--dataset", type=str, default="c100", choices=["c100", "imnet"],
                    help="Dataset to use (affects stems, classes, transforms)")
     p.set_defaults(out=None)
