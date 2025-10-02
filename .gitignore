@@ -179,14 +179,26 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# Data directories
 data/
+
+# Training checkpoint directories (large files)
 checkpoints/
-ckpt_c100_kd/
-/mnist_ckpt
-/ckpt_c100_kd_mbv2
-/ckpt_c100_kd_rn18
-/ckpt_c100_kd_rn50
-/ckpt_c100_convnextv2
+ckpt_*/
+mnist_ckpt/
+
+# Batch scripts
 run.bat
-/ckpt_mnist
-/.claude
+
+# IDE/Editor files
+.claude/
+
+# Large checkpoint files (keep only compressed .zip in git)
+*.pt
+!hubconf.py
+
+# Keep models directory structure but ignore large files
+# models/*.pt
+# models/*.pth
+# Allow .zip files (compressed, smaller)
+# models/*.zip will be tracked
