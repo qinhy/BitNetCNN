@@ -98,7 +98,7 @@ def _load_checkpoint_from_url(url):
         return torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
 
 
-def bitnet_mnist(pretrained=False, scale_op="median", ternary=False):
+def bitnet_mnist(pretrained=False, scale_op="median", ternary=True):
     """
     BitNetCNN model for MNIST (1 channel, 10 classes).
 
@@ -132,7 +132,7 @@ def bitnet_mnist(pretrained=False, scale_op="median", ternary=False):
     return model
 
 
-def bitnet_resnet18(pretrained=False, scale_op="median", ternary=False, checkpoint_path=None):
+def bitnet_resnet18(pretrained=False, scale_op="median", ternary=True, checkpoint_path=None):
     """
     BitResNet-18 model for CIFAR-100.
 
@@ -196,7 +196,7 @@ def bitnet_resnet18(pretrained=False, scale_op="median", ternary=False, checkpoi
     return model
 
 
-def bitnet_resnet50(pretrained=False, scale_op="median", ternary=False):
+def bitnet_resnet50(pretrained=False, scale_op="median", ternary=True):
     """
     BitResNet-50 model for CIFAR-100.
 
@@ -231,7 +231,7 @@ def bitnet_resnet50(pretrained=False, scale_op="median", ternary=False):
     return model
 
 
-def bitnet_mobilenetv2(pretrained=False, scale_op="median", width_mult=1.0, ternary=False):
+def bitnet_mobilenetv2(pretrained=False, scale_op="median", width_mult=1.0, ternary=True):
     """
     BitMobileNetV2 model for CIFAR-100.
 
@@ -267,7 +267,7 @@ def bitnet_mobilenetv2(pretrained=False, scale_op="median", width_mult=1.0, tern
     return model
 
 
-def bitnet_convnextv2(pretrained=False, scale_op="median", ternary=False):
+def bitnet_convnextv2(pretrained=False, scale_op="median", ternary=True):
     """
     BitConvNeXtv2 model for CIFAR-100.
 
