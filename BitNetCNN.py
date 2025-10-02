@@ -109,6 +109,9 @@ class LitNetCNNKD(LitBit):
             student=student,
             teacher=None
         )
+        # Override metrics for MNIST (10 classes instead of 100)
+        self.acc_fp = MulticlassAccuracy(num_classes=10).eval()
+        self.acc_tern = MulticlassAccuracy(num_classes=10).eval()
 
     def configure_optimizers(self):
         # Use AdamW for MNIST instead of SGD
