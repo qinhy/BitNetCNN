@@ -647,27 +647,30 @@ def setup_trainer(args, lit_module):
     strategy = args.strategy if hasattr(args, 'strategy') else "auto"
 
     # Use appropriate strategy for multi-GPU training
+    import sys
     if devices > 1 or devices == -1:
         if strategy == "auto":
             # Check if NCCL is available (for CUDA GPUs)
-            import sys
             if sys.platform == "win32":
-                # Windows doesn't support NCCL, use gloo backend
-                strategy = "ddp_spawn"
-                print(f"[Multi-GPU] Windows detected, using ddp_spawn with gloo backend")
+                # Windows doesn't support NCCL, must use gloo backend
+                from pytorch_lightning.strategies import DDPStrategy
+                strategy = DDPStrategy(process_group_backend="gloo")
+                print(f"[Multi-GPU] Windows detected, using DDP with gloo backend")
             else:
                 try:
                     import torch.distributed
                     if torch.cuda.is_available() and torch.distributed.is_nccl_available():
                         strategy = "ddp"
                     else:
-                        strategy = "ddp_spawn"
-                        print(f"[Multi-GPU] NCCL not available, using ddp_spawn with gloo backend")
+                        from pytorch_lightning.strategies import DDPStrategy
+                        strategy = DDPStrategy(process_group_backend="gloo")
+                        print(f"[Multi-GPU] NCCL not available, using DDP with gloo backend")
                 except:
-                    strategy = "ddp_spawn"
-                    print(f"[Multi-GPU] Using ddp_spawn strategy")
+                    from pytorch_lightning.strategies import DDPStrategy
+                    strategy = DDPStrategy(process_group_backend="gloo")
+                    print(f"[Multi-GPU] Using DDP with gloo backend")
 
-        print(f"[Multi-GPU] Training on {devices if devices > 0 else 'all'} GPUs with {strategy} strategy")
+        print(f"[Multi-GPU] Training on {devices if devices > 0 else 'all'} GPUs")
 
     trainer = pl.Trainer(
         max_epochs=args.epochs,
