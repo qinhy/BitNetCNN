@@ -646,11 +646,28 @@ def setup_trainer(args, lit_module):
     devices = args.gpus if hasattr(args, 'gpus') else 1
     strategy = args.strategy if hasattr(args, 'strategy') else "auto"
 
-    # Use DDP for multi-GPU training
+    # Use appropriate strategy for multi-GPU training
     if devices > 1 or devices == -1:
         if strategy == "auto":
-            strategy = "ddp"
-        print(f"[Multi-GPU] Using {devices if devices > 0 else 'all'} GPUs with {strategy} strategy")
+            # Check if NCCL is available (for CUDA GPUs)
+            import sys
+            if sys.platform == "win32":
+                # Windows doesn't support NCCL, use gloo backend
+                strategy = "ddp_spawn"
+                print(f"[Multi-GPU] Windows detected, using ddp_spawn with gloo backend")
+            else:
+                try:
+                    import torch.distributed
+                    if torch.cuda.is_available() and torch.distributed.is_nccl_available():
+                        strategy = "ddp"
+                    else:
+                        strategy = "ddp_spawn"
+                        print(f"[Multi-GPU] NCCL not available, using ddp_spawn with gloo backend")
+                except:
+                    strategy = "ddp_spawn"
+                    print(f"[Multi-GPU] Using ddp_spawn strategy")
+
+        print(f"[Multi-GPU] Training on {devices if devices > 0 else 'all'} GPUs with {strategy} strategy")
 
     trainer = pl.Trainer(
         max_epochs=args.epochs,
