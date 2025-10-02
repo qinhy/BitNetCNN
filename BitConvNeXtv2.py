@@ -59,14 +59,14 @@ class ConvNeXtV2Block(nn.Module):
         dim (int): Number of input channels.
         drop_path (float): Stochastic depth rate. Default: 0.0
     """
-    def __init__(self, dim, drop_path=0.):
+    def __init__(self, dim, drop_path=0.,scale_op="median"):
         super().__init__()
-        self.dwconv = Bit.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim) # depthwise conv
+        self.dwconv = Bit.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim) # depthwise co, scale_op=scale_opnv
         self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = Bit.Linear(dim, 4 * dim) # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = Bit.Linear(dim, 4 * dim) # pointwise/1x1 convs, implemented with linear laye, scale_op=scale_oprs
         self.act = nn.GELU()
         self.grn = GRN(4 * dim)
-        self.pwconv2 = Bit.Linear(4 * dim, dim)
+        self.pwconv2 = Bit.Linear(4 * dim, dim, scale_op=scale_op)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
@@ -97,7 +97,6 @@ class ConvNeXtV2(nn.Module):
     """
     def __init__(self, in_chans=3, num_classes=1000, 
                  depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], 
-                 drop_path_rate=0., head_init_scale=1.
                  ):
         super().__init__()
         self.in_chans = in_chans
@@ -110,13 +109,14 @@ class ConvNeXtV2(nn.Module):
         self.downsample_layers = nn.ModuleList() # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
             Bit.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
+            Bit.Conv2d(in_chans, dims[0], kernel_size=4, stride=4, scale_op=scale_op),
             LayerNorm(dims[0], eps=1e-6, data_format="channels_first")
         )
         self.downsample_layers.append(stem)
         for i in range(3):
             downsample_layer = nn.Sequential(
                     LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                    Bit.Conv2d(dims[i], dims[i+1], kernel_size=2, stride=2),
+                    Bit.Conv2d(dims[i], dims[i+1], kernel_size=2, stride=2, scale_op=scale_op),
             )
             self.downsample_layers.append(downsample_layer)
 
@@ -125,13 +125,13 @@ class ConvNeXtV2(nn.Module):
         cur = 0
         for i in range(4):
             stage = nn.Sequential(
-                *[ConvNeXtV2Block(dim=dims[i], drop_path=dp_rates[cur + j]) for j in range(depths[i])]
+                *[ConvNeXtV2Block(dim=dims[i], drop_path=dp_rates[cur + j], scale_op=scale_op) for j in range(depths[i])]
             )
             self.stages.append(stage)
             cur += depths[i]
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6) # final norm layer
-        self.head = Bit.Linear(dims[-1], num_classes)
+        self.head = Bit.Linear(dims[-1], num_classes, scale_op=scale_op)
 
         self.apply(self._init_weights)
         self.head.weight.data.mul_(head_init_scale)
@@ -155,7 +155,7 @@ class ConvNeXtV2(nn.Module):
     def clone(self):
         return ConvNeXtV2(self.in_chans, self.num_classes, self.depths, self.dims, self.drop_path_rate, self.head_init_scale)
     @staticmethod
-    def convnextv2(size='atto',num_classes=100, drop_path_rate=0.3):
+    def convnextv2(size='atto',num_classes=100, drop_path_rate=0.3, scale_op="median"):
         params = {            
             "atto":dict(depths=[2, 2, 6, 2], dims=[40, 80, 160, 320]),
             "femt":dict(depths=[2, 2, 6, 2], dims=[48, 96, 192, 384]),
@@ -166,7 +166,7 @@ class ConvNeXtV2(nn.Module):
             "larg":dict(depths=[3, 3, 27, 3], dims=[192, 384, 768, 1536]),
             "huge":dict(depths=[3, 3, 27, 3], dims=[352, 704, 1408, 2816])
         }
-        return ConvNeXtV2(**params[size],num_classes=num_classes,drop_path_rate=drop_path_rate)
+        return ConvNeXtV2(**params[size],num_classes=num_classes,drop_path_rate=drop_path_rate,scale_op=scale_op)
 
 # ----------------------------
 # Teacher: convnextv2 from HF

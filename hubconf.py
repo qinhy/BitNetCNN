@@ -1,309 +1,433 @@
+# -*- coding: utf-8 -*-
 """
-PyTorch Hub configuration for BitNetCNN models.
+BitNet model factory & checkpoint loader (refactored)
 
-Usage:
-    import torch
+Public API (unchanged):
+    - bitnet_mnist(...)
+    - bitnet_resnet(...), bitnet_resnet18(...), bitnet_resnet50(...)
+    - bitnet_mobilenetv2(...)
+    - bitnet_convnextv2(...)
 
-    # Load BitNetCNN for MNIST
-    model = torch.hub.load('qinhy/BitNetCNN', 'bitnet_mnist', pretrained=True)
-
-    # Load BitResNet18 for CIFAR-100
-    model = torch.hub.load('qinhy/BitNetCNN', 'bitnet_resnet18', pretrained=True)
-
-    # Load BitResNet50 for CIFAR-100
-    model = torch.hub.load('qinhy/BitNetCNN', 'bitnet_resnet50', pretrained=True)
-
-    # Load BitMobileNetV2 for CIFAR-100
-    model = torch.hub.load('qinhy/BitNetCNN', 'bitnet_mobilenetv2', pretrained=True)
-
-    # Load BitConvNeXtv2 for CIFAR-100
-    model = torch.hub.load('qinhy/BitNetCNN', 'bitnet_convnextv2', pretrained=True)
+Highlights:
+    • Backward-compatible torch.load with/without weights_only
+    • Robust checkpoint selection (prefers model_ema > model > raw state_dict)
+    • Proper dataset fullname and class-count helpers
+    • Correct ConvNeXtV2 filename construction & dataset handling
+    • Optional local checkpoint override, graceful URL fallbacks (.zip → .pt)
+    • Gentle loads (strict=False) and optional ternary conversion reload
 """
 
-dependencies = ['torch', 'torchvision']
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+import os
+import zipfile
+import tempfile
+import urllib.request
 
 import torch
 import torch.nn as nn
-import zipfile
-import os
-import tempfile
+
 from BitNetCNN import NetCNN
-from common_utils import Bit, convert_to_ternary
+from common_utils import Bit, convert_to_ternary  # noqa: F401 (Bit may be used externally)
+
+# ---------------------------------------------------------------------
+# Constants & dataset registry
+# ---------------------------------------------------------------------
+
+BASE_URL = "https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/"
+
+# Filename templates for published checkpoints
+RESNET_FILE_TMPL     = "bit_resnet_{model_size}_{dataset}_{ternary}.{ext}"
+MBNV2_FILE_TMPL      = "bit_mobilenetv2_x{model_size}_{dataset}_{ternary}.{ext}"
+CONVNEXT_FILE_TMPL   = "bit_convnextv2_{model_size}_{dataset}_{ternary}.{ext}"
+
+# Canonical dataset specs
+DATASETS: Dict[str, Dict[str, Any]] = {
+    "c100": {
+        "aliases": {"c100", "cifar100", "cifar-100"},
+        "num_classes": 100,
+        "url_tag": "c100",
+        "full": "CIFAR-100",
+    },
+    "c10": {
+        "aliases": {"c10", "cifar10", "cifar-10"},
+        "num_classes": 10,
+        "url_tag": "c10",
+        "full": "CIFAR-10",
+    },
+    # Add more datasets here when supported:
+    # "imagenet": {"aliases": {"imagenet", "in1k", "ilsvrc2012"}, "num_classes": 1000, "url_tag": "in1k", "full": "ImageNet-1k"},
+}
+
+# ---------------------------------------------------------------------
+# Small utility helpers
+# ---------------------------------------------------------------------
+
+def _canon_dataset(name: str) -> str:
+    """Return canonical dataset key (e.g., 'c100'). Defaults to 'c100' with a note."""
+    n = (name or "").lower().strip()
+    for key, spec in DATASETS.items():
+        if n == key or n in spec["aliases"]:
+            return key
+    print(f"[info] Unrecognized dataset='{name}', defaulting to CIFAR-100.")
+    return "c100"
 
 
-def _load_checkpoint_from_file(path):
+def _fullname_for(ds_key: str) -> str:
+    """Human-readable dataset name (e.g., 'CIFAR-100')."""
+    return str(DATASETS[ds_key]["full"])
+
+
+def _num_classes_for(ds_key: str) -> int:
+    """Number of classes for dataset (e.g., 100 for CIFAR-100)."""
+    return int(DATASETS[ds_key]["num_classes"])
+
+
+def _urljoin(filename: str) -> str:
+    """Prefix BASE_URL unless filename is already an absolute http(s) URL."""
+    if filename.startswith(("http://", "https://")):
+        return filename
+    return BASE_URL.rstrip("/") + "/" + filename.lstrip("/")
+
+
+def _ensure_list(x: Union[str, Iterable[str]]) -> List[str]:
+    if isinstance(x, str):
+        return [x]
+    return list(x)
+
+
+def _safe_torch_load(path: str, map_location: str = "cpu"):
     """
-    Load checkpoint from file, supporting both .pt and .zip formats.
-
-    Args:
-        path (str): Path to checkpoint file (.pt or .zip)
-
-    Returns:
-        dict: Loaded checkpoint
+    torch.load with graceful fallback for older PyTorch that doesn't support weights_only.
     """
-    if path.endswith('.zip'):
-        # Extract .pt file from zip
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)  # new kw
+    except TypeError:
+        return torch.load(path, map_location=map_location)  # older PyTorch
+
+
+def _pick_state_dict(ckpt: Any) -> Dict[str, torch.Tensor]:
+    """
+    Accepts either:
+      • raw state_dict (OrderedDict)
+      • dict containing model weights under common keys (model_ema > model > state_dict)
+    Returns a state_dict-like mapping.
+    """
+    if isinstance(ckpt, dict):
+        # Prefer EMA if present
+        for key in ("model_ema", "ema", "ema_state_dict"):
+            if key in ckpt and isinstance(ckpt[key], dict):
+                return ckpt[key]
+        # Then standard keys
+        for key in ("model", "state_dict"):
+            if key in ckpt and isinstance(ckpt[key], dict):
+                return ckpt[key]
+    # Might already be a raw state_dict (e.g., OrderedDict)
+    if hasattr(ckpt, "keys") and hasattr(ckpt, "items"):
+        return ckpt  # type: ignore
+    raise ValueError("Unrecognized checkpoint format; no state_dict found.")
+
+
+def _extract_accuracy(ckpt: Any) -> Optional[Union[float, str]]:
+    """
+    Opportunistically extract accuracy from common fields.
+    """
+    if isinstance(ckpt, dict):
+        for k in ("acc_tern", "acc", "top1", "val_acc"):
+            if k in ckpt:
+                return ckpt[k]
+    return None
+
+
+# ---------------------------------------------------------------------
+# File / URL checkpoint loaders
+# ---------------------------------------------------------------------
+
+def _load_checkpoint_from_file(path: str) -> Any:
+    """
+    Load checkpoint (dict or state_dict) from a local .pt or .zip path.
+    """
+    if path.endswith(".zip"):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with zipfile.ZipFile(path, 'r') as zip_ref:
-                # Find .pt file in zip
-                pt_files = [f for f in zip_ref.namelist() if f.endswith('.pt')]
+            with zipfile.ZipFile(path, "r") as zf:
+                pt_files = [f for f in zf.namelist() if f.endswith(".pt")]
                 if not pt_files:
-                    raise ValueError(f"No .pt file found in {path}")
-
-                # Extract first .pt file
+                    raise ValueError(f"No .pt file found in zip: {path}")
                 pt_file = pt_files[0]
-                zip_ref.extract(pt_file, tmpdir)
-                extracted_path = os.path.join(tmpdir, pt_file)
-
-                # Load checkpoint
-                checkpoint = torch.load(extracted_path, map_location='cpu', weights_only=False)
-                return checkpoint
+                zf.extract(pt_file, tmpdir)
+                extracted = os.path.join(tmpdir, pt_file)
+                return _safe_torch_load(extracted, map_location="cpu")
     else:
-        # Load .pt file directly
-        return torch.load(path, map_location='cpu', weights_only=False)
+        return _safe_torch_load(path, map_location="cpu")
 
 
-def _load_checkpoint_from_url(url):
+def _load_checkpoint_from_url(url: str) -> Any:
     """
-    Load checkpoint from URL, supporting both .pt and .zip formats.
-
-    Args:
-        url (str): URL to checkpoint file
-
-    Returns:
-        dict or OrderedDict: Loaded checkpoint or state_dict
+    Load checkpoint (dict or state_dict) from a remote .pt or .zip URL.
     """
-    if url.endswith('.zip'):
-        # Download and extract
-        import urllib.request
+    if url.endswith(".zip"):
         with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, 'checkpoint.zip')
-
-            # Download zip
+            zip_path = os.path.join(tmpdir, "checkpoint.zip")
             urllib.request.urlretrieve(url, zip_path)
-
-            # Extract and load
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                pt_files = [f for f in zip_ref.namelist() if f.endswith('.pt')]
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                pt_files = [f for f in zf.namelist() if f.endswith(".pt")]
                 if not pt_files:
-                    raise ValueError(f"No .pt file found in zip from {url}")
-
+                    raise ValueError(f"No .pt file found in zip from URL: {url}")
                 pt_file = pt_files[0]
-                zip_ref.extract(pt_file, tmpdir)
-                extracted_path = os.path.join(tmpdir, pt_file)
-
-                return torch.load(extracted_path, map_location='cpu', weights_only=False)
+                zf.extract(pt_file, tmpdir)
+                extracted = os.path.join(tmpdir, pt_file)
+                return _safe_torch_load(extracted, map_location="cpu")
     else:
-        # Use torch hub's built-in download
-        return torch.hub.load_state_dict_from_url(url, map_location='cpu', check_hash=False)
+        # torch.hub helper supports caching & hashing; keep check_hash=False for flexible releases
+        return torch.hub.load_state_dict_from_url(url, map_location="cpu", check_hash=False)
 
 
-def bitnet_mnist(pretrained=False, scale_op="median", ternary=True):
+def _try_load_urls(model: nn.Module, urls: Iterable[str], model_name: str) -> Optional[Dict[str, torch.Tensor]]:
+    """
+    Iterate URL list, trying to load. On first success, load into model (strict=False) and return state_dict.
+    """
+    for i, url in enumerate(_ensure_list(urls)):
+        try:
+            raw = _load_checkpoint_from_url(url)
+            state_dict = _pick_state_dict(raw)
+            model.load_state_dict(state_dict, strict=False)
+            suffix = f" (fallback {i})" if i > 0 else ""
+            acc = _extract_accuracy(raw)
+            note = f" (acc: {acc})" if acc is not None else ""
+            print(f"Loaded pretrained {model_name}{suffix} from {url}{note}")
+            return state_dict
+        except Exception as e:
+            print(f"[warn] Failed to load URL {url}: {e}")
+    return None
+
+
+def _load_pretrained_weights(
+    model: nn.Module,
+    checkpoint_urls: Union[str, Iterable[str]],
+    checkpoint_path: Optional[str] = None,
+    model_name: str = "model",
+) -> Optional[Dict[str, torch.Tensor]]:
+    """
+    Generic loader with local override and URL fallbacks. Returns the used state_dict (or None).
+    """
+    # 1) Local file overrides everything if provided
+    if checkpoint_path:
+        try:
+            raw = _load_checkpoint_from_file(checkpoint_path)
+            state_dict = _pick_state_dict(raw)
+            model.load_state_dict(state_dict, strict=False)
+            acc = _extract_accuracy(raw)
+            note = f" (acc: {acc})" if acc is not None else ""
+            print(f"Loaded checkpoint from {checkpoint_path}{note}")
+            return state_dict
+        except Exception as e:
+            print(f"[warn] Could not load local checkpoint '{checkpoint_path}': {e}")
+
+    # 2) URLs fallback in order
+    state_dict = _try_load_urls(model, checkpoint_urls, model_name)
+    if state_dict is None:
+        print(f"[warn] Could not load pretrained weights for {model_name}. Using random init.")
+    return state_dict
+
+
+def _convert_to_ternary_if_needed(model: nn.Module, ternary: bool, state_dict: Optional[Dict[str, torch.Tensor]]) -> nn.Module:
+    """
+    Optionally convert to ternary inference model and non-strictly reload the same state_dict.
+    """
+    if ternary and state_dict is not None:
+        model = convert_to_ternary(model)
+        model.load_state_dict(state_dict, strict=False)
+        print("Converted to ternary inference model")
+    return model
+
+
+# ---------------------------------------------------------------------
+# Public model factories
+# ---------------------------------------------------------------------
+
+def bitnet_mnist(
+    pretrained: bool = False,
+    scale_op: str = "median",
+    ternary: bool = True,
+    checkpoint_path: Optional[str] = None,
+) -> nn.Module:
     """
     BitNetCNN model for MNIST (1 channel, 10 classes).
-
-    Args:
-        pretrained (bool): If True, loads pre-trained weights
-        scale_op (str): Scale operation for quantization ('mean' or 'median')
-        ternary (bool): If True, returns ternary inference model (int8 weights)
-
-    Returns:
-        nn.Module: BitNetCNN model
     """
     model = NetCNN(in_channels=1, num_classes=10, expand_ratio=5, scale_op=scale_op)
 
-    if pretrained:
-        # Try to load from GitHub releases or a hosted URL
-        try:
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_netcnn_small_mnist_best_fp.pt'
-            state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
-            if 'model' in state_dict:
-                state_dict = state_dict['model']
-            model.load_state_dict(state_dict)
-            print(f"Loaded pretrained BitNetCNN MNIST model")
-        except Exception as e:
-            print(f"Warning: Could not load pretrained weights: {e}")
-            print("Returning model with random initialization")
-
-    if ternary:
-        model = convert_to_ternary(model)
-        model.load_state_dict(state_dict)
-        print("Converted to ternary inference model")
-
-    return model
+    state_dict: Optional[Dict[str, torch.Tensor]] = None
+    if pretrained or checkpoint_path:
+        checkpoint_url = "https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_netcnn_small_mnist_ternary.zip"
+        state_dict = _load_pretrained_weights(model, checkpoint_url, checkpoint_path, model_name="BitNetCNN MNIST")
+    return _convert_to_ternary_if_needed(model, ternary, state_dict)
 
 
-def bitnet_resnet18(pretrained=False, scale_op="median", ternary=True, checkpoint_path=None):
+def bitnet_resnet(
+    pretrained: bool = False,
+    model_size: Union[str, int] = "18",
+    dataset: str = "c100",
+    scale_op: str = "median",
+    ternary: bool = True,
+    checkpoint_path: Optional[str] = None,
+) -> nn.Module:
     """
-    BitResNet-18 model for CIFAR-100.
+    Bit-ResNet builder for CIFAR-style inputs.
 
-    Args:
-        pretrained (bool): If True, loads pre-trained weights from GitHub releases
-        scale_op (str): Scale operation for quantization ('mean' or 'median')
-        ternary (bool): If True, returns ternary inference model (int8 weights)
-        checkpoint_path (str): Path to local checkpoint file (overrides pretrained)
-
-    Returns:
-        nn.Module: BitResNet18 model
+    model_size: "18" or "50"
+    dataset: "c100"|"c10"|aliases
     """
-    from BitResNet18 import BitResNet18CIFAR, BottleneckBit
+    ds = _canon_dataset(dataset)
+    model_size = str(model_size)
 
-    model = BitResNet18CIFAR(BottleneckBit, [2,2,2,2], num_classes=100, scale_op=scale_op)
+    if model_size == "18":
+        from BitResNet18 import BitResNet18CIFAR, BottleneckBit
+        model = BitResNet18CIFAR(BottleneckBit, [2, 2, 2, 2], num_classes=_num_classes_for(ds), scale_op=scale_op)
+    elif model_size == "50":
+        from BitResNet50 import BitResNet50CIFAR
+        model = BitResNet50CIFAR(num_classes=_num_classes_for(ds), scale_op=scale_op)
+    else:
+        raise ValueError(f"Unsupported model_size='{model_size}'. Use '18' or '50'.")
 
-    # Load from local checkpoint if provided
-    if checkpoint_path is not None:
-        try:
-            checkpoint = _load_checkpoint_from_file(checkpoint_path)
-            if 'model' in checkpoint:
-                state_dict = checkpoint['model']
-            else:
-                state_dict = checkpoint
-            model.load_state_dict(state_dict, strict=False)
-            acc = checkpoint.get('acc_tern', checkpoint.get('acc', 'unknown'))
-            print(f"Loaded checkpoint from {checkpoint_path} (acc: {acc})")
-        except Exception as e:
-            print(f"Warning: Could not load checkpoint from {checkpoint_path}: {e}")
-    # Load from GitHub releases
-    elif pretrained:
-        try:
-            # Try ternary checkpoint first (prefer .zip for smaller size)
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_resnet_18_c100_ternary.pt.zip'
-            checkpoint = _load_checkpoint_from_url(checkpoint_url)
-            if 'model' in checkpoint:
-                state_dict = checkpoint['model']
-            else:
-                state_dict = checkpoint
-            model.load_state_dict(state_dict, strict=False)
-            print(f"Loaded pretrained BitResNet18 CIFAR-100 model (ternary)")
-        except Exception:
-            # Fallback to .pt file
-            try:
-                checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_resnet_18_c100_ternary.pt'
-                checkpoint = _load_checkpoint_from_url(checkpoint_url)
-                if 'model' in checkpoint:
-                    state_dict = checkpoint['model']
-                else:
-                    state_dict = checkpoint
-                model.load_state_dict(state_dict, strict=False)
-                print(f"Loaded pretrained BitResNet18 CIFAR-100 model (ternary, .pt)")
-            except Exception as e:
-                print(f"Warning: Could not load pretrained weights: {e}")
-                print("Returning model with random initialization")
+    state_dict: Optional[Dict[str, torch.Tensor]] = None
+    if checkpoint_path or pretrained:
+        filenames = [
+            RESNET_FILE_TMPL.format(
+                model_size=model_size,
+                dataset=ds,
+                ternary=("ternary" if ternary else "best_fp"),
+                ext=ext,
+            )
+            for ext in ("zip", "pt")
+        ]
+        checkpoint_urls = [_urljoin(f) for f in filenames]
+        state_dict = _load_pretrained_weights(
+            model,
+            checkpoint_urls,
+            checkpoint_path,
+            model_name=f"BitResNet{model_size} {_fullname_for(ds)}{' (ternary)' if ternary else ''}",
+        )
 
-    if ternary:
-        model = convert_to_ternary(model)
-        model.load_state_dict(state_dict)
-        print("Converted to ternary inference model")
-
-    return model
+    return _convert_to_ternary_if_needed(model, ternary, state_dict)
 
 
-def bitnet_resnet50(pretrained=False, scale_op="median", ternary=True):
+def bitnet_resnet18(
+    pretrained: bool = False,
+    dataset: str = "c100",
+    scale_op: str = "median",
+    ternary: bool = True,
+    checkpoint_path: Optional[str] = None,
+) -> nn.Module:
+    return bitnet_resnet(
+        pretrained=pretrained,
+        model_size="18",
+        dataset=dataset,
+        scale_op=scale_op,
+        ternary=ternary,
+        checkpoint_path=checkpoint_path,
+    )
+
+
+def bitnet_resnet50(
+    pretrained: bool = False,
+    dataset: str = "c100",
+    scale_op: str = "median",
+    ternary: bool = True,
+    checkpoint_path: Optional[str] = None,
+) -> nn.Module:
+    return bitnet_resnet(
+        pretrained=pretrained,
+        model_size="50",
+        dataset=dataset,
+        scale_op=scale_op,
+        ternary=ternary,
+        checkpoint_path=checkpoint_path,
+    )
+
+
+def _format_mbnv2_width_tag(width_mult: float) -> int:
     """
-    BitResNet-50 model for CIFAR-100.
-
-    Args:
-        pretrained (bool): If True, loads pre-trained weights
-        scale_op (str): Scale operation for quantization ('mean' or 'median')
-        ternary (bool): If True, returns ternary inference model (int8 weights)
-
-    Returns:
-        nn.Module: BitResNet50 model
+    Convert width multiplier (e.g., 1.0 → 100, 1.4 → 140) for filename tags.
+    Rounds to nearest integer percentage.
     """
-    from BitResNet50 import BitResNet50CIFAR
-
-    model = BitResNet50CIFAR(num_classes=100, scale_op=scale_op)
-
-    if pretrained:
-        try:
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_resnet_50_c100_best_fp.pt'
-            state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
-            if 'model' in state_dict:
-                state_dict = state_dict['model']
-            model.load_state_dict(state_dict)
-            print(f"Loaded pretrained BitResNet50 CIFAR-100 model")
-        except Exception as e:
-            print(f"Warning: Could not load pretrained weights: {e}")
-            print("Returning model with random initialization")
-
-    if ternary:
-        model = convert_to_ternary(model)
-        model.load_state_dict(state_dict)
-        print("Converted to ternary inference model")
-
-    return model
+    return int(round(width_mult * 100))
 
 
-def bitnet_mobilenetv2(pretrained=False, scale_op="median", width_mult=1.0, ternary=True):
+def bitnet_mobilenetv2(
+    pretrained: bool = False,
+    width_mult: float = 1.0,
+    dataset: str = "c100",
+    scale_op: str = "median",
+    ternary: bool = True,
+    checkpoint_path: Optional[str] = None,
+) -> nn.Module:
     """
-    BitMobileNetV2 model for CIFAR-100.
+    Bit-MobileNetV2 for CIFAR-style inputs.
 
-    Args:
-        pretrained (bool): If True, loads pre-trained weights
-        scale_op (str): Scale operation for quantization ('mean' or 'median')
-        width_mult (float): Width multiplier for model channels
-        ternary (bool): If True, returns ternary inference model (int8 weights)
-
-    Returns:
-        nn.Module: BitMobileNetV2 model
+    width_mult: e.g., 0.75, 1.0, 1.4 (published checkpoints typically: 75, 100, 140…)
     """
     from BitMobileNetV2 import BitMobileNetV2
 
-    model = BitMobileNetV2(num_classes=100, width_mult=width_mult, scale_op=scale_op)
+    ds = _canon_dataset(dataset)
+    model = BitMobileNetV2(num_classes=_num_classes_for(ds), width_mult=width_mult, scale_op=scale_op)
 
-    if pretrained:
-        try:
-            checkpoint_url = f'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_mobilenetv2_{width_mult}_c100_best_fp.pt'
-            state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
-            if 'model' in state_dict:
-                state_dict = state_dict['model']
-            model.load_state_dict(state_dict)
-            print(f"Loaded pretrained BitMobileNetV2 (width={width_mult}) CIFAR-100 model")
-        except Exception as e:
-            print(f"Warning: Could not load pretrained weights: {e}")
-            print("Returning model with random initialization")
+    state_dict: Optional[Dict[str, torch.Tensor]] = None
+    if checkpoint_path or pretrained:
+        size_tag = _format_mbnv2_width_tag(width_mult)
+        filenames = [
+            MBNV2_FILE_TMPL.format(
+                model_size=size_tag,
+                dataset=ds,
+                ternary=("ternary" if ternary else "best_fp"),
+                ext=ext,
+            )
+            for ext in ("zip", "pt")
+        ]
+        checkpoint_urls = [_urljoin(f) for f in filenames]
+        state_dict = _load_pretrained_weights(
+            model,
+            checkpoint_urls,
+            checkpoint_path,
+            model_name=f"BitMobileNetV2 x{width_mult} {_fullname_for(ds)}{' (ternary)' if ternary else ''}",
+        )
 
-    if ternary:
-        model = convert_to_ternary(model)
-        model.load_state_dict(state_dict)
-        print("Converted to ternary inference model")
-
-    return model
+    return _convert_to_ternary_if_needed(model, ternary, state_dict)
 
 
-def bitnet_convnextv2(pretrained=False, scale_op="median", ternary=True):
+def bitnet_convnextv2(
+    pretrained: bool = False,
+    model_size: str = "nano",
+    dataset: str = "c100",
+    scale_op: str = "median",
+    ternary: bool = True,
+    checkpoint_path: Optional[str] = None,
+) -> nn.Module:
     """
-    BitConvNeXtv2 model for CIFAR-100.
+    Bit-ConvNeXtV2 family for CIFAR-style inputs.
 
-    Args:
-        pretrained (bool): If True, loads pre-trained weights
-        scale_op (str): Scale operation for quantization ('mean' or 'median') - Note: not used in ConvNeXtV2
-        ternary (bool): If True, returns ternary inference model (int8 weights)
-
-    Returns:
-        nn.Module: BitConvNeXtv2 model
+    model_size: e.g., "femto" | "pico" | "nano" | "tiny" | "base" ... (match your releases)
     """
     from BitConvNeXtv2 import ConvNeXtV2
 
-    # ConvNeXtV2 uses smaller dims for CIFAR-100
-    model = ConvNeXtV2(in_chans=3, num_classes=100,
-                       depths=[3, 3, 9, 3], dims=[48, 96, 192, 384])
+    ds = _canon_dataset(dataset)
+    model = ConvNeXtV2.convnextv2(size=model_size, num_classes=_num_classes_for(ds), scale_op=scale_op)
 
-    if pretrained:
-        try:
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_convnextv2_c100_best_fp.pt'
-            state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
-            if 'model' in state_dict:
-                state_dict = state_dict['model']
-            model.load_state_dict(state_dict)
-            print(f"Loaded pretrained BitConvNeXtv2 CIFAR-100 model")
-        except Exception as e:
-            print(f"Warning: Could not load pretrained weights: {e}")
-            print("Returning model with random initialization")
+    state_dict: Optional[Dict[str, torch.Tensor]] = None
+    if checkpoint_path or pretrained:
+        filenames = [
+            CONVNEXT_FILE_TMPL.format(
+                model_size=model_size,
+                dataset=ds,
+                ternary=("ternary" if ternary else "best_fp"),
+                ext=ext,
+            )
+            for ext in ("zip", "pt")
+        ]
+        checkpoint_urls = [_urljoin(f) for f in filenames]
+        state_dict = _load_pretrained_weights(
+            model,
+            checkpoint_urls,
+            checkpoint_path,
+            model_name=f"BitConvNeXtv2 {model_size} {_fullname_for(ds)}{' (ternary)' if ternary else ''}",
+        )
 
-    if ternary:
-        model = convert_to_ternary(model)
-        model.load_state_dict(state_dict)
-        print("Converted to ternary inference model")
-
-    return model
+    return _convert_to_ternary_if_needed(model, ternary, state_dict)
