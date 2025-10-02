@@ -233,8 +233,8 @@ def _convert_to_ternary_if_needed(model: nn.Module, ternary: bool, state_dict: O
     """
     Optionally convert to ternary inference model and non-strictly reload the same state_dict.
     """
+    model = convert_to_ternary(model)
     if ternary and state_dict is not None:
-        model = convert_to_ternary(model)
         model.load_state_dict(state_dict, strict=False)
         print("Converted to ternary inference model")
     return model
