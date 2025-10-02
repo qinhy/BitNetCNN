@@ -1,13 +1,8 @@
 # mnist_bitnet_lightning.py
-import argparse, os, copy
+import argparse
 import torch
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
-
-# --- Lightning imports ---
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-
 from torchmetrics.classification import MulticlassAccuracy
 
 # Import from common_utils
