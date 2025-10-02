@@ -401,6 +401,42 @@ class CIFAR100DataModule(pl.LightningDataModule):
                           num_workers=self.num_workers, pin_memory=True,
                           persistent_workers=True if self.num_workers > 0 else False)
 
+# ----------------------------
+# MNIST DataModule
+# ----------------------------
+class MNISTDataModule(pl.LightningDataModule):
+    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4):
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def setup(self, stage=None):
+        train_tfm = transforms.Compose([
+            transforms.RandomCrop(28, padding=2),
+            transforms.RandomRotation(10),
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+        test_tfm = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+        self.train_ds = datasets.MNIST(root=self.data_dir, train=True, download=True, transform=train_tfm)
+        self.val_ds   = datasets.MNIST(root=self.data_dir, train=False, download=True, transform=test_tfm)
+        self.test_ds  = self.val_ds  # same for MNIST
+
+    def train_dataloader(self):
+        return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True,
+                          num_workers=self.num_workers, pin_memory=True,persistent_workers=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False,
+                          num_workers=self.num_workers, pin_memory=True,persistent_workers=True)
+
+    def test_dataloader(self):
+        return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False,
+                          num_workers=self.num_workers, pin_memory=True,persistent_workers=True)
 
 # ----------------------------
 # Export callback (save best FP & ternary)
