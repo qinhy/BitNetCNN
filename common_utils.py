@@ -468,7 +468,8 @@ class ExportBestTernary(Callback):
             pl_module.print(f"[OK] saved {fp_path} (val/acc_tern={current*100:.2f}%)")
             # save ternary PoT export
             tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu().eval()
-            tern_path = os.path.join(self.out_dir, f"bit_{model_name}_{model_size}_{dataset_name}_ternary.pt")
+            tern_path = os.path.join(self.out_dir,
+                                     f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_acc@{current*100:.2f}.pt")
             torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
             pl_module.print(f"[OK] exported ternary PoT -> {tern_path}")
 
