@@ -97,6 +97,7 @@ class ConvNeXtV2(nn.Module):
     """
     def __init__(self, in_chans=3, num_classes=1000, 
                  depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], 
+                 drop_path_rate=0., head_init_scale=1.,scale_op="median"
                  ):
         super().__init__()
         self.in_chans = in_chans
@@ -108,7 +109,6 @@ class ConvNeXtV2(nn.Module):
 
         self.downsample_layers = nn.ModuleList() # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
-            Bit.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
             Bit.Conv2d(in_chans, dims[0], kernel_size=4, stride=4, scale_op=scale_op),
             LayerNorm(dims[0], eps=1e-6, data_format="channels_first")
         )
