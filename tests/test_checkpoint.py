@@ -6,14 +6,14 @@ import zipfile
 import os
 
 # Path to your checkpoint
-checkpoint_zip = "bit_resnet_18_c100_ternary_val_acc@0.71688.pt.zip"
-checkpoint_pt = "bit_resnet_18_c100_ternary_val_acc@0.71688.pt"
+checkpoint_zip = "./models/bit_resnet_18_c100_ternary.zip"
+checkpoint_pt = "./models/bit_resnet_18_c100_ternary_val_acc@0.71688.pt"
 
 # Extract if needed
 if os.path.exists(checkpoint_zip) and not os.path.exists(checkpoint_pt):
     print(f"Extracting {checkpoint_zip}...")
     with zipfile.ZipFile(checkpoint_zip, 'r') as zip_ref:
-        zip_ref.extractall('.')
+        zip_ref.extractall('./models')
     print(f"Extracted to {checkpoint_pt}")
 
 # Load checkpoint to inspect

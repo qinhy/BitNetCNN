@@ -127,6 +127,7 @@ def bitnet_mnist(pretrained=False, scale_op="median", ternary=True):
 
     if ternary:
         model = convert_to_ternary(model)
+        model.load_state_dict(state_dict)
         print("Converted to ternary inference model")
 
     return model
@@ -191,6 +192,7 @@ def bitnet_resnet18(pretrained=False, scale_op="median", ternary=True, checkpoin
 
     if ternary:
         model = convert_to_ternary(model)
+        model.load_state_dict(state_dict)
         print("Converted to ternary inference model")
 
     return model
@@ -226,6 +228,7 @@ def bitnet_resnet50(pretrained=False, scale_op="median", ternary=True):
 
     if ternary:
         model = convert_to_ternary(model)
+        model.load_state_dict(state_dict)
         print("Converted to ternary inference model")
 
     return model
@@ -262,6 +265,7 @@ def bitnet_mobilenetv2(pretrained=False, scale_op="median", width_mult=1.0, tern
 
     if ternary:
         model = convert_to_ternary(model)
+        model.load_state_dict(state_dict)
         print("Converted to ternary inference model")
 
     return model
@@ -299,6 +303,7 @@ def bitnet_convnextv2(pretrained=False, scale_op="median", ternary=True):
 
     if ternary:
         model = convert_to_ternary(model)
+        model.load_state_dict(state_dict)
         print("Converted to ternary inference model")
 
     return model

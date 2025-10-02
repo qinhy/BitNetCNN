@@ -2,7 +2,7 @@
 
 ## Current Status
 
-✅ Your checkpoint is ready: `bit_resnet_18_c100_ternary_val_acc@0.71688.pt.zip`
+✅ Your checkpoint is ready: `./models/bit_resnet_18_c100_ternary.zip`
 - **Model**: BitResNet18
 - **Dataset**: CIFAR-100
 - **Accuracy**: 71.69%
@@ -16,7 +16,7 @@ import torch
 
 # Load model with your local checkpoint (.zip works directly!)
 model = torch.hub.load('.', 'bitnet_resnet18', source='local',
-                       checkpoint_path='bit_resnet_18_c100_ternary_val_acc@0.71688.pt.zip')
+                       checkpoint_path='./models/bit_resnet_18_c100_ternary.zip')
 
 # Test it
 import torchvision.transforms as transforms
@@ -50,7 +50,7 @@ print(f'Accuracy: {100.*correct/total:.2f}%')
 
 ```bash
 # Rename to standard format (keep as .zip for smaller size)
-mv bit_resnet_18_c100_ternary_val_acc@0.71688.pt.zip bit_resnet_18_c100_ternary.pt.zip
+mv ./models/bit_resnet_18_c100_ternary.zip bit_resnet_18_c100_ternary.pt.zip
 
 # ✅ Upload the .zip file - it's 8-9x smaller!
 # The hub code automatically extracts it
