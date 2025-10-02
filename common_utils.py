@@ -18,6 +18,7 @@ import pytorch_lightning as pl
 from pytorch_lightning import Callback
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from torchvision.transforms import InterpolationMode
 from torchmetrics.classification import MulticlassAccuracy
 
 # Constants
@@ -437,6 +438,103 @@ class MNISTDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False,
                           num_workers=self.num_workers, pin_memory=True,persistent_workers=True)
+# ----------------------------
+# ImageNet DataModule
+# ----------------------------
+class ImageNetDataModule(pl.LightningDataModule):
+    """
+    <data_dir>/
+    train/
+        class_0/ *.jpeg
+        class_1/ *.jpeg
+        ...
+    val/
+        class_0/ *.jpeg
+        class_1/ *.jpeg
+        ...
+
+    ImageNet (1k) DataModule that matches your CIFAR style:
+    - train: RandomResizedCrop(224) + HFlip + Normalize
+    - val:   Resize(256) -> CenterCrop(224) + Normalize
+    - optional mixup/cutmix via your `mix_collate` and (aug_mixup, aug_cutmix, alpha)
+    """
+    def __init__(self,
+                 data_dir: str,
+                 batch_size: int,
+                 num_workers: int = 8,
+                 aug_mixup: bool = False,
+                 aug_cutmix: bool = False,
+                 alpha: float = 0.2,
+                 image_size: int = 224,
+                 val_resize: int = 256):
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.aug_mixup = aug_mixup
+        self.aug_cutmix = aug_cutmix
+        self.alpha = alpha
+        self.image_size = image_size
+        self.val_resize = val_resize
+
+        # Standard ImageNet stats
+        self.mean = (0.485, 0.456, 0.406)
+        self.std  = (0.229, 0.224, 0.225)
+
+        # Will be set in setup()
+        self.train_ds = None
+        self.val_ds = None
+
+    def setup(self, stage=None):
+        train_tf = transforms.Compose([
+            transforms.RandomResizedCrop(self.image_size, interpolation=InterpolationMode.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(self.mean, self.std),
+        ])
+        val_tf = transforms.Compose([
+            transforms.Resize(self.val_resize, interpolation=InterpolationMode.BICUBIC),
+            transforms.CenterCrop(self.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(self.mean, self.std),
+        ])
+
+        # ImageFolder expects subfolders per class
+        self.train_ds = datasets.ImageFolder(root=f"{self.data_dir}/train", transform=train_tf)
+        self.val_ds   = datasets.ImageFolder(root=f"{self.data_dir}/val",   transform=val_tf)
+
+        # (Optional) you can inspect class count if needed:
+        # self.num_classes = len(self.train_ds.classes)
+
+    def train_dataloader(self):
+        # Reuse your mix_collate just like CIFAR100DataModule
+        collate = partial(
+            mix_collate,
+            aug_cutmix=self.aug_cutmix,
+            aug_mixup=self.aug_mixup,
+            alpha=self.alpha,
+        )
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=True if self.num_workers > 0 else False,
+            collate_fn=collate,
+        )
+
+    def val_dataloader(self, batch_size: int = None):
+        bs = batch_size if batch_size is not None else self.batch_size
+        return DataLoader(
+            self.val_ds,
+            batch_size=bs,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False
+        )
 
 # ----------------------------
 # Export callback (save best FP & ternary)
@@ -651,7 +749,7 @@ def add_common_args(parser):
                         help="Distributed training strategy (default: auto)")
     return parser
 
-def setup_trainer(args, lit_module):
+def setup_trainer(args, lit_module, dm = None):
     """
     Setup common PyTorch Lightning training components.
 
@@ -663,11 +761,11 @@ def setup_trainer(args, lit_module):
         tuple: (trainer, datamodule)
     """
     pl.seed_everything(args.seed, workers=True)
-
-    dm = CIFAR100DataModule(
-        data_dir=args.data, batch_size=args.batch_size, num_workers=4,
-        aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
-    )
+    if dm is None:
+        dm = CIFAR100DataModule(
+            data_dir=args.data, batch_size=args.batch_size, num_workers=4,
+            aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
+        )
 
     os.makedirs(args.out, exist_ok=True)
     logger = CSVLogger(save_dir=args.out, name="logs")
