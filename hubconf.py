@@ -115,7 +115,7 @@ def bitnet_mnist(pretrained=False, scale_op="median", ternary=False):
     if pretrained:
         # Try to load from GitHub releases or a hosted URL
         try:
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/releases/download/v1.0/bit_netcnn_small_mnist_best_fp.pt'
+            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_netcnn_small_mnist_best_fp.pt'
             state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
             if 'model' in state_dict:
                 state_dict = state_dict['model']
@@ -166,7 +166,7 @@ def bitnet_resnet18(pretrained=False, scale_op="median", ternary=False, checkpoi
     elif pretrained:
         try:
             # Try ternary checkpoint first (prefer .zip for smaller size)
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/releases/download/v1.0/bit_resnet_18_c100_ternary.pt.zip'
+            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_resnet_18_c100_ternary.pt.zip'
             checkpoint = _load_checkpoint_from_url(checkpoint_url)
             if 'model' in checkpoint:
                 state_dict = checkpoint['model']
@@ -177,7 +177,7 @@ def bitnet_resnet18(pretrained=False, scale_op="median", ternary=False, checkpoi
         except Exception:
             # Fallback to .pt file
             try:
-                checkpoint_url = 'https://github.com/qinhy/BitNetCNN/releases/download/v1.0/bit_resnet_18_c100_ternary.pt'
+                checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_resnet_18_c100_ternary.pt'
                 checkpoint = _load_checkpoint_from_url(checkpoint_url)
                 if 'model' in checkpoint:
                     state_dict = checkpoint['model']
@@ -214,7 +214,7 @@ def bitnet_resnet50(pretrained=False, scale_op="median", ternary=False):
 
     if pretrained:
         try:
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/releases/download/v1.0/bit_resnet_50_c100_best_fp.pt'
+            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_resnet_50_c100_best_fp.pt'
             state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
             if 'model' in state_dict:
                 state_dict = state_dict['model']
@@ -250,7 +250,7 @@ def bitnet_mobilenetv2(pretrained=False, scale_op="median", width_mult=1.0, tern
 
     if pretrained:
         try:
-            checkpoint_url = f'https://github.com/qinhy/BitNetCNN/releases/download/v1.0/bit_mobilenetv2_{width_mult}_c100_best_fp.pt'
+            checkpoint_url = f'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_mobilenetv2_{width_mult}_c100_best_fp.pt'
             state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
             if 'model' in state_dict:
                 state_dict = state_dict['model']
@@ -287,7 +287,7 @@ def bitnet_convnextv2(pretrained=False, scale_op="median", ternary=False):
 
     if pretrained:
         try:
-            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/releases/download/v1.0/bit_convnextv2_c100_best_fp.pt'
+            checkpoint_url = 'https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_convnextv2_c100_best_fp.pt'
             state_dict = torch.hub.load_state_dict_from_url(checkpoint_url, map_location='cpu', check_hash=False)
             if 'model' in state_dict:
                 state_dict = state_dict['model']
