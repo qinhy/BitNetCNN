@@ -188,3 +188,4 @@ ckpt_c100_kd/
 /ckpt_c100_kd_rn50
 /ckpt_c100_convnextv2
 run.bat
+/ckpt_mnist
