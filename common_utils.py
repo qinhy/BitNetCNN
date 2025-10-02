@@ -609,6 +609,9 @@ def add_common_args(parser):
     parser.add_argument("--cutmix", action="store_true")
     parser.add_argument("--mix-alpha", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use (default: 1, use -1 for all available)")
+    parser.add_argument("--strategy", type=str, default="auto", choices=["auto", "ddp", "ddp_spawn", "fsdp"],
+                        help="Distributed training strategy (default: auto)")
     return parser
 
 def setup_trainer(args, lit_module):
@@ -638,15 +641,28 @@ def setup_trainer(args, lit_module):
 
     accelerator = "cpu" if args.cpu else "auto"
     precision = "16-mixed" if args.amp else "32-true"
+
+    # Multi-GPU setup
+    devices = args.gpus if hasattr(args, 'gpus') else 1
+    strategy = args.strategy if hasattr(args, 'strategy') else "auto"
+
+    # Use DDP for multi-GPU training
+    if devices > 1 or devices == -1:
+        if strategy == "auto":
+            strategy = "ddp"
+        print(f"[Multi-GPU] Using {devices if devices > 0 else 'all'} GPUs with {strategy} strategy")
+
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         accelerator=accelerator,
-        devices=1,
+        devices=devices,
+        strategy=strategy,
         precision=precision,
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=50,
         deterministic=False,
+        sync_batchnorm=True if (devices > 1 or devices == -1) else False,
     )
 
     return trainer, dm
