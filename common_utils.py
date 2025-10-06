@@ -4,10 +4,13 @@ This module contains shared components used across different BitNet model implem
 """
 
 from functools import partial
+from multiprocessing import freeze_support
 import os
 import math
 import copy
 import argparse
+import random
+from PIL import Image
 import torch
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
@@ -403,6 +406,111 @@ class CIFAR100DataModule(pl.LightningDataModule):
                           persistent_workers=True if self.num_workers > 0 else False)
 
 # ----------------------------
+# Mixup / CutMix Collate Function
+# ----------------------------
+def mix_collate(batch, *, aug_cutmix: bool, aug_mixup: bool, alpha: float):
+    xs, ys = zip(*batch)
+    x = torch.stack(xs)
+    y = torch.tensor(ys)
+    
+    if not (aug_cutmix or aug_mixup):
+        return x, y
+
+    lam = 1.0
+    idx = torch.randperm(x.size(0))
+
+    if aug_cutmix and random.random() < 0.5:
+        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        h, w = x.size(2), x.size(3)
+        rx, ry = torch.randint(w, (1,)).item(), torch.randint(h, (1,)).item()
+        rw = int(w * math.sqrt(1 - lam))
+        rh = int(h * math.sqrt(1 - lam))
+        x1, y1 = max(rx - rw // 2, 0), max(ry - rh // 2, 0)
+        x2, y2 = min(rx + rw // 2, w), min(ry + rh // 2, h)
+
+        x[:, :, y1:y2, x1:x2] = x[idx, :, y1:y2, x1:x2]
+        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
+        return x, (y, y[idx], lam)
+    else:
+        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        x = lam * x + (1 - lam) * x[idx]
+        return x, (y, y[idx], lam)
+
+# ----------------------------
+# Tiny ImageNet Dataset Helper
+# ----------------------------
+class TinyImageNetDataset(datasets.ImageFolder):
+    """Custom ImageFolder class for Tiny ImageNet dataset."""
+    def __init__(self, root, transform=None):
+        super().__init__(root=root, transform=transform)
+
+# ----------------------------
+# TinyImageNet DataModule
+# ----------------------------
+class TinyImageNetDataModule(pl.LightningDataModule):
+    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
+                 aug_mixup: bool = False, aug_cutmix: bool = False, alpha: float = 1.0):
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.aug_mixup = aug_mixup
+        self.aug_cutmix = aug_cutmix
+        self.alpha = alpha
+
+    def setup(self, stage=None):
+        mean = (0.4802, 0.4481, 0.3975)
+        std  = (0.2302, 0.2265, 0.2262)
+
+        train_tfm = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomCrop(64, padding=4),
+            transforms.RandomRotation(10),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+
+        val_tfm = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+
+        train_dir = f"{self.data_dir}/tiny-imagenet-200/train"
+        val_dir   = f"{self.data_dir}/tiny-imagenet-200/val"
+
+        # If needed, restructure val set (must be done once outside the module)
+        self.train_ds = TinyImageNetDataset(train_dir, transform=train_tfm)
+        self.val_ds   = TinyImageNetDataset(val_dir, transform=val_tfm)
+
+    def train_dataloader(self):
+        collate = partial(
+            mix_collate,
+            aug_cutmix=self.aug_cutmix,
+            aug_mixup=self.aug_mixup,
+            alpha=self.alpha,
+        )
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=True if self.num_workers > 0 else False,
+            collate_fn=collate,
+        )
+
+    def val_dataloader(self, batch_size: int = None):
+        return DataLoader(
+            self.val_ds,
+            batch_size=batch_size or self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False,
+        )
+    
+# ----------------------------
 # MNIST DataModule
 # ----------------------------
 class MNISTDataModule(pl.LightningDataModule):
@@ -438,6 +546,7 @@ class MNISTDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False,
                           num_workers=self.num_workers, pin_memory=True,persistent_workers=True)
+
 # ----------------------------
 # ImageNet DataModule
 # ----------------------------
@@ -821,3 +930,13 @@ def setup_trainer(args, lit_module, dm = None):
     )
 
     return trainer, dm
+
+
+if __name__ == '__main__':
+    freeze_support()
+    dm = TinyImageNetDataModule("./data",4)
+    dm.setup()
+    for data,label in dm.train_dataloader():
+        break
+    print(data)
+    print(label)
