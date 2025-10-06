@@ -582,8 +582,8 @@ class TinyImageNetDataModule(pl.LightningDataModule):
         ])
 
         # If needed, restructure val set (must be done once outside the module)
-        self.train_ds = TinyImageNetDataset(self.data_dir, split='train', download=True)
-        self.val_ds   = TinyImageNetDataset(self.data_dir, split='val', download=True)
+        self.train_ds = TinyImageNetDataset(self.data_dir, split='train', transform=train_tfm, download=True)
+        self.val_ds   = TinyImageNetDataset(self.data_dir, split='val', transform=val_tfm, download=True)
 
     def train_dataloader(self):
         collate = partial(
