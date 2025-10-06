@@ -191,7 +191,8 @@ class LitBitResNetKD(LitBit):
                          model_size='18',
                          hint_points=["layer1", "layer2", "layer3", "layer4"],
                          student=student,
-                         teacher=teacher)
+                         teacher=teacher,
+                         num_classes=num_classes)
 
 # -------------------------------------------------
 # CLI / main
