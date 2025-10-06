@@ -33,14 +33,14 @@ class BottleneckBit(nn.Module):
         return self.act(out + identity)
 
 class BitResNet50(nn.Module):
-    def __init__(self, num_classes, scale_op="median", in_ch=3, cifar_stem=True):
+    def __init__(self, num_classes, scale_op="median", in_ch=3, small_stem=True):
         super().__init__()
         self.in_ch = in_ch
         self.scale_op = scale_op
         self.num_classes = num_classes
         self.inplanes = 64
 
-        if cifar_stem:
+        if small_stem:
             # CIFAR stem: 3x3 stride 1, no maxpool
             self.stem = nn.Sequential(
                 Bit.Conv2d(in_ch, self.inplanes, kernel_size=3, stride=1, padding=1, bias=True, scale_op=scale_op),
@@ -87,8 +87,8 @@ class BitResNet50(nn.Module):
 
     def clone(self):
         # Preserve stem choice by checking for MaxPool presence
-        cifar_stem = not any(isinstance(m, nn.MaxPool2d) for m in self.stem.modules())
-        return BitResNet50(self.num_classes, self.scale_op, self.in_ch, cifar_stem=cifar_stem)
+        small_stem = not any(isinstance(m, nn.MaxPool2d) for m in self.stem.modules())
+        return BitResNet50(self.num_classes, self.scale_op, self.in_ch, small_stem=small_stem)
 
 # -------------------------------------------------
 # Teachers
@@ -115,6 +115,43 @@ def make_resnet50_imagenet_teacher(device="cuda"):
     model.eval()
     return model.to(device)
 
+# ------------- NEW: Tiny-ImageNet teacher (from zeyuanyin/tiny-imagenet) -------------
+def _strip_module_prefix(sd):
+    return { (k[7:] if k.startswith("module.") else k): v for k, v in sd.items() }
+
+def make_resnet50_tiny_teacher_from_hf(epochs: int = 200, device: str = "cuda"):
+    """
+    Load Tiny-ImageNet ResNet-50 weights from `zeyuanyin/tiny-imagenet`.
+    epochs: one of {50, 100, 200} to pick rn50_{epochs}ep/checkpoint_best.pth
+    """
+    assert epochs in (50, 100, 200), "epochs must be 50/100/200"
+    # Tiny-ImageNet uses 200 classes and a CIFAR-like stem (3x3 s1, no maxpool)
+    model = resnet50(num_classes=200)
+    model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+    model.maxpool = nn.Identity()
+
+    # download checkpoint from the model zoo repo
+    fname = f"rn50_{epochs}ep/checkpoint_best.pth"
+    ckpt_path = hf_hub_download(repo_id="zeyuanyin/tiny-imagenet", filename=fname)
+
+    ckpt = torch.load(ckpt_path, map_location="cpu",weights_only=False)
+    # try a few common keys
+    if isinstance(ckpt, dict):
+        if "model" in ckpt and isinstance(ckpt["model"], dict):
+            sd = ckpt["model"]
+        elif "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+            sd = ckpt["state_dict"]
+        else:
+            sd = ckpt
+    else:
+        sd = ckpt
+
+    sd = _strip_module_prefix(sd)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    if missing:    print(f"[teacher][tiny][rn50_{epochs}ep] Missing keys: {missing}")
+    if unexpected: print(f"[teacher][tiny][rn50_{epochs}ep] Unexpected keys: {unexpected}")
+    return model.eval().to(device)
+
 # -------------------------------------------------
 # LightningModule wrapper: KD + hints (dataset-aware)
 # -------------------------------------------------
@@ -123,20 +160,30 @@ class LitBitResNet50KD(LitBit):
                  alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
                  width_mult=1.0, amp=True,
                  export_dir="./checkpoints_kd_rn50",
-                 dataset_name='c100'):
-        """
-        dataset_name: 'c100' or 'imnet'
-        """
-        num_classes = 100 if dataset_name == 'c100' else 1000
-        cifar_stem = dataset_name == 'c100'
+                 dataset_name='c100',
+                 timnet_teacher_epochs: int = 200):  # NEW
 
-        student = BitResNet50(num_classes=num_classes, scale_op=scale_op, cifar_stem=cifar_stem)
+        if dataset_name in ['c100','cifar100']:
+            num_classes = 100
+            small_stem = True
+        elif dataset_name in ['imnet','imagenet']:
+            num_classes = 1000
+            small_stem = False
+        elif dataset_name == 'timnet':
+            num_classes = 200
+            small_stem = True   # Tiny uses the CIFAR-like 3x3 stem (no maxpool)
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset_name}")
 
-        # Choose teacher
-        if dataset_name == 'c100':
+        student = BitResNet50(num_classes=num_classes, scale_op=scale_op, small_stem=small_stem)
+
+        # Teacher per dataset
+        if dataset_name in ['c100','cifar100']:
             teacher = make_resnet50_cifar_teacher_from_hf(device="cpu")
-        elif dataset_name in ['imnet', 'imagenet']:
+        elif dataset_name in ['imnet','imagenet']:
             teacher = make_resnet50_imagenet_teacher(device="cpu")
+        elif dataset_name == 'timnet':
+            teacher = make_resnet50_tiny_teacher_from_hf(epochs=timnet_teacher_epochs, device="cpu")
         else:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -149,7 +196,8 @@ class LitBitResNet50KD(LitBit):
                          model_size='50',
                          hint_points=["layer1", "layer2", "layer3", "layer4"],
                          student=student,
-                         teacher=teacher)
+                         teacher=teacher,
+                         num_classes=num_classes)
 
 # -------------------------------------------------
 # CLI / main
@@ -158,8 +206,12 @@ def parse_args():
     p = argparse.ArgumentParser()
     p = add_common_args(p)
     p.add_argument("--model_size", type=str, default="50")
-    p.add_argument("--dataset", type=str, default="c100", choices=["c100", "imnet"],
+    p.add_argument("--dataset", type=str, default="timnet",
+                   choices=["c100","imnet","timnet"],
                    help="Dataset to use (affects stems, classes, transforms)")
+    p.add_argument("--timnet_teacher_epochs", type=int, default=200,
+                   choices=[50, 100, 200],
+                   help="Which Tiny-ImageNet ResNet-50 teacher to load from zeyuanyin/tiny-imagenet")
     p.set_defaults(out=None)
     return p.parse_args()
 
@@ -176,17 +228,24 @@ def main():
         label_smoothing=args.label_smoothing,
         alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
         scale_op=args.scale_op, amp=args.amp, export_dir=export_dir,
-        dataset_name=args.dataset
+        dataset_name=args.dataset, timnet_teacher_epochs=args.timnet_teacher_epochs
     )
 
     dmargs = dict(
-        data_dir=args.data, batch_size=args.batch_size, num_workers=4,
-        aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
+        data_dir=args.data,
+        batch_size=args.batch_size,
+        num_workers=4,
+        aug_mixup=args.mixup,
+        aug_cutmix=args.cutmix,
+        alpha=args.mix_alpha
     )
-    if args.dataset == "c100":
+
+    if args.dataset=="c100":
         dm = CIFAR100DataModule(**dmargs)
-    elif args.dataset == "imnet":
+    elif args.dataset=="imnet":
         dm = ImageNetDataModule(**dmargs)
+    elif args.dataset=="timnet":
+        dm = TinyImageNetDataModule(**dmargs)
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
 

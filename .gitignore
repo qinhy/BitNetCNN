@@ -204,3 +204,4 @@ run.bat
 # models/*.zip will be tracked
 /checkpoints_c100_rn50
 /checkpoints_timnet_rn18
+/checkpoints_timnet_rn50
