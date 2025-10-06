@@ -115,6 +115,7 @@ name = "bitnetcnn"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "pillow" },
     { name = "pytorch-lightning" },
     { name = "timm" },
     { name = "torch" },
@@ -130,6 +131,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pillow", specifier = ">=11.3.0" },
     { name = "pytorch-lightning", specifier = ">=2.5.5" },
     { name = "timm", specifier = ">=1.0.20" },
     { name = "torch", specifier = "==2.4.1+cu124", index = "https://download.pytorch.org/whl/cu124" },
