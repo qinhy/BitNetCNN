@@ -177,7 +177,7 @@ def make_convnextv2_from_timm(size='pico',device="cuda", pretrained=True):
     return m.eval().to(device)
 
 # ----------------------------
-# LightningModule: KD + hints (no ternary)
+# LightningModule: KD + hints
 # ----------------------------
 class LitConvNeXtV2KD(LitBit):
     def __init__(self, lr, wd, epochs, model_size="convnextv2_pico",
