@@ -139,18 +139,39 @@ def make_mobilenetv2_teacher_from_hub(variant="cifar100_mobilenetv2_x1_4", devic
 class LitBitMBv2KD(LitBit):
     def __init__(self, lr, wd, epochs, label_smoothing=0.1,
                  alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
-                 width_mult=1.0, amp=True,teacher_variant="cifar100_mobilenetv2_x1_4",
-                 export_dir="./checkpoints_c100_mbv2"):
+                 width_mult=1.0, amp=True, teacher_variant="cifar100_mobilenetv2_x1_4",
+                 export_dir="./checkpoints_c100_mbv2",
+                 dataset_name='c100',
+                 timnet_teacher_epochs: int = 200):  # NEW
+
+        if dataset_name in ['c100','cifar100']:
+            num_classes = 100
+        elif dataset_name == 'timnet':
+            num_classes = 200
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset_name}")
+
+        student = BitMobileNetV2(num_classes=num_classes, width_mult=width_mult, scale_op=scale_op)
+
+        # Teacher per dataset
+        if dataset_name in ['c100','cifar100']:
+            teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu")
+        elif dataset_name == 'timnet':
+            teacher = make_mobilenetv2_tiny_teacher_from_hf(epochs=timnet_teacher_epochs, device="cpu")
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset_name}")
+
         super().__init__(lr, wd, epochs, label_smoothing,
         alpha_kd, alpha_hint, T, scale_op,
         width_mult, amp,
         export_dir,
-        dataset_name='c100',
+        dataset_name=dataset_name,
         model_name='mobilenetv2',
         model_size='x140',
-        hint_points=BitMobileNetV2(num_classes=100, width_mult=width_mult, scale_op=scale_op).hint_names,
-        student=BitMobileNetV2(num_classes=100, width_mult=width_mult, scale_op=scale_op),
-        teacher=make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu"),)
+        hint_points=student.hint_names,
+        student=student,
+        teacher=teacher,
+        num_classes=num_classes)
         
 # ----------------------------
 # CLI / main
@@ -158,13 +179,22 @@ class LitBitMBv2KD(LitBit):
 def parse_args():
     p = argparse.ArgumentParser()
     p = add_common_args(p)
-    p.set_defaults(out="./ckpt_c100_kd_mbv2", batch_size=512)
+    p.set_defaults(out=None, batch_size=512)
     p.add_argument("--width-mult", type=float, default=1.4)
     p.add_argument("--teacher-variant", type=str, default="cifar100_mobilenetv2_x1_4")
+    p.add_argument("--dataset", type=str, default="c100",
+                   choices=["c100","timnet"],
+                   help="Dataset to use (affects classes, transforms)")
+    p.add_argument("--timnet_teacher_epochs", type=int, default=200,
+                   choices=[50, 100, 200],
+                   help="Which Tiny-ImageNet MobileNetV2 teacher to load from zeyuanyin/tiny-imagenet")
     return p.parse_args()
 
 def main():
     args = parse_args()
+
+    if args.out is None:
+        args.out = f"./checkpoints_{args.dataset}_mbv2"
 
     lit = LitBitMBv2KD(
         lr=args.lr, wd=args.wd, epochs=args.epochs,
@@ -172,10 +202,28 @@ def main():
         alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
         scale_op=args.scale_op, width_mult=args.width_mult,
         amp=args.amp, teacher_variant=args.teacher_variant,
-        export_dir=args.out
+        export_dir=args.out,
+        dataset_name=args.dataset,
+        timnet_teacher_epochs=args.timnet_teacher_epochs
     )
 
-    trainer, dm = setup_trainer(args, lit)
+    dmargs = dict(
+        data_dir=args.data,
+        batch_size=args.batch_size,
+        num_workers=4,
+        aug_mixup=args.mixup,
+        aug_cutmix=args.cutmix,
+        alpha=args.mix_alpha
+    )
+
+    if args.dataset == "c100":
+        dm = CIFAR100DataModule(**dmargs)
+    elif args.dataset == "timnet":
+        dm = TinyImageNetDataModule(**dmargs)
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+
+    trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)
 
