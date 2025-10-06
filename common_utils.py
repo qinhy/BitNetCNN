@@ -693,7 +693,8 @@ class LitBit(pl.LightningModule):
                  dataset_name='',
                  model_name='',
                  model_size='',
-                 hint_points=[]):
+                 hint_points=[],
+                 num_classes=100):
         super().__init__()
         self.save_hyperparameters(ignore=['student','teacher','_t_feats','_s_feats','_t_handles','_s_handles','_ternary_snapshot'])
         self.scale_op = scale_op
@@ -710,8 +711,8 @@ class LitBit(pl.LightningModule):
         self.kd = KDLoss(T=T).eval()
         self.hint = AdaptiveHintLoss().eval()
         self.hint_points = hint_points
-        self.acc_fp = MulticlassAccuracy(num_classes=100).eval()
-        self.acc_tern = MulticlassAccuracy(num_classes=100).eval()
+        self.acc_fp = MulticlassAccuracy(num_classes=num_classes).eval()
+        self.acc_tern = MulticlassAccuracy(num_classes=num_classes).eval()
         self._ternary_snapshot = None
         self._t_feats = {}
         self._s_feats = {}
