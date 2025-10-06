@@ -59,9 +59,9 @@ class ConvNeXtV2Block(nn.Module):
         dim (int): Number of input channels.
         drop_path (float): Stochastic depth rate. Default: 0.0
     """
-    def __init__(self, dim, drop_path=0.,scale_op="median"):
+    def __init__(self, dim, kernel_size=7, drop_path=0.,scale_op="median"):
         super().__init__()
-        self.dwconv = Bit.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim) # depthwise co, scale_op=scale_opnv
+        self.dwconv = Bit.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size//2, groups=dim) # depthwise co, scale_op=scale_opnv
         self.norm = LayerNorm(dim, eps=1e-6)
         self.pwconv1 = Bit.Linear(dim, 4 * dim) # pointwise/1x1 convs, implemented with linear laye, scale_op=scale_oprs
         self.act = nn.GELU()
