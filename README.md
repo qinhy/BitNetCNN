@@ -75,7 +75,7 @@ BitNetCNN/
 ├── BitConvNeXtv2.py      # BitConvNeXtv2 model and training script
 ├── common_utils.py       # Shared utilities (Bit layers, LitBit, data modules)
 ├── hubconf.py            # PyTorch Hub configuration
-├── models/               # Pre-trained model checkpoints (.zip format)
+├── models/               # Pre-trained model checkpoints (.zip format, ) 
 │   └── bit_resnet_18_c100_ternary.pt.zip
 ├── docs/                 # Documentation
 │   ├── TORCH_HUB_USAGE.md    # Complete PyTorch Hub guide
@@ -90,6 +90,7 @@ BitNetCNN/
 ## Pre-trained Models
 
 Pre-trained models are available via PyTorch Hub and can be loaded automatically:
+MNIST, c100(CIFAR-100), timnet(tiny-imagenet)
 
 | Model | Dataset | Accuracy | Format | Size |
 |-------|---------|----------|--------|------|
