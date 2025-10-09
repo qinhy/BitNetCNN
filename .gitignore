@@ -206,3 +206,4 @@ run.bat
 /checkpoints_timnet_rn18
 /checkpoints_timnet_rn50
 tmp.bat
+/checkpoints_timnet_mbv2

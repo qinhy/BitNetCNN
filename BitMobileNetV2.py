@@ -133,6 +133,11 @@ def make_mobilenetv2_teacher_from_hub(variant="cifar100_mobilenetv2_x1_4", devic
     teacher = torch.hub.load("chenyaofo/pytorch-cifar-models", variant, pretrained=True)
     return teacher.to(device).eval()
 
+def make_resnet18_tiny_teacher_from_self(device: str = "cuda"):
+    model = torch.hub.load('.', 'bitnet_resnet18', source='local',
+                        pretrained = True,dataset= "timnet",ternary = True)
+    return model.to(device)
+
 # ----------------------------
 # LightningModule: KD + hints + ternary eval/export
 # ----------------------------
@@ -157,7 +162,8 @@ class LitBitMBv2KD(LitBit):
         if dataset_name in ['c100','cifar100']:
             teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu")
         elif dataset_name == 'timnet':
-            teacher = make_mobilenetv2_tiny_teacher_from_hf(epochs=timnet_teacher_epochs, device="cpu")
+            teacher = make_resnet18_tiny_teacher_from_self()
+            alpha_hint = 0.0
         else:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -182,7 +188,7 @@ def parse_args():
     p.set_defaults(out=None, batch_size=512)
     p.add_argument("--width-mult", type=float, default=1.4)
     p.add_argument("--teacher-variant", type=str, default="cifar100_mobilenetv2_x1_4")
-    p.add_argument("--dataset", type=str, default="c100",
+    p.add_argument("--dataset", type=str, default="timnet",
                    choices=["c100","timnet"],
                    help="Dataset to use (affects classes, transforms)")
     p.add_argument("--timnet_teacher_epochs", type=int, default=200,
