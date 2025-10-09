@@ -205,3 +205,4 @@ run.bat
 /checkpoints_c100_rn50
 /checkpoints_timnet_rn18
 /checkpoints_timnet_rn50
+tmp.bat
