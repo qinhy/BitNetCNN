@@ -54,6 +54,12 @@ DATASETS: Dict[str, Dict[str, Any]] = {
         "url_tag": "c10",
         "full": "CIFAR-10",
     },
+    "timnet": {
+        "aliases": {"timnet", "tiny-imagenet"},
+        "num_classes": 200,
+        "url_tag": "timnet",
+        "full": "Tiny-ImageNet",
+    },
     # Add more datasets here when supported:
     # "imagenet": {"aliases": {"imagenet", "in1k", "ilsvrc2012"}, "num_classes": 1000, "url_tag": "in1k", "full": "ImageNet-1k"},
 }

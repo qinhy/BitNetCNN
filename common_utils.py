@@ -123,69 +123,117 @@ class Bit:
         """
         Frozen ternary conv:
         y = (Conv(x, Wq) * s_per_out) + b
-        Wq is stored as int8 in {-1,0,+1}. s is float per output channel.
+        Wq in {-1,0,+1} stored as int8. s is float per output channel.
         """
         def __init__(self, w_q, s, bias, stride, padding, dilation, groups):
             super().__init__()
-            self.register_buffer("w_q", w_q.to(torch.int8))
-            self.register_buffer("s", s)  # [out,1,1]
-            self.register_buffer("bias", None if bias is None else bias)
+            # Make them Parameters so param counters include them (but keep frozen)
+            self.w_q  = nn.Parameter(w_q.to(torch.int8), requires_grad=False)   # [out,in,kh,kw]
+            self.s    = nn.Parameter(s,                     requires_grad=False) # [out,1,1]
+            if bias is None:
+                self.register_parameter("bias", None)
+            else:
+                self.bias = nn.Parameter(bias, requires_grad=False)
+
             self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
+            # Optional cache for the float view (not in state_dict, not counted as param)
+            self.register_buffer("_w_q_float", None, persistent=False)
+
+        def _weight(self, dtype, device):
+            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+            return self._w_q_float
 
         def forward(self, x):
-            y = F.conv2d(x, self.w_q.float(), None, self.stride, self.padding, self.dilation, self.groups)
-            y = y * self.s  # broadcast over H,W
+            w = self._weight(x.dtype, x.device)
+            y = F.conv2d(x, w, None, self.stride, self.padding, self.dilation, self.groups)
+            y = y * self.s.to(dtype=y.dtype, device=y.device)
             if self.bias is not None:
-                y = y + self.bias.view(1, -1, 1, 1)
+                y = y + self.bias.to(dtype=y.dtype, device=y.device).view(1, -1, 1, 1)
             return y
 
     class LinearInfer(nn.Module):
         """Frozen ternary linear: y = (x @ Wq^T) * s + b"""
         def __init__(self, w_q, s, bias):
             super().__init__()
-            self.register_buffer("w_q", w_q.to(torch.int8))  # [out,in]
-            self.register_buffer("s", s)                     # [out]
-            self.register_buffer("bias", None if bias is None else bias)
+            self.w_q = nn.Parameter(w_q.to(torch.int8), requires_grad=False)   # [out,in]
+            self.s   = nn.Parameter(s,                    requires_grad=False)  # [out]
+            if bias is None:
+                self.register_parameter("bias", None)
+            else:
+                self.bias = nn.Parameter(bias, requires_grad=False)
+
+            self.register_buffer("_w_q_float", None, persistent=False)
+
+        def _weight(self, dtype, device):
+            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+            return self._w_q_float
 
         def forward(self, x):
-            y = F.linear(x, self.w_q.float(), None)
-            y = y * self.s
+            w = self._weight(x.dtype, x.device)
+            y = F.linear(x, w, bias=None)
+            y = y * self.s.to(dtype=y.dtype, device=y.device)
             if self.bias is not None:
-                y = y + self.bias
+                y = y + self.bias.to(dtype=y.dtype, device=y.device)
             return y
-
+        
     class Conv2dInferP2(nn.Module):
         """
         Ternary conv with power-of-two scales:
-        - We store s_exp per output channel, so scaling is x * 2^s_exp (shift on integer backends).
+        y = Conv(x, Wq) * 2^{s_exp} + b
+        Wq in {-1,0,+1} as int8. s_exp is per-out exponent [out,1,1].
         """
         def __init__(self, w_q, s_exp, bias, stride, padding, dilation, groups):
             super().__init__()
-            self.register_buffer("w_q", w_q.to(torch.int8))
-            self.register_buffer("s_exp", s_exp.to(torch.int8))      # [out,1,1]
-            self.register_buffer("bias", None if bias is None else bias)
+            # Counted as params but frozen
+            self.w_q  = nn.Parameter(w_q.to(torch.int8), requires_grad=False)      # [out,in,kh,kw]
+            self.s_exp = nn.Parameter(s_exp.to(torch.int8), requires_grad=False)   # [out,1,1]
+            if bias is None:
+                self.register_parameter("bias", None)
+            else:
+                self.bias = nn.Parameter(bias, requires_grad=False)                # [out]
+
             self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
+            # Cache float weights per (device,dtype); not saved, not counted
+            self.register_buffer("_w_q_float", None, persistent=False)
+
+        def _weight(self, dtype, device):
+            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+            return self._w_q_float
 
         def forward(self, x):
-            y = F.conv2d(x, self.w_q.float(), None, self.stride, self.padding, self.dilation, self.groups)
-            y = torch.ldexp(y, self.s_exp.to(torch.int32))
+            w = self._weight(x.dtype, x.device)
+            y = F.conv2d(x, w, None, self.stride, self.padding, self.dilation, self.groups)
+            y = torch.ldexp(y, self.s_exp.to(torch.int32, device=y.device))  # broadcast [out,1,1]
             if self.bias is not None:
-                y = y + self.bias.view(1, -1, 1, 1)
+                y = y + self.bias.to(dtype=y.dtype, device=y.device).view(1, -1, 1, 1)
             return y
 
     class LinearInferP2(nn.Module):
-        """Ternary linear with power-of-two output scales."""
+        """Ternary linear with power-of-two output scales: y = (x @ Wq^T) * 2^{s_exp} + b"""
         def __init__(self, w_q, s_exp, bias):
             super().__init__()
-            self.register_buffer("w_q", w_q.to(torch.int8))  # [out,in]
-            self.register_buffer("s_exp", s_exp.to(torch.int8))  # [out]
-            self.register_buffer("bias", None if bias is None else bias)
+            self.w_q   = nn.Parameter(w_q.to(torch.int8), requires_grad=False)     # [out,in]
+            self.s_exp = nn.Parameter(s_exp.to(torch.int8), requires_grad=False)   # [out]
+            if bias is None:
+                self.register_parameter("bias", None)
+            else:
+                self.bias = nn.Parameter(bias, requires_grad=False)                # [out]
+            self.register_buffer("_w_q_float", None, persistent=False)
+
+        def _weight(self, dtype, device):
+            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+            return self._w_q_float
 
         def forward(self, x):
-            y = F.linear(x, self.w_q.float(), None)
-            y = torch.ldexp(y, self.s_exp.to(torch.int32))
+            w = self._weight(x.dtype, x.device)
+            y = F.linear(x, w, bias=None)
+            y = torch.ldexp(y, self.s_exp.to(torch.int32, device=y.device))  # broadcast [out]
             if self.bias is not None:
-                y = y + self.bias
+                y = y + self.bias.to(dtype=y.dtype, device=y.device)
             return y
 
     # ----------------------------
@@ -797,7 +845,7 @@ class LitBit(pl.LightningModule):
                  model_name='',
                  model_size='',
                  hint_points=[],
-                 num_classes=100):
+                 num_classes=-1):
         super().__init__()
         self.save_hyperparameters(ignore=['student','teacher','_t_feats','_s_feats','_t_handles','_s_handles','_ternary_snapshot'])
         self.scale_op = scale_op
@@ -815,17 +863,21 @@ class LitBit(pl.LightningModule):
         self.hint = AdaptiveHintLoss().eval()
         self.hint_points = hint_points
         self.acc_fp = MulticlassAccuracy(num_classes=num_classes).eval()
-        self.acc_tern = MulticlassAccuracy(num_classes=num_classes).eval()
+                        # average='micro', multidim_average='global', top_k=1).eval()
+
         self._ternary_snapshot = None
         self._t_feats = {}
         self._s_feats = {}
+        self._t_handles = []
+        self._s_handles = []
         self.t_acc_fp = None
 
     def setup(self, stage=None):
         if self.teacher:
             self.teacher = self.teacher.to(self.device).eval()
-            self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats)
-            self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats)
+            if self.hparams.alpha_hint>0:
+                self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats)
+                self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats)
 
     def teardown(self, stage=None):
         for h in getattr(self, "_t_handles", []):
@@ -906,23 +958,21 @@ class LitBit(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        def log_val(n,acc,):
+        def log_val(n,model=None,acc=None,x=x,y=y):
+            if acc is None:
+                # acc = (model(x).argmax(1)==y).sum()/x.size(0)
+                acc = self.acc_fp(model(x), y)
             self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+            return acc
+        
         with torch.no_grad():
-            logits_fp = self.student(x)
-            acc_fp = self.acc_fp(logits_fp.softmax(1), y)
-            log_val("acc_fp", acc_fp)
-
-            if self._ternary_snapshot is not None:
-                logits_t = self._ternary_snapshot(x)
-                acc_t = self.acc_tern(logits_t.softmax(1), y)
-                log_val("acc_tern", acc_t)
-
+            acc_fp = log_val("acc_fp", self.student)
+            acc_t = log_val("acc_tern", self._ternary_snapshot)
             if self.hparams.alpha_kd>0:
                 if self.t_acc_fp is None and self.teacher:
-                    logits_t = self.teacher(x)
-                    self.t_acc_fp = self.acc_fp(logits_t.softmax(1), y)
-                log_val("t_acc_fp", self.t_acc_fp)
+                    self.t_acc_fp = log_val("t_acc_fp", self.teacher)
+                else:
+                    log_val("t_acc_fp", acc=self.t_acc_fp)
 
     def configure_optimizers(self):
         opt = torch.optim.SGD(
