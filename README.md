@@ -69,8 +69,7 @@ uv pip install -e .
 ```
 BitNetCNN/
 ├── BitNetCNN.py          # BitNetCNN model and training script
-├── BitResNet18.py        # BitResNet18 model and training script
-├── BitResNet50.py        # BitResNet50 model and training script
+├── BitResNet.py          # BitResNet18/50 models and training script
 ├── BitMobileNetV2.py     # BitMobileNetV2 model and training script
 ├── BitConvNeXtv2.py      # BitConvNeXtv2 model and training script
 ├── common_utils.py       # Shared utilities (Bit layers, LitBit, data modules)
@@ -123,7 +122,7 @@ python BitNetCNN.py --epochs 10 --batch-size 128 --scale-op median
 #### BitResNet18 on CIFAR-100 with Knowledge Distillation
 
 ```bash
-python BitResNet18.py --epochs 100 --batch-size 128 --scale-op median --kd
+python BitResNet.py --model_size 18 --epochs 100 --batch-size 128 --scale-op median --kd
 ```
 
 #### BitMobileNetV2 on CIFAR-100
@@ -138,13 +137,13 @@ Train on multiple GPUs for faster training:
 
 ```bash
 # Use all available GPUs
-python BitResNet18.py --epochs 100 --batch-size 128 --gpus -1 --kd
+python BitResNet.py --model_size 18 --epochs 100 --batch-size 128 --gpus -1 --kd
 
 # Use specific number of GPUs
-python BitResNet18.py --epochs 100 --batch-size 128 --gpus 2 --kd
+python BitResNet.py --model_size 18 --epochs 100 --batch-size 128 --gpus 2 --kd
 
 # Custom DDP strategy (auto-detects Windows/Linux)
-python BitResNet18.py --epochs 100 --batch-size 128 --gpus 2 --strategy ddp --kd
+python BitResNet.py --model_size 18 --epochs 100 --batch-size 128 --gpus 2 --strategy ddp --kd
 ```
 
 **Multi-GPU Features:**

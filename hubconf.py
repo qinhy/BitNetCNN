@@ -286,10 +286,12 @@ def bitnet_resnet(
     model_size = str(model_size)
 
     if model_size == "18":
-        from BitResNet18 import BitResNet18, BottleneckBit
-        model = BitResNet18(BottleneckBit, [2, 2, 2, 2], num_classes=_num_classes_for(ds), scale_op=scale_op)
+        from BitResNet import BitResNet18
+
+        model = BitResNet18(num_classes=_num_classes_for(ds), scale_op=scale_op)
     elif model_size == "50":
-        from BitResNet50 import BitResNet50
+        from BitResNet import BitResNet50
+
         model = BitResNet50(num_classes=_num_classes_for(ds), scale_op=scale_op)
     else:
         raise ValueError(f"Unsupported model_size='{model_size}'. Use '18' or '50'.")
