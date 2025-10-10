@@ -838,7 +838,7 @@ class LitBit(pl.LightningModule):
     def __init__(self, lr, wd, epochs, label_smoothing=0.1,
                  alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
                  width_mult=1.0, amp=True,
-                 export_dir="./checkpoints_c100_mbv2",
+                 export_dir="./ckpt_c100_mbv2",
                  student=None,
                  teacher=None,
                  dataset_name='',
