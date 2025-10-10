@@ -847,7 +847,8 @@ class LitBit(pl.LightningModule):
                  hint_points=[],
                  num_classes=-1):
         super().__init__()
-        self.save_hyperparameters(ignore=['student','teacher','_t_feats','_s_feats','_t_handles','_s_handles','_ternary_snapshot'])
+        self.save_hyperparameters(ignore=['student','teacher','_t_feats','_s_feats',
+                                          '_t_handles','_s_handles','_ternary_snapshot'])
         self.scale_op = scale_op
         self.student = student
         self.teacher = teacher
