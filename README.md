@@ -63,6 +63,7 @@ uv pip install -e .
 - torchvision 0.19.1
 - pytorch-lightning
 - huggingface_hub (for BitResNet18/50)
+- ultralytics (for YOLOv8 distillation)
 
 ## Repository Structure
 
@@ -71,6 +72,7 @@ BitNetCNN/
 ├── BitNetCNN.py          # BitNetCNN model and training script
 ├── BitResNet.py          # BitResNet18/50 models and training script
 ├── BitMobileNetV2.py     # BitMobileNetV2 model and training script
+├── BitYOLOv8Distill.py   # Tiny-ImageNet KD from YOLOv8 into Bit-based YOLOv8 student
 ├── BitConvNeXtv2.py      # BitConvNeXtv2 model and training script
 ├── common_utils.py       # Shared utilities (Bit layers, LitBit, data modules)
 ├── hubconf.py            # PyTorch Hub configuration
@@ -283,3 +285,11 @@ If you use this code in your research, please cite:
 ## Acknowledgments
 
 This implementation is inspired by Microsoft's BitNet research on extreme quantization for neural networks.
+# YOLOv8 ➜ BitNet (Tiny-ImageNet)
+
+```bash
+python BitYOLOv8Distill.py --epochs 30 --batch-size 256 --teacher-variant yolov8n-cls.pt \
+    --width-mult 0.25 --depth-mult 0.34
+```
+
+> Install `ultralytics` (`pip install ultralytics`) and provide a YOLOv8 classification checkpoint (e.g. `yolov8n-cls.pt`). The script builds a Bit-quantised YOLOv8-like student, and `--width-mult` / `--depth-mult` let you scale Tiny-ImageNet capacity.
