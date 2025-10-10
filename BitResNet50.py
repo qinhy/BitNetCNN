@@ -159,7 +159,7 @@ class LitBitResNet50KD(LitBit):
     def __init__(self, lr, wd, epochs, label_smoothing=0.1,
                  alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
                  width_mult=1.0, amp=True,
-                 export_dir="./checkpoints_kd_rn50",
+                 export_dir="./ckpt_kd_rn50",
                  dataset_name='c100',
                  timnet_teacher_epochs: int = 200):  # NEW
 
@@ -219,7 +219,7 @@ def main():
     args = parse_args()
 
     if args.out is None:
-        args.out = f"./checkpoints_{args.dataset}_rn{args.model_size}"
+        args.out = f"./ckpt_{args.dataset}_rn{args.model_size}"
 
     export_dir = f"{args.out}_{args.dataset}"
 

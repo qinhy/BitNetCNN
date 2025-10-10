@@ -145,7 +145,7 @@ class LitBitMBv2KD(LitBit):
     def __init__(self, lr, wd, epochs, label_smoothing=0.1,
                  alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
                  width_mult=1.0, amp=True, teacher_variant="cifar100_mobilenetv2_x1_4",
-                 export_dir="./checkpoints_c100_mbv2",
+                 export_dir="./ckpt_c100_mbv2",
                  dataset_name='c100',
                  timnet_teacher_epochs: int = 200):  # NEW
 
@@ -200,7 +200,7 @@ def main():
     args = parse_args()
 
     if args.out is None:
-        args.out = f"./checkpoints_{args.dataset}_mbv2"
+        args.out = f"./ckpt_{args.dataset}_mbv2"
 
     lit = LitBitMBv2KD(
         lr=args.lr, wd=args.wd, epochs=args.epochs,

@@ -202,8 +202,11 @@ run.bat
 # models/*.pth
 # Allow .zip files (compressed, smaller)
 # models/*.zip will be tracked
-/checkpoints_c100_rn50
+/ckpt_c100_rn50
+/ckpt_timnet_rn18
+/ckpt_timnet_rn50
+tmp.bat
+/ckpt_timnet_mbv2
+checkpoints_timnet_mbv2/
 /checkpoints_timnet_rn18
 /checkpoints_timnet_rn50
-tmp.bat
-/checkpoints_timnet_mbv2
