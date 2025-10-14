@@ -256,7 +256,7 @@ def parse_args():
     p = add_common_args(p)
 
     # Defaults tuned for small images; adjust as needed from CLI
-    p.add_argument("--dataset", type=str, default="c100",
+    p.add_argument("--dataset", type=str, default="timnet",
                    choices=["c10", "cifar10", "c100", "cifar100", "timnet", "tiny",
                             "tinyimagenet", "tiny-imagenet", "imnet", "imagenet", "in1k", "imagenet1k"],
                    help="Target dataset (affects datamodule, num_classes, transforms).")
