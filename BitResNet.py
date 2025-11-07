@@ -595,7 +595,7 @@ class LitBitResNet50KD(LitBitResNetKD):
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser = add_common_args(parser)
-    parser.add_argument("--model_size", type=str, default="18", choices=["18", "50"])
+    parser.add_argument("--model-size", type=str, default="18", choices=["18", "50"])
     parser.add_argument(
         "--dataset",
         type=str,
