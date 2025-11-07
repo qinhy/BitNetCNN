@@ -375,13 +375,17 @@ class SaveOutputHook:
     def __call__(self, module, module_in, module_out):
         self.store[self.key] = module_out
 
-def make_feature_hooks(module: nn.Module, names, store: dict):
+def make_feature_hooks(module: nn.Module, names, feats: dict, idx=0):
     """Register picklable forward hooks; returns list of handles."""
     handles = []
+    if type(names[0]) == tuple:
+        names = [n[idx] for n in names]
     name_set = set(names)
     for n, sub in module.named_modules():
-        if n in name_set:
-            handles.append(sub.register_forward_hook(SaveOutputHook(store, n)))
+        for i,ii in enumerate(name_set):
+            if n.endswith(ii):break
+        if n.endswith(ii):
+            handles.append(sub.register_forward_hook(SaveOutputHook(feats, ii)))
     return handles
 
 # ----------------------------
@@ -877,8 +881,8 @@ class LitBit(pl.LightningModule):
         if self.teacher:
             self.teacher = self.teacher.to(self.device).eval()
             if self.hparams.alpha_hint>0:
-                self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats)
-                self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats)
+                self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats, 0)
+                self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, 1)
 
     def teardown(self, stage=None):
         for h in getattr(self, "_t_handles", []):
@@ -939,12 +943,15 @@ class LitBit(pl.LightningModule):
         # Hints
         loss_hint = 0.0
         if self.hparams.alpha_hint>0 and len(self.hint_points)>0:
-            for n in self.hint_points:
-                if n not in self._s_feats:
-                    raise ValueError(f"Hint point {n} not found in student features of {self._s_feats}.")
-                if n not in self._t_feats:
-                    raise ValueError(f"Hint point {n} not found in teacher features of {self._t_feats}.")
-                loss_hint = loss_hint + self.hint(n, self._s_feats[n].float(), self._t_feats[n].float())
+            for n in self.hint_points:                
+                sn = tn = n
+                if type(n)==tuple:
+                    sn,tn = n
+                if sn not in self._s_feats:
+                    raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
+                if tn not in self._t_feats:
+                    raise ValueError(f"Hint point {tn} not found in teacher features of {self._t_feats}.")
+                loss_hint = loss_hint + self.hint(sn, self._s_feats[sn].float(), self._t_feats[tn].float())
 
         loss = (1.0 - self.hparams.alpha_kd) * loss_ce + self.hparams.alpha_kd * loss_kd + self.hparams.alpha_hint * loss_hint
 
