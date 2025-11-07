@@ -394,7 +394,7 @@ class LitBitYOLOv8KD(LitBit):
             teacher=teacher,
             dataset_name="timnet",
             model_name="yolov8",
-            model_size=f"{model_size_str}_w{width_mult:.2f}_d{depth_mult:.2f}_e{expansion:.2f}_emb{embed_dim}",
+            model_size=f"{model_size_str}",#_w{width_mult:.2f}_d{depth_mult:.2f}_e{expansion:.2f}_emb{embed_dim}",
             hint_points=getattr(student, "hint_points", []),
             num_classes=num_classes,
         )
@@ -436,8 +436,8 @@ def get_parser() -> argparse.ArgumentParser:
                         help="Dropout before classifier.")
 
     parser.add_argument("--print-summary", action="store_true",
-                        help="Print student parameter summary on startup.")
-    
+                        help="Print student parameter summary on startup.")    
+    parser.set_defaults(out=None)
     return parser
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
@@ -469,7 +469,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 # -----------------------------------------------------------------------------
 
 def run_training(args: argparse.Namespace) -> None:
-    export_dir = f"{args.out}_{args.dataset}"
+    export_dir = args.out
     lit = LitBitYOLOv8KD(
         lr=args.lr,
         wd=args.wd,
