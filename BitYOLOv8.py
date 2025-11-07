@@ -212,7 +212,7 @@ class BitYOLOv8Classifier(nn.Module):
         )
 
         # Update hint points
-        self.hint_points = ["stage1", "stage2", "stage3", "stage4"] + (["sppf"] if use_sppf else [])
+        self.hint_points = [("stage1","model.2"), ("stage2","model.4"), ("stage3","model.6"), ("stage4","model.8")] + (["sppf"] if use_sppf else [])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
@@ -423,7 +423,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--depth-mult", type=float, default=None,
                         help="Override depth multiplier (if set, overrides --model-size for depth).")
 
-    parser.add_argument("--teacher-class-map", type=str, default=None,
+    parser.add_argument("--teacher-class-map", type=str, default='./timnet_to_imagenet1k_indices.txt',
                         help="Path to 200-length list (txt or JSON) mapping Tiny-ImageNet order to teacher indices.")
 
     parser.add_argument("--expansion", type=float, default=0.5,
@@ -437,7 +437,7 @@ def get_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--print-summary", action="store_true",
                         help="Print student parameter summary on startup.")
-    parser.set_defaults(alpha_hint=0.0, out="./ckpt_timnet_yolov8")
+    
     return parser
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
