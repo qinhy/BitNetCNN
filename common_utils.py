@@ -10,6 +10,7 @@ import math
 import copy
 import argparse
 import random
+from typing import Tuple
 from PIL import Image
 import torch
 torch.set_float32_matmul_precision('high')
@@ -337,6 +338,77 @@ class Bit:
                 w_q=w_q, s_exp=s_exp, bias=(None if self.bias is None else self.bias.data.clone())
             )
 
+
+def replace_all2Bit(model: nn.Module, scale_op: str = "median", wrap_same: bool = True) -> Tuple[int, int]:
+    convs, linears = 0, 0
+
+    for name, child in list(model.named_children()):
+        # Recurse first
+        c_cnt, l_cnt = replace_all2Bit(child, scale_op, wrap_same)
+        convs += c_cnt
+        linears += l_cnt
+
+        # Determine if child is already a Bit layer (if Bit exists)
+        try:
+            is_bit_conv = isinstance(child, Bit.Conv2d)
+            is_bit_linear = isinstance(child, Bit.Linear)
+        except Exception:
+            is_bit_conv = False
+            is_bit_linear = False
+
+        new_child = None
+
+        # Replace Conv2d with Bit.Conv2d (respect wrap_same)
+        if isinstance(child, nn.Conv2d) and (wrap_same or not is_bit_conv):
+            dev = child.weight.device
+            dt = child.weight.dtype
+
+            new_child = Bit.Conv2d(
+                in_c=child.in_channels,
+                out_c=child.out_channels,
+                kernel_size=child.kernel_size,
+                stride=child.stride,
+                padding=child.padding,
+                dilation=child.dilation,
+                groups=child.groups,
+                bias=(child.bias is not None),
+                scale_op=scale_op,
+            ).to(device=dev, dtype=dt)
+
+            # Best-effort: copy weights/bias if attributes are compatible
+            # with torch.no_grad():
+            #     if hasattr(new_child, "weight") and new_child.weight.shape == child.weight.shape:
+            #         new_child.weight.copy_(child.weight)
+            #     if child.bias is not None and hasattr(new_child, "bias") and new_child.bias is not None:
+            #         new_child.bias.copy_(child.bias)
+
+            convs += 1
+
+        # Replace Linear with Bit.Linear (respect wrap_same)
+        elif isinstance(child, nn.Linear) and (wrap_same or not is_bit_linear):
+            dev = child.weight.device
+            dt = child.weight.dtype
+
+            new_child = Bit.Linear(
+                in_f=child.in_features,
+                out_f=child.out_features,
+                bias=(child.bias is not None),
+                scale_op=scale_op,
+            ).to(device=dev, dtype=dt)
+
+            # Best-effort: copy weights/bias if attributes are compatible
+            # with torch.no_grad():
+            #     if hasattr(new_child, "weight") and new_child.weight.shape == child.weight.shape:
+            #         new_child.weight.copy_(child.weight)
+            #     if child.bias is not None and hasattr(new_child, "bias") and new_child.bias is not None:
+            #         new_child.bias.copy_(child.bias)
+
+            linears += 1
+
+        if new_child is not None:
+            setattr(model, name, new_child)
+
+    return convs, linears
 # ----------------------------
 # KD losses & feature hints (unchanged from your pattern)
 # ----------------------------
