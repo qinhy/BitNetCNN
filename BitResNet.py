@@ -633,7 +633,7 @@ def run_training(args: argparse.Namespace) -> None:
         alpha_hint=args.alpha_hint,
         T=args.T,
         scale_op=args.scale_op,
-        width_mult=args.width_mult,
+        width_mult=1.0,
         amp=args.amp,
         export_dir=export_dir,
         dataset_name=args.dataset,
