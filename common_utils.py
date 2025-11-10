@@ -33,6 +33,10 @@ EPS = 1e-12
 # ----------------------------
 # Quantization Utilities
 # ----------------------------
+def summ(model):
+    for name, module in model.named_modules():
+        print(name, sum(param.numel() for param in module.parameters()))
+
 @torch.no_grad()
 def _pow2_quantize_scale(s: torch.Tensor, min_exp: int = -32, max_exp: int = 31):
     """
