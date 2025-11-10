@@ -1,6 +1,7 @@
 # refactored_yolov8_kd.py
 import argparse
 import json
+from math import ceil
 import os
 from typing import Dict, Iterable, Optional, Tuple, List
 
@@ -35,9 +36,6 @@ def _make_divisible(v: float, divisor: int = 8) -> int:
     if new_v < 0.9 * v:
         new_v += divisor
     return int(new_v)
-
-def _round_depth(n: int, depth_mult: float) -> int:
-    return max(int(round(n * depth_mult)), 1)
 
 # -----------------------------------------------------------------------------
 # Bit-based YOLOv8 classification backbone (parity with Ultralytics' cls head)
@@ -164,7 +162,7 @@ class BitYOLOv8Classifier(nn.Module):
             return _make_divisible(channels * width_mult)
 
         def d(repeats: int) -> int:
-            return _round_depth(repeats, depth_mult)
+            return max(int(round(repeats * depth_mult)), 1)
 
         # base channels (YOLOv8 style)
         c1 = c(64)
@@ -188,10 +186,10 @@ class BitYOLOv8Classifier(nn.Module):
             BitC2f(c4, c4, n=d(6), shortcut=True, expansion=expansion, scale_op=scale_op),
         )
 
-        # NEW: stage4 to match Ultralytics cls backbone (final feature = 256 in nano)
+        dd = 2 if self.width_mult < 0.75 else 3
         self.stage4 = nn.Sequential(
             BitConv(c4, c5, k=3, s=2, scale_op=scale_op),
-            BitC2f(c5, c5, n=d(2), shortcut=True, expansion=expansion, scale_op=scale_op),
+            BitC2f(c5, c5, n=d(dd), shortcut=True, expansion=expansion, scale_op=scale_op),
         )
 
         # If you keep SPPF optional, apply it after stage4 (default off)
@@ -323,6 +321,10 @@ def load_yolov8_teacher(
 # Lightning module
 # -----------------------------------------------------------------------------
 
+def summ(model):
+    for name, module in model.named_modules():
+        print(name, sum(param.numel() for param in module.parameters()))
+
 class LitBitYOLOv8KD(LitBit):
     def __init__(
         self,
@@ -360,7 +362,7 @@ class LitBitYOLOv8KD(LitBit):
             embed_dim=embed_dim,
             dropout=dropout,
         )
-
+        # summ(student)
         class_indices = None
         if teacher_class_map:
             class_indices = _load_class_indices(teacher_class_map, expected=num_classes)
@@ -371,6 +373,7 @@ class LitBitYOLOv8KD(LitBit):
             num_classes=num_classes,
             class_indices=class_indices,
         )
+        # summ(teacher.base_model)
 
         if print_summary:
             total = sum(p.numel() for p in student.parameters())
@@ -469,7 +472,6 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 # -----------------------------------------------------------------------------
 
 def run_training(args: argparse.Namespace) -> None:
-    export_dir = args.out
     lit = LitBitYOLOv8KD(
         lr=args.lr,
         wd=args.wd,
@@ -480,7 +482,7 @@ def run_training(args: argparse.Namespace) -> None:
         T=args.T,
         scale_op=args.scale_op,
         amp=args.amp,
-        export_dir=export_dir,
+        export_dir=args.out,
         teacher_variant=args.teacher_variant,
         teacher_checkpoint=args.teacher_checkpoint,
         width_mult=args.width_mult,
