@@ -1,12 +1,13 @@
 # from https://raw.githubusercontent.com/jaiwei98/MobileNetV4-pytorch
 
-from typing import Optional
+from typing import Literal, Optional
+import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from common_utils import Bit
+from common_utils import *
 
 MNV4ConvSmall_BLOCK_SPECS = {
     "conv0": {
@@ -685,9 +686,78 @@ def build_blocks(layer_spec):
         raise NotImplementedError
     return layers
 
+class MobileNetV4Head(nn.Module):
+    """
+    Flexible head for MobileNet-V4.
+    - pool: 'avg' (default), 'max', or 'avgmax' (concat avg & max)
+    - use_bn: add BatchNorm1d before linear
+    - act: 'relu' | 'gelu' | 'hswish' | None
+    """
+    def __init__(
+        self,
+        in_ch: int,
+        num_classes: int,
+        pool: Literal['avg','max','avgmax'] = 'avg',
+        dropout: float = 0.0,
+        use_bn: bool = False,
+        act: Optional[str] = None
+    ):
+        super().__init__()
+        self.pool_kind = pool
+        if pool == 'avg':
+            self.pool = nn.AdaptiveAvgPool2d(1)
+            out_ch = in_ch
+        elif pool == 'max':
+            self.pool = nn.AdaptiveMaxPool2d(1)
+            out_ch = in_ch
+        elif pool == 'avgmax':
+            self.pool_avg = nn.AdaptiveAvgPool2d(1)
+            self.pool_max = nn.AdaptiveMaxPool2d(1)
+            self.pool = None
+            out_ch = in_ch * 2
+        else:
+            raise ValueError(f"Unknown pool: {pool}")
+
+        self.flatten = nn.Flatten(1)
+
+        self.bn = nn.BatchNorm1d(out_ch) if use_bn else nn.Identity()
+
+        if act is None:
+            self.act = nn.Identity()
+        elif act.lower() == 'relu':
+            self.act = nn.ReLU(inplace=True)
+        elif act.lower() == 'gelu':
+            self.act = nn.GELU()
+        elif act.lower() == 'hswish':
+            self.act = nn.Hardswish()
+        else:
+            raise ValueError(f"Unsupported act: {act}")
+
+        self.drop = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+        self.fc = nn.Linear(out_ch, num_classes)
+
+    @torch.no_grad()
+    def feature_dim(self) -> int:
+        return self.fc.in_features
+
+    def forward(self, x, return_features: bool = False):
+        # x: (N, C, H, W) features from backbone
+        if self.pool_kind == 'avgmax':
+            xa = self.pool_avg(x)
+            xm = self.pool_max(x)
+            x = torch.cat([xa, xm], dim=1)
+        else:
+            x = self.pool(x)
+        x = self.flatten(x)      # (N, F)
+        f = self.bn(x)
+        f = self.act(f)
+        f = self.drop(f)
+        logits = self.fc(f)
+        return (logits, f) if return_features else logits
+
 
 class MobileNetV4(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model_name, num_classes):
         # MobileNetV4ConvSmall  MobileNetV4ConvMedium  MobileNetV4ConvLarge
         # MobileNetV4HybridMedium  MobileNetV4HybridLarge
         """Params to initiate MobilenNetV4
@@ -696,9 +766,21 @@ class MobileNetV4(nn.Module):
             "https://github.com/tensorflow/models/blob/master/official/vision/modeling/backbones/mobilenet.py"        
         """
         super().__init__()
-        assert model in MODEL_SPECS.keys()
-        self.model = model
-        self.spec = MODEL_SPECS[self.model]
+        model_name = {
+            "MobileNetV4ConvSmall":"MobileNetV4ConvSmall",
+            "small":"MobileNetV4ConvSmall",
+            "MobileNetV4ConvMedium":"MobileNetV4ConvMedium",
+            "medium":"MobileNetV4ConvMedium",
+            "MobileNetV4ConvLarge":"MobileNetV4ConvLarge",
+            "large":"MobileNetV4ConvLarge",
+            "MobileNetV4HybridMedium":"MobileNetV4HybridMedium",
+            "hybrid_medium":"MobileNetV4HybridMedium",
+            "MobileNetV4HybridLarge":"MobileNetV4HybridLarge",
+            "hybrid_large":"MobileNetV4HybridLarge",
+        }[model_name]
+        assert model_name in MODEL_SPECS.keys()
+        self.model_name = model_name
+        self.spec = MODEL_SPECS[self.model_name]
        
         # conv0
         self.conv0 = build_blocks(self.spec['conv0'])
@@ -711,9 +793,14 @@ class MobileNetV4(nn.Module):
         # layer4
         self.layer4 = build_blocks(self.spec['layer4'])
         # layer5   
-        self.layer5 = build_blocks(self.spec['layer5'])       
+        self.layer5 = build_blocks(self.spec['layer5'])
+
+        print("Check output shape ...")
+        x = torch.rand(2, 3, 224, 224)
+        y = self.feature(x)[-1]
+        self.head = MobileNetV4Head(y.shape[1],num_classes=num_classes)
                
-    def forward(self, x):
+    def feature(self, x):
         x0 = self.conv0(x)
         x1 = self.layer1(x0)
         x2 = self.layer2(x1)
@@ -722,3 +809,358 @@ class MobileNetV4(nn.Module):
         x5 = self.layer5(x4)
         return [x1, x2, x3, x4, x5]
         # return [x0, x1, x2, x3, x5]
+
+    def forward(self, x):
+        return self.head(self.feature(x))
+
+
+# model = MobileNetV4("MobileNetV4HybridMedium")
+# # Check the trainable params
+# total_params = sum(p.numel() for p in model.parameters())
+# print(f"Number of parameters: {total_params}")
+# # Check the model's output shape
+# print("Check output shape ...")
+# x = torch.rand(2, 3, 224, 224)
+# y = model(x)
+# for i in y:
+#    print(i.shape)
+
+
+def make_mobilenetv4_from_timm(
+    size: str = "small",          # "small", "medium", "large" (typo "midum" accepted)
+    family: str = "conv",         # "conv" or "hybrid"
+    device: str = "cuda",
+    pretrained: bool = True,
+    model_name: str | None = None
+):
+    """
+    Build a timm MobileNetV4 model.
+
+    Defaults (when `pretrained=True` and no `model_name` given):
+      - conv_small    -> mobilenetv4_conv_small.e1200_r224_in1k
+      - conv_medium   -> mobilenetv4_conv_medium.e500_r256_in1k
+      - conv_large    -> mobilenetv4_conv_large.e600_r384_in1k
+      - hybrid_medium -> mobilenetv4_hybrid_medium.ix_e550_r256_in1k
+      - hybrid_large  -> mobilenetv4_hybrid_large.ix_e600_r384_in1k
+    """
+    import timm
+    import warnings
+
+    # normalize + accept typo aliases
+    size = (size or "").lower().strip()
+    family = (family or "conv").lower().strip()
+    if family == "hybrid" and size in {"midum", "med", "mid"}:
+        size = "medium"
+
+    # Only set a default name if user didn't override
+    if model_name is None:
+        default_name_map = {
+            ("conv", "small"):  "mobilenetv4_conv_small.e1200_r224_in1k",
+            ("conv", "medium"): "mobilenetv4_conv_medium.e500_r256_in1k",
+            ("conv", "large"):  "mobilenetv4_conv_large.e600_r384_in1k",
+            ("hybrid", "medium"): "mobilenetv4_hybrid_medium.ix_e550_r256_in1k",
+            ("hybrid", "large"):  "mobilenetv4_hybrid_large.ix_e600_r384_in1k",
+        }
+        model_name = default_name_map.get((family, size))
+        if model_name is None:
+            model_name = f"mobilenetv4_{family}_{size}"
+            if pretrained:
+                warnings.warn(
+                    f"No default pretrained weights mapped for '{family}_{size}'. "
+                    "Creating architecture without pretrained weights."
+                )
+
+    try:
+        m = timm.create_model(model_name, pretrained=pretrained)
+    except Exception:
+        try:
+            m = timm.create_model(f"hf-hub:timm/{model_name}", pretrained=pretrained)
+        except Exception as e:
+            if pretrained and "." in model_name:
+                warnings.warn(
+                    f"Could not load pretrained weights '{model_name}' via timm or HF Hub. "
+                    f"Falling back to architecture only. Error: {e}"
+                )
+            arch_name = f"mobilenetv4_{family}_{size}"
+            m = timm.create_model(arch_name, pretrained=False)
+
+    return m.eval().to(device)
+
+# ----------------------------
+# MobileNetV4: builders + KD
+# ----------------------------
+def _parse_mnv4_tag(model_size: str):
+    """
+    Accepts: 'small', 'medium', 'large', 'hybrid_medium', 'hybrid_large'
+             (and typo alias: 'hybrid_medium')
+    Returns: family ('conv'|'hybrid'), size ('small'|'medium'|'large'), arch_tag string
+    """
+    s = (model_size or "").lower().strip()
+    if s.startswith("hybrid_"):
+        fam, sz = "hybrid", s.split("_", 1)[1]
+    elif s in {"hybrid_medium", "hybrid_med", "hybrid_mid"}:
+        fam, sz = "hybrid", "medium"
+    else:
+        fam, sz = ("hybrid", "medium") if s in {"midum", "med", "mid"} else ("conv", s)
+
+    # normalize canonical sizes
+    if sz not in {"small", "medium", "large"}:
+        raise ValueError(f"Unsupported MobileNetV4 size '{sz}'. Use small|medium|large or hybrid_* variants.")
+    arch_tag = f"mobilenetv4_{fam}_{sz}"
+    return fam, sz, arch_tag
+
+
+# ---------- timm model builders (student + teacher) ----------
+def make_mobilenetv4_from_timm(
+    model_size: str = "small",
+    device: str = "cuda",
+    pretrained: bool = True,
+    model_name: str | None = None
+):
+    """
+    Build a timm MobileNetV4 model. If model_name is provided, it wins.
+    Otherwise we map (conv|hybrid, size) -> a reasonable default HF weight;
+    fall back to bare arch when needed.
+    """
+    import timm
+    fam, sz, arch_tag = _parse_mnv4_tag(model_size)
+
+    if model_name is None:
+        default_name_map = {
+            ("conv", "small"):   "mobilenetv4_conv_small.e1200_r224_in1k",
+            ("conv", "medium"):  "mobilenetv4_conv_medium.e500_r256_in1k",
+            ("conv", "large"):   "mobilenetv4_conv_large.e600_r384_in1k",
+            ("hybrid", "medium"): "mobilenetv4_hybrid_medium.ix_e550_r256_in1k",
+            ("hybrid", "large"):  "mobilenetv4_hybrid_large.ix_e600_r384_in1k",
+        }
+        model_name = default_name_map.get((fam, sz), arch_tag)
+        if pretrained and model_name == arch_tag:
+            warnings.warn(
+                f"No default pretrained weights mapped for '{arch_tag}'. "
+                "Building architecture without pretrained weights."
+            )
+
+    try:
+        # print("create_model",model_name, pretrained)
+        m = timm.create_model(model_name, pretrained=pretrained)
+    except Exception:
+        # try explicit HF hub path
+        try:
+            m = timm.create_model(f"hf-hub:timm/{model_name}", pretrained=pretrained)
+        except Exception as e:
+            if pretrained and "." in model_name:
+                warnings.warn(
+                    f"Could not load pretrained weights '{model_name}'. "
+                    f"Falling back to bare arch '{arch_tag}'. Error: {e}"
+                )
+            m = timm.create_model(arch_tag, pretrained=False)
+
+    return m.eval().to(device)
+
+
+def make_mobilenetv4_teacher_for_dataset(
+    size: str,
+    dataset: str,
+    num_classes: int,
+    device: str = "cpu",
+    pretrained: bool = True,
+    model_name: str | None = None,
+):
+    """
+    Teacher = MobileNetV4 with IN1K weights if available. If dataset classes != head,
+    we replace the classifier via timm's reset_classifier (or manual).
+    """
+    import timm
+
+    t = make_mobilenetv4_from_timm(
+        model_size=size, device=device, pretrained=pretrained, model_name=model_name
+    )
+
+    head_out = getattr(t, "num_classes", None)
+    if head_out is None:
+        getc = getattr(t, "get_classifier", None)
+        if callable(getc):
+            cls = getc()
+            head_out = getattr(cls, "out_features", None)
+    head_out = head_out or 1000
+
+    if head_out != num_classes:
+        if hasattr(t, "reset_classifier"):
+            try:
+                t.reset_classifier(num_classes=num_classes)
+            except TypeError:
+                t.reset_classifier(num_classes=num_classes, global_pool=getattr(t, "global_pool", "avg"))
+        else:
+            # manual swap
+            in_f = None
+            getc = getattr(t, "get_classifier", None)
+            if callable(getc):
+                cls = getc()
+                in_f = getattr(cls, "in_features", None)
+            if in_f is not None and hasattr(t, "classifier"):
+                t.classifier = nn.Linear(in_f, num_classes)
+            elif hasattr(t, "head") and hasattr(t.head, "in_features"):
+                t.head = nn.Linear(t.head.in_features, num_classes)
+            elif hasattr(t, "fc") and hasattr(t.fc, "in_features"):
+                t.fc = nn.Linear(t.fc.in_features, num_classes)
+            else:
+                raise RuntimeError("Could not locate classifier head to replace.")
+        t.num_classes = num_classes
+
+    return t.eval().to(device)
+
+# ----------------------------
+# LightningModule: KD + hints
+# ----------------------------
+class LitMobileNetV4KD(LitBit):
+    def __init__(
+        self,
+        lr, wd, epochs,
+        dataset_name='c100',
+        model_size="small",            # 'small'|'medium'|'large' or 'hybrid_medium'|'hybrid_large' (alias: hybrid_medium)
+        label_smoothing=0.1, alpha_kd=0.0, alpha_hint=0.0, T=4.0,
+        amp=True, export_dir="./ckpt_mnv4",
+        drop_path_rate=0.0,
+        teacher_pretrained=True
+    ):
+        # dataset -> classes
+        ds = dataset_name.lower()
+        if ds in ['c10', 'cifar10']:
+            num_classes = 10
+        elif ds in ['c100', 'cifar100']:
+            num_classes = 100
+        elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+            num_classes = 200
+        elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+            num_classes = 1000
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset_name}")
+
+        # student & teacher
+        student = MobileNetV4(model_size, num_classes=num_classes)
+
+        teacher = make_mobilenetv4_teacher_for_dataset(
+            size=model_size,
+            dataset=ds,
+            num_classes=num_classes,
+            device="cpu",
+            pretrained=teacher_pretrained
+        )
+
+        # summ(student)
+        # summ(teacher)
+
+        # pick robust hint tap points via timm feature_info
+        hint_points = [("layer1","blocks.0"), ("layer2","blocks.1"), ("layer3","blocks.2"), ("layer4","blocks.3")]
+
+        super().__init__(
+            lr, wd, epochs, label_smoothing,
+            alpha_kd, alpha_hint, T,
+            amp,
+            export_dir,
+            dataset_name=ds,
+            model_name='mobilenetv4',
+            model_size=model_size,
+            hint_points=hint_points,
+            student=student,
+            teacher=teacher,
+            num_classes=num_classes
+        )
+
+# ----------------------------
+# CLI / main (MobileNetV4)
+# ----------------------------
+def parse_args_mnv4():
+    p = argparse.ArgumentParser()
+    p = add_common_args(p)
+
+    p.add_argument("--dataset", type=str, default="timnet",
+                   choices=["c10", "cifar10", "c100", "cifar100", "timnet", "tiny",
+                            "tinyimagenet", "tiny-imagenet", "imnet", "imagenet", "in1k", "imagenet1k"],
+                   help="Target dataset (affects datamodule, num_classes, transforms).")
+
+    # For MobileNetV4 we accept conv + hybrid tags in one flag
+    p.add_argument("--model-size", type=str, default="small",
+                   choices=["small", "medium", "large", "hybrid_medium", "hybrid_large"],
+                   help="MobileNetV4 variant.")
+
+    p.add_argument("--drop-path", type=float, default=0.0)
+    p.add_argument("--teacher-pretrained", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=True,
+                   help="Use ImageNet-pretrained teacher backbone when classes != 1000 (head is replaced).")
+
+    # Mobile defaults (slightly milder than your ConvNeXt ones)
+    p.set_defaults(out=None,batch_size=512,lr=0.2,alpha_kd=0.0,alpha_hint=0.1)
+
+    args = p.parse_args()
+    if args.out is None:
+        args.out = f"./ckpt_{args.dataset}_mnv4_{args.model_size}"
+    return args
+
+
+def _pick_datamodule_mnv4(dataset_name: str, dmargs: dict):
+    # reuse your existing modules; same as before
+    ds = dataset_name.lower()
+    if ds in ['c100', 'cifar100']:
+        if 'CIFAR100DataModule' in globals():
+            return CIFAR100DataModule(**dmargs)
+        else:
+            raise RuntimeError("CIFAR100DataModule not found in common_utils.")
+    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+        if 'TinyImageNetDataModule' in globals():
+            return TinyImageNetDataModule(**dmargs)
+        else:
+            raise RuntimeError("TinyImageNetDataModule not found in common_utils.")
+    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+        if 'ImageNetDataModule' in globals():
+            return ImageNetDataModule(**dmargs)
+        else:
+            raise RuntimeError("ImageNetDataModule not found in common_utils.")
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
+
+
+def main_mnv4():
+    args = parse_args_mnv4()
+
+    # Derive num_classes for export dir naming (same as your convnext main)
+    ds = args.dataset.lower()
+    if ds in ['c10', 'cifar10']:
+        ncls = 10
+    elif ds in ['c100', 'cifar100']:
+        ncls = 100
+    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+        ncls = 200
+    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+        ncls = 1000
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+
+    out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
+
+    lit = LitMobileNetV4KD(
+        lr=args.lr, wd=args.wd, epochs=args.epochs,
+        dataset_name=args.dataset,
+        model_size=args.model_size,
+        label_smoothing=args.label_smoothing,
+        alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
+        amp=args.amp, export_dir=out_dir, drop_path_rate=args.drop_path,
+        teacher_pretrained=args.teacher_pretrained
+    )
+
+    dmargs = dict(
+        data_dir=args.data,
+        batch_size=args.batch_size,
+        num_workers=4,
+        aug_mixup=args.mixup,
+        aug_cutmix=args.cutmix,
+        alpha=args.mix_alpha
+    )
+    dm = _pick_datamodule_mnv4(args.dataset, dmargs)
+
+    trainer, dm = setup_trainer(args, lit, dm)
+    trainer.fit(lit, datamodule=dm)
+    trainer.validate(lit, datamodule=dm)
+
+
+if __name__ == "__main__":
+    main_mnv4()
