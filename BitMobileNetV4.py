@@ -9,363 +9,190 @@ import torch.nn.functional as F
 
 from common_utils import *
 
-MNV4ConvSmall_BLOCK_SPECS = {
-    "conv0": {
-        "block_name": "convbn",
-        "num_blocks": 1,
-        "block_specs": [
-            [3, 32, 3, 2]
-        ]
-    },
-    "layer1": {
-        "block_name": "convbn",
-        "num_blocks": 2,
-        "block_specs": [
-            [32, 32, 3, 2],
-            [32, 32, 1, 1]
-        ]
-    },
-    "layer2": {
-        "block_name": "convbn",
-        "num_blocks": 2,
-        "block_specs": [
-            [32, 96, 3, 2],
-            [96, 64, 1, 1]
-        ]
-    },
-    "layer3": {
-        "block_name": "uib",
-        "num_blocks": 6,
-        "block_specs": [
-            [64, 96, 5, 5, True, 2, 3, False],
-            [96, 96, 0, 3, True, 1, 2, False],
-            [96, 96, 0, 3, True, 1, 2, False],
-            [96, 96, 0, 3, True, 1, 2, False],
-            [96, 96, 0, 3, True, 1, 2, False],
-            [96, 96, 3, 0, True, 1, 4, False],
-        ]
-    },
-    "layer4": {
-        "block_name": "uib",
-        "num_blocks": 6,
-        "block_specs": [
-            [96,  128, 3, 3, True, 2, 6, False],
-            [128, 128, 5, 5, True, 1, 4, False],
-            [128, 128, 0, 5, True, 1, 4, False],
-            [128, 128, 0, 5, True, 1, 3, False],
-            [128, 128, 0, 3, True, 1, 4, False],
-            [128, 128, 0, 3, True, 1, 4, False],
-        ]
-    },  
-    "layer5": {
-        "block_name": "convbn",
-        "num_blocks": 3,
-        "block_specs": [
-            [128, 960, 1, 1],
-            "AdaptiveAvgPool2d",
-            [960, 1280, 1, 1]
-        ]
-    }
+POOL = "AdaptiveAvgPool2d"
+
+def conv(in_c, out_c, k, s):
+    return [in_c, out_c, k, s]
+
+def fused(in_c, out_c, stride, expand, flag=False, extra=None):
+    # 5-field (…flag) or 6-field (…flag, extra)
+    return [in_c, out_c, stride, expand, flag] if extra is None \
+           else [in_c, out_c, stride, expand, flag, extra]
+
+def MHSA(num_heads, key_dim, value_dim, px):
+    kv_strides = 2 if px == 24 else 1 if px == 12 else 1
+    # [heads, kdim, vdim, q_h_s, q_w_s, kv_s, use_layer_scale, use_multi_query, use_residual]
+    return [num_heads, key_dim, value_dim, 1, 1, kv_strides, True, True, True]
+
+def uib(in_c, out_c, k1, k2, se, stride, e, shortcut=False, mhsa=None):
+    base = [in_c, out_c, k1, k2, se, stride, e, shortcut]
+    return base if mhsa is None else base + [mhsa]
+
+def stage(block_name, *blocks):
+    flat = []
+    for b in blocks:
+        if isinstance(b, list) and b and isinstance(b[0], list):
+            flat.extend(b)     # already a list of specs
+        else:
+            flat.append(b)     # single spec
+    return {"block_name": block_name, "num_blocks": len(flat), "block_specs": flat}
+
+def repeat(n, spec):
+    # Deep-ish copy not required for immutable atoms; list() to avoid alias surprises.
+    return [list(spec) for _ in range(n)]
+
+# ---- Specs (DRY) ------------------------------------------------------------
+
+MNV4ConvSmall = {
+    "conv0":  stage("convbn", conv(3, 32, 3, 2)),
+    "layer1": stage("convbn",
+                    conv(32, 32, 3, 2),
+                    conv(32, 32, 1, 1)),
+    "layer2": stage("convbn",
+                    conv(32, 96, 3, 2),
+                    conv(96,  64, 1, 1)),
+    "layer3": stage("uib",
+                    uib(64, 96, 5, 5, True, 2, 3, False),
+                    repeat(4, uib(96, 96, 0, 3, True, 1, 2, False)),
+                    uib(96, 96, 3, 0, True, 1, 4, False)),
+    "layer4": stage("uib",
+                    uib(96,  128, 3, 3, True, 2, 6, False),
+                    uib(128, 128, 5, 5, True, 1, 4, False),
+                    uib(128, 128, 0, 5, True, 1, 4, False),
+                    uib(128, 128, 0, 5, True, 1, 3, False),
+                    repeat(2, uib(128, 128, 0, 3, True, 1, 4, False))),
+    "layer5": stage("convbn",
+                    conv(128, 960, 1, 1),
+                    POOL,
+                    conv(960, 1280, 1, 1)),
 }
 
-
-MNV4ConvMedium_BLOCK_SPECS = {
-    "conv0": {
-        "block_name": "convbn",
-        "num_blocks": 1,
-        "block_specs": [
-            [3, 32, 3, 2]
-        ]
-    },
-    "layer1": {
-        "block_name": "fused_ib",
-        "num_blocks": 1,
-        "block_specs": [
-            [32, 48, 2, 4.0, False]
-        ]
-    },
-    "layer2": {
-        "block_name": "uib",
-        "num_blocks": 2,
-        "block_specs": [
-            [48, 80, 3, 5, True, 2, 4, False],
-            [80, 80, 3, 3, True, 1, 2, False]
-        ]
-    },
-    "layer3": {
-        "block_name": "uib",
-        "num_blocks": 8,
-        "block_specs": [
-            [80,  160, 3, 5, True, 2, 6, False],
-            [160, 160, 3, 3, True, 1, 4, False],
-            [160, 160, 3, 3, True, 1, 4, False],
-            [160, 160, 3, 5, True, 1, 4, False],
-            [160, 160, 3, 3, True, 1, 4, False],
-            [160, 160, 3, 0, True, 1, 4, False],
-            [160, 160, 0, 0, True, 1, 2, False],
-            [160, 160, 3, 0, True, 1, 4, False]
-        ]
-    },
-    "layer4": {
-        "block_name": "uib",
-        "num_blocks": 11,
-        "block_specs": [
-            [160, 256, 5, 5, True, 2, 6, False],
-            [256, 256, 5, 5, True, 1, 4, False],
-            [256, 256, 3, 5, True, 1, 4, False],
-            [256, 256, 3, 5, True, 1, 4, False],
-            [256, 256, 0, 0, True, 1, 4, False],
-            [256, 256, 3, 0, True, 1, 4, False],
-            [256, 256, 3, 5, True, 1, 2, False],
-            [256, 256, 5, 5, True, 1, 4, False],
-            [256, 256, 0, 0, True, 1, 4, False],
-            [256, 256, 0, 0, True, 1, 4, False],
-            [256, 256, 5, 0, True, 1, 2, False]
-        ]
-    },  
-    "layer5": {
-        "block_name": "convbn",
-        "num_blocks": 3,
-        "block_specs": [
-            [256, 960, 1, 1],
-            "AdaptiveAvgPool2d",
-            [960, 1280, 1, 1]
-        ]
-    }
+MNV4ConvMedium = {
+    "conv0":  stage("convbn", conv(3, 32, 3, 2)),
+    "layer1": stage("fused_ib", fused(32, 48, 2, 4.0, False)),
+    "layer2": stage("uib",
+                    uib(48, 80, 3, 5, True, 2, 4, False),
+                    uib(80, 80, 3, 3, True, 1, 2, False)),
+    "layer3": stage("uib",
+                    uib(80, 160, 3, 5, True, 2, 6, False),
+                    repeat(2, uib(160, 160, 3, 3, True, 1, 4, False)),
+                    uib(160, 160, 3, 5, True, 1, 4, False),
+                    uib(160, 160, 3, 3, True, 1, 4, False),
+                    uib(160, 160, 3, 0, True, 1, 4, False),
+                    uib(160, 160, 0, 0, True, 1, 2, False),
+                    uib(160, 160, 3, 0, True, 1, 4, False)),
+    "layer4": stage("uib",
+                    uib(160, 256, 5, 5, True, 2, 6, False),
+                    uib(256, 256, 5, 5, True, 1, 4, False),
+                    repeat(2, uib(256, 256, 3, 5, True, 1, 4, False)),
+                    uib(256, 256, 0, 0, True, 1, 4, False),
+                    uib(256, 256, 3, 0, True, 1, 4, False),
+                    uib(256, 256, 3, 5, True, 1, 2, False),
+                    uib(256, 256, 5, 5, True, 1, 4, False),
+                    repeat(2, uib(256, 256, 0, 0, True, 1, 4, False)),
+                    uib(256, 256, 5, 0, True, 1, 2, False)),
+    "layer5": stage("convbn",
+                    conv(256, 960, 1, 1),
+                    POOL,
+                    conv(960, 1280, 1, 1)),
 }
 
-
-MNV4ConvLarge_BLOCK_SPECS = {
-    "conv0": {
-        "block_name": "convbn",
-        "num_blocks": 1,
-        "block_specs": [
-            [3, 24, 3, 2]
-        ]
-    },
-    "layer1": {
-        "block_name": "fused_ib",
-        "num_blocks": 1,
-        "block_specs": [
-            [24, 48, 2, 4.0, False]
-        ]
-    },
-    "layer2": {
-        "block_name": "uib",
-        "num_blocks": 2,
-        "block_specs": [
-            [48, 96, 3, 5, True, 2, 4],
-            [96, 96, 3, 3, True, 1, 4]
-        ]
-    },
-    "layer3": {
-        "block_name": "uib",
-        "num_blocks": 11,
-        "block_specs": [
-            [96,  192, 3, 5, True, 2, 4, False],
-            [192, 192, 3, 3, True, 1, 4, False],
-            [192, 192, 3, 3, True, 1, 4, False],
-            [192, 192, 3, 3, True, 1, 4, False],
-            [192, 192, 3, 5, True, 1, 4, False],
-            [192, 192, 5, 3, True, 1, 4, False],
-            [192, 192, 5, 3, True, 1, 4, False],
-            [192, 192, 5, 3, True, 1, 4, False],
-            [192, 192, 5, 3, True, 1, 4, False],
-            [192, 192, 5, 3, True, 1, 4, False],
-            [192, 192, 3, 0, True, 1, 4, False]
-        ]
-    },
-    "layer4": {
-        "block_name": "uib",
-        "num_blocks": 13,
-        "block_specs": [
-            [192, 512, 5, 5, True, 2, 4, False],
-            [512, 512, 5, 5, True, 1, 4, False],
-            [512, 512, 5, 5, True, 1, 4, False],
-            [512, 512, 5, 5, True, 1, 4, False],
-            [512, 512, 5, 0, True, 1, 4, False],
-            [512, 512, 5, 3, True, 1, 4, False],
-            [512, 512, 5, 0, True, 1, 4, False],
-            [512, 512, 5, 0, True, 1, 4, False],
-            [512, 512, 5, 3, True, 1, 4, False],
-            [512, 512, 5, 5, True, 1, 4, False],
-            [512, 512, 5, 0, True, 1, 4, False],
-            [512, 512, 5, 0, True, 1, 4, False],
-            [512, 512, 5, 0, True, 1, 4, False]
-        ]
-    },  
-    "layer5": {
-        "block_name": "convbn",
-        "num_blocks": 3,
-        "block_specs": [
-            [512, 960, 1, 1],
-            "AdaptiveAvgPool2d",
-            [960, 1280, 1, 1]
-        ]
-    }
+MNV4ConvLarge = {
+    "conv0":  stage("convbn", conv(3, 24, 3, 2)),
+    "layer1": stage("fused_ib", fused(24, 48, 2, 4.0, False)),
+    "layer2": stage("uib",   # FIX: ensure 8 fields (…shortcut=False)
+                    uib(48, 96, 3, 5, True, 2, 4, False),
+                    uib(96, 96, 3, 3, True, 1, 4, False)),
+    "layer3": stage("uib",
+                    uib(96, 192, 3, 5, True, 2, 4, False),
+                    repeat(3, uib(192, 192, 3, 3, True, 1, 4, False)),
+                    uib(192, 192, 3, 5, True, 1, 4, False),
+                    repeat(5, uib(192, 192, 5, 3, True, 1, 4, False)),
+                    uib(192, 192, 3, 0, True, 1, 4, False)),
+    "layer4": stage("uib",
+                    uib(192, 512, 5, 5, True, 2, 4, False),
+                    repeat(3, uib(512, 512, 5, 5, True, 1, 4, False)),
+                    uib(512, 512, 5, 0, True, 1, 4, False),
+                    uib(512, 512, 5, 3, True, 1, 4, False),
+                    repeat(2, uib(512, 512, 5, 0, True, 1, 4, False)),
+                    uib(512, 512, 5, 3, True, 1, 4, False),
+                    uib(512, 512, 5, 5, True, 1, 4, False),
+                    repeat(3, uib(512, 512, 5, 0, True, 1, 4, False))),
+    "layer5": stage("convbn",
+                    conv(512, 960, 1, 1),
+                    POOL,
+                    conv(960, 1280, 1, 1)),
 }
 
-
-def mhsa(num_heads, key_dim, value_dim, px):
-    if px == 24:
-        kv_strides = 2
-    elif px == 12:
-        kv_strides = 1
-    query_h_strides = 1
-    query_w_strides = 1
-    use_layer_scale = True
-    use_multi_query = True
-    use_residual = True
-    return [
-        num_heads, key_dim, value_dim, query_h_strides, query_w_strides, kv_strides,
-        use_layer_scale, use_multi_query, use_residual
-    ]
-
-
-MNV4HybridConvMedium_BLOCK_SPECS = {
-    "conv0": {
-        "block_name": "convbn",
-        "num_blocks": 1,
-        "block_specs": [
-            [3, 32, 3, 2]
-        ]
-    },
-    "layer1": {
-        "block_name": "fused_ib",
-        "num_blocks": 1,
-        "block_specs": [
-            [32, 48, 2, 4.0, False]
-        ]
-    },
-    "layer2": {
-        "block_name": "uib",
-        "num_blocks": 2,
-        "block_specs": [
-            [48, 80, 3, 5, True, 2, 4, True],
-            [80, 80, 3, 3, True, 1, 2, True]
-        ]
-    },
-    "layer3": {
-        "block_name": "uib",
-        "num_blocks": 8,
-        "block_specs": [
-            [80,  160, 3, 5, True, 2, 6, True],
-            [160, 160, 0, 0, True, 1, 2, True],
-            [160, 160, 3, 3, True, 1, 4, True],
-            [160, 160, 3, 5, True, 1, 4, True, mhsa(4, 64, 64, 24)],
-            [160, 160, 3, 3, True, 1, 4, True, mhsa(4, 64, 64, 24)],
-            [160, 160, 3, 0, True, 1, 4, True, mhsa(4, 64, 64, 24)],
-            [160, 160, 3, 3, True, 1, 4, True, mhsa(4, 64, 64, 24)],
-            [160, 160, 3, 0, True, 1, 4, True]
-        ]
-    },
-    "layer4": {
-        "block_name": "uib",
-        "num_blocks": 12,
-        "block_specs": [
-            [160, 256, 5, 5, True, 2, 6, True],
-            [256, 256, 5, 5, True, 1, 4, True],
-            [256, 256, 3, 5, True, 1, 4, True],
-            [256, 256, 3, 5, True, 1, 4, True],
-            [256, 256, 0, 0, True, 1, 2, True],
-            [256, 256, 3, 5, True, 1, 2, True],
-            [256, 256, 0, 0, True, 1, 2, True],
-            [256, 256, 0, 0, True, 1, 4, True, mhsa(4, 64, 64, 12)],
-            [256, 256, 3, 0, True, 1, 4, True, mhsa(4, 64, 64, 12)],
-            [256, 256, 5, 5, True, 1, 4, True, mhsa(4, 64, 64, 12)],
-            [256, 256, 5, 0, True, 1, 4, True, mhsa(4, 64, 64, 12)],
-            [256, 256, 5, 0, True, 1, 4, True]
-        ]
-    },  
-    "layer5": {
-        "block_name": "convbn",
-        "num_blocks": 3,
-        "block_specs": [
-            [256, 960, 1, 1],
-            "AdaptiveAvgPool2d",
-            [960, 1280, 1, 1]
-        ]
-    }
+MNV4HybridConvMedium = {
+    "conv0":  stage("convbn", conv(3, 32, 3, 2)),
+    "layer1": stage("fused_ib", fused(32, 48, 2, 4.0, False)),
+    "layer2": stage("uib",
+                    uib(48, 80, 3, 5, True, 2, 4, True),
+                    uib(80, 80, 3, 3, True, 1, 2, True)),
+    "layer3": stage("uib",
+                    uib(80, 160, 3, 5, True, 2, 6, True),
+                    uib(160, 160, 0, 0, True, 1, 2, True),
+                    uib(160, 160, 3, 3, True, 1, 4, True),
+                    uib(160, 160, 3, 5, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                    uib(160, 160, 3, 3, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                    uib(160, 160, 3, 0, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                    uib(160, 160, 3, 3, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                    uib(160, 160, 3, 0, True, 1, 4, True)),
+    "layer4": stage("uib",
+                    uib(160, 256, 5, 5, True, 2, 6, True),
+                    uib(256, 256, 5, 5, True, 1, 4, True),
+                    uib(256, 256, 3, 5, True, 1, 4, True),
+                    uib(256, 256, 3, 5, True, 1, 4, True),
+                    uib(256, 256, 0, 0, True, 1, 2, True),
+                    uib(256, 256, 3, 5, True, 1, 2, True),
+                    uib(256, 256, 0, 0, True, 1, 2, True),
+                    uib(256, 256, 0, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                    uib(256, 256, 3, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                    uib(256, 256, 5, 5, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                    uib(256, 256, 5, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                    uib(256, 256, 5, 0, True, 1, 4, True)),
+    "layer5": stage("convbn",
+                    conv(256, 960, 1, 1),
+                    POOL,
+                    conv(960, 1280, 1, 1)),
 }
 
-
-MNV4HybridConvLarge_BLOCK_SPECS = {
-    "conv0": {
-        "block_name": "convbn",
-        "num_blocks": 1,
-        "block_specs": [
-            [3, 24, 3, 2]
-        ]
-    },
-    "layer1": {
-        "block_name": "fused_ib",
-        "num_blocks": 1,
-        "block_specs": [
-            [24, 48, 2, 4.0, False, True]
-        ]
-    },
-    "layer2": {
-        "block_name": "uib",
-        "num_blocks": 2,
-        "block_specs": [
-            [48, 96, 3, 5, True, 2, 4, True],
-            [96, 96, 3, 3, True, 1, 4, True]
-        ]
-    },
-    "layer3": {
-        "block_name": "uib",
-        "num_blocks": 11,
-        "block_specs": [
-            [96,  192, 3, 5, True, 2, 4, True],
-            [192, 192, 3, 3, True, 1, 4, True],
-            [192, 192, 3, 3, True, 1, 4, True],
-            [192, 192, 3, 3, True, 1, 4, True],
-            [192, 192, 3, 5, True, 1, 4, True],
-            [192, 192, 5, 3, True, 1, 4, True],
-            [192, 192, 5, 3, True, 1, 4, True, mhsa(8, 48, 48, 24)],
-            [192, 192, 5, 3, True, 1, 4, True, mhsa(8, 48, 48, 24)],
-            [192, 192, 5, 3, True, 1, 4, True, mhsa(8, 48, 48, 24)],
-            [192, 192, 5, 3, True, 1, 4, True, mhsa(8, 48, 48, 24)],
-            [192, 192, 3, 0, True, 1, 4, True]
-        ]
-    },
-    "layer4": {
-        "block_name": "uib",
-        "num_blocks": 14,
-        "block_specs": [
-            [192, 512, 5, 5, True, 2, 4, True],
-            [512, 512, 5, 5, True, 1, 4, True],
-            [512, 512, 5, 5, True, 1, 4, True],
-            [512, 512, 5, 5, True, 1, 4, True],
-            [512, 512, 5, 0, True, 1, 4, True],
-            [512, 512, 5, 3, True, 1, 4, True],
-            [512, 512, 5, 0, True, 1, 4, True],
-            [512, 512, 5, 0, True, 1, 4, True],
-            [512, 512, 5, 3, True, 1, 4, True],
-            [512, 512, 5, 5, True, 1, 4, True, mhsa(8, 64, 64, 12)],
-            [512, 512, 5, 0, True, 1, 4, True, mhsa(8, 64, 64, 12)],
-            [512, 512, 5, 0, True, 1, 4, True, mhsa(8, 64, 64, 12)],
-            [512, 512, 5, 0, True, 1, 4, True, mhsa(8, 64, 64, 12)],
-            [512, 512, 5, 0, True, 1, 4, True]
-        ]
-    },  
-    "layer5": {
-        "block_name": "convbn",
-        "num_blocks": 3,
-        "block_specs": [
-            [512, 960, 1, 1],
-            "AdaptiveAvgPool2d",
-            [960, 1280, 1, 1]
-        ]
-    }
+MNV4HybridConvLarge = {
+    "conv0":  stage("convbn", conv(3, 24, 3, 2)),
+    "layer1": stage("fused_ib", fused(24, 48, 2, 4.0, False, True)),
+    "layer2": stage("uib",
+                    uib(48, 96, 3, 5, True, 2, 4, True),
+                    uib(96, 96, 3, 3, True, 1, 4, True)),
+    "layer3": stage("uib",
+                    uib(96, 192, 3, 5, True, 2, 4, True),
+                    repeat(3, uib(192, 192, 3, 3, True, 1, 4, True)),
+                    uib(192, 192, 3, 5, True, 1, 4, True),
+                    repeat(2, uib(192, 192, 5, 3, True, 1, 4, True)),
+                    repeat(4, uib(192, 192, 5, 3, True, 1, 4, True, MHSA(8, 48, 48, 24))),
+                    uib(192, 192, 3, 0, True, 1, 4, True)),
+    "layer4": stage("uib",
+                    uib(192, 512, 5, 5, True, 2, 4, True),
+                    repeat(3, uib(512, 512, 5, 5, True, 1, 4, True)),
+                    uib(512, 512, 5, 0, True, 1, 4, True),
+                    uib(512, 512, 5, 3, True, 1, 4, True),
+                    repeat(2, uib(512, 512, 5, 0, True, 1, 4, True)),
+                    uib(512, 512, 5, 3, True, 1, 4, True),
+                    uib(512, 512, 5, 5, True, 1, 4, True, MHSA(8, 64, 64, 12)),
+                    repeat(3, uib(512, 512, 5, 0, True, 1, 4, True, MHSA(8, 64, 64, 12))),
+                    uib(512, 512, 5, 0, True, 1, 4, True)),
+    "layer5": stage("convbn",
+                    conv(512, 960, 1, 1),
+                    POOL,
+                    conv(960, 1280, 1, 1)),
 }
 
 MODEL_SPECS = {
-    "MobileNetV4ConvSmall": MNV4ConvSmall_BLOCK_SPECS,
-    "MobileNetV4ConvMedium": MNV4ConvMedium_BLOCK_SPECS,
-    "MobileNetV4ConvLarge": MNV4ConvLarge_BLOCK_SPECS,
-    "MobileNetV4HybridMedium": MNV4HybridConvMedium_BLOCK_SPECS,
-    "MobileNetV4HybridLarge": MNV4HybridConvLarge_BLOCK_SPECS
+    "MobileNetV4ConvSmall": MNV4ConvSmall,
+    "MobileNetV4ConvMedium": MNV4ConvMedium,
+    "MobileNetV4ConvLarge": MNV4ConvLarge,
+    "MobileNetV4HybridMedium": MNV4HybridConvMedium,
+    "MobileNetV4HybridLarge": MNV4HybridConvLarge
 }
 
 def make_divisible(
@@ -780,6 +607,7 @@ class MobileNetV4(nn.Module):
         }[model_name]
         assert model_name in MODEL_SPECS.keys()
         self.model_name = model_name
+        self.num_classes = num_classes
         self.spec = MODEL_SPECS[self.model_name]
        
         # conv0
@@ -811,19 +639,22 @@ class MobileNetV4(nn.Module):
         # return [x0, x1, x2, x3, x5]
 
     def forward(self, x):
-        return self.head(self.feature(x))
+        return self.head(self.feature(x)[-1])
 
-
-# model = MobileNetV4("MobileNetV4HybridMedium")
+    def clone(self) -> "MobileNetV4":
+        return self.__class__(
+                self.model_name,
+                self.num_classes)
+    
+# model = MobileNetV4("MobileNetV4HybridMedium",200)
 # # Check the trainable params
 # total_params = sum(p.numel() for p in model.parameters())
 # print(f"Number of parameters: {total_params}")
 # # Check the model's output shape
 # print("Check output shape ...")
 # x = torch.rand(2, 3, 224, 224)
-# y = model(x)
-# for i in y:
-#    print(i.shape)
+# y = model.feature(x)
+# for i in y: print(i.shape)
 
 
 def make_mobilenetv4_from_timm(
