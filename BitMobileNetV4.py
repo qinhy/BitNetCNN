@@ -10,192 +10,6 @@ import torch.nn.functional as F
 
 from common_utils import *
 
-POOL = "AdaptiveAvgPool2d"
-
-def conv(in_c, out_c, k, s):
-    return [in_c, out_c, k, s]
-
-def fused(in_c, out_c, stride, expand, flag=False, extra=None):
-    # 5-field (…flag) or 6-field (…flag, extra)
-    return [in_c, out_c, stride, expand, flag] if extra is None \
-           else [in_c, out_c, stride, expand, flag, extra]
-
-def MHSA(num_heads, key_dim, value_dim, px):
-    kv_strides = 2 if px == 24 else 1 if px == 12 else 1
-    # [heads, kdim, vdim, q_h_s, q_w_s, kv_s, use_layer_scale, use_multi_query, use_residual]
-    return [num_heads, key_dim, value_dim, 1, 1, kv_strides, True, True, True]
-
-def uib(in_c, out_c, k1, k2, se, stride, e, shortcut=False, mhsa=None):
-    base = [in_c, out_c, k1, k2, se, stride, e, shortcut]
-    return base if mhsa is None else base + [mhsa]
-
-def stage(block_name, *blocks):
-    flat = []
-    for b in blocks:
-        if isinstance(b, list) and b and isinstance(b[0], list):
-            flat.extend(b)     # already a list of specs
-        else:
-            flat.append(b)     # single spec
-    return {"block_name": block_name, "num_blocks": len(flat), "block_specs": flat}
-
-def repeat(n, spec):
-    # Deep-ish copy not required for immutable atoms; list() to avoid alias surprises.
-    return [list(spec) for _ in range(n)]
-
-# ---- Specs (DRY) ------------------------------------------------------------
-
-MNV4ConvSmall = {
-    "conv0":  stage("convbn", conv(3, 32, 3, 2)),
-    "layer1": stage("convbn",
-                    conv(32, 32, 3, 2),
-                    conv(32, 32, 1, 1)),
-    "layer2": stage("convbn",
-                    conv(32, 96, 3, 2),
-                    conv(96,  64, 1, 1)),
-    "layer3": stage("uib",
-                    uib(64, 96, 5, 5, True, 2, 3, False),
-                    repeat(4, uib(96, 96, 0, 3, True, 1, 2, False)),
-                    uib(96, 96, 3, 0, True, 1, 4, False)),
-    "layer4": stage("uib",
-                    uib(96,  128, 3, 3, True, 2, 6, False),
-                    uib(128, 128, 5, 5, True, 1, 4, False),
-                    uib(128, 128, 0, 5, True, 1, 4, False),
-                    uib(128, 128, 0, 5, True, 1, 3, False),
-                    repeat(2, uib(128, 128, 0, 3, True, 1, 4, False))),
-    "layer5": stage("convbn",
-                    conv(128, 960, 1, 1),
-                    POOL,
-                    conv(960, 1280, 1, 1)),
-}
-
-MNV4ConvMedium = {
-    "conv0":  stage("convbn", conv(3, 32, 3, 2)),
-    "layer1": stage("fused_ib", fused(32, 48, 2, 4.0, False)),
-    "layer2": stage("uib",
-                    uib(48, 80, 3, 5, True, 2, 4, False),
-                    uib(80, 80, 3, 3, True, 1, 2, False)),
-    "layer3": stage("uib",
-                    uib(80, 160, 3, 5, True, 2, 6, False),
-                    repeat(2, uib(160, 160, 3, 3, True, 1, 4, False)),
-                    uib(160, 160, 3, 5, True, 1, 4, False),
-                    uib(160, 160, 3, 3, True, 1, 4, False),
-                    uib(160, 160, 3, 0, True, 1, 4, False),
-                    uib(160, 160, 0, 0, True, 1, 2, False),
-                    uib(160, 160, 3, 0, True, 1, 4, False)),
-    "layer4": stage("uib",
-                    uib(160, 256, 5, 5, True, 2, 6, False),
-                    uib(256, 256, 5, 5, True, 1, 4, False),
-                    repeat(2, uib(256, 256, 3, 5, True, 1, 4, False)),
-                    uib(256, 256, 0, 0, True, 1, 4, False),
-                    uib(256, 256, 3, 0, True, 1, 4, False),
-                    uib(256, 256, 3, 5, True, 1, 2, False),
-                    uib(256, 256, 5, 5, True, 1, 4, False),
-                    repeat(2, uib(256, 256, 0, 0, True, 1, 4, False)),
-                    uib(256, 256, 5, 0, True, 1, 2, False)),
-    "layer5": stage("convbn",
-                    conv(256, 960, 1, 1),
-                    POOL,
-                    conv(960, 1280, 1, 1)),
-}
-
-MNV4ConvLarge = {
-    "conv0":  stage("convbn", conv(3, 24, 3, 2)),
-    "layer1": stage("fused_ib", fused(24, 48, 2, 4.0, False)),
-    "layer2": stage("uib",   # FIX: ensure 8 fields (…shortcut=False)
-                    uib(48, 96, 3, 5, True, 2, 4, False),
-                    uib(96, 96, 3, 3, True, 1, 4, False)),
-    "layer3": stage("uib",
-                    uib(96, 192, 3, 5, True, 2, 4, False),
-                    repeat(3, uib(192, 192, 3, 3, True, 1, 4, False)),
-                    uib(192, 192, 3, 5, True, 1, 4, False),
-                    repeat(5, uib(192, 192, 5, 3, True, 1, 4, False)),
-                    uib(192, 192, 3, 0, True, 1, 4, False)),
-    "layer4": stage("uib",
-                    uib(192, 512, 5, 5, True, 2, 4, False),
-                    repeat(3, uib(512, 512, 5, 5, True, 1, 4, False)),
-                    uib(512, 512, 5, 0, True, 1, 4, False),
-                    uib(512, 512, 5, 3, True, 1, 4, False),
-                    repeat(2, uib(512, 512, 5, 0, True, 1, 4, False)),
-                    uib(512, 512, 5, 3, True, 1, 4, False),
-                    uib(512, 512, 5, 5, True, 1, 4, False),
-                    repeat(3, uib(512, 512, 5, 0, True, 1, 4, False))),
-    "layer5": stage("convbn",
-                    conv(512, 960, 1, 1),
-                    POOL,
-                    conv(960, 1280, 1, 1)),
-}
-
-MNV4HybridConvMedium = {
-    "conv0":  stage("convbn", conv(3, 32, 3, 2)),
-    "layer1": stage("fused_ib", fused(32, 48, 2, 4.0, False)),
-    "layer2": stage("uib",
-                    uib(48, 80, 3, 5, True, 2, 4, True),
-                    uib(80, 80, 3, 3, True, 1, 2, True)),
-    "layer3": stage("uib",
-                    uib(80, 160, 3, 5, True, 2, 6, True),
-                    uib(160, 160, 0, 0, True, 1, 2, True),
-                    uib(160, 160, 3, 3, True, 1, 4, True),
-                    uib(160, 160, 3, 5, True, 1, 4, True, MHSA(4, 64, 64, 24)),
-                    uib(160, 160, 3, 3, True, 1, 4, True, MHSA(4, 64, 64, 24)),
-                    uib(160, 160, 3, 0, True, 1, 4, True, MHSA(4, 64, 64, 24)),
-                    uib(160, 160, 3, 3, True, 1, 4, True, MHSA(4, 64, 64, 24)),
-                    uib(160, 160, 3, 0, True, 1, 4, True)),
-    "layer4": stage("uib",
-                    uib(160, 256, 5, 5, True, 2, 6, True),
-                    uib(256, 256, 5, 5, True, 1, 4, True),
-                    uib(256, 256, 3, 5, True, 1, 4, True),
-                    uib(256, 256, 3, 5, True, 1, 4, True),
-                    uib(256, 256, 0, 0, True, 1, 2, True),
-                    uib(256, 256, 3, 5, True, 1, 2, True),
-                    uib(256, 256, 0, 0, True, 1, 2, True),
-                    uib(256, 256, 0, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
-                    uib(256, 256, 3, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
-                    uib(256, 256, 5, 5, True, 1, 4, True, MHSA(4, 64, 64, 12)),
-                    uib(256, 256, 5, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
-                    uib(256, 256, 5, 0, True, 1, 4, True)),
-    "layer5": stage("convbn",
-                    conv(256, 960, 1, 1),
-                    POOL,
-                    conv(960, 1280, 1, 1)),
-}
-
-MNV4HybridConvLarge = {
-    "conv0":  stage("convbn", conv(3, 24, 3, 2)),
-    "layer1": stage("fused_ib", fused(24, 48, 2, 4.0, False, True)),
-    "layer2": stage("uib",
-                    uib(48, 96, 3, 5, True, 2, 4, True),
-                    uib(96, 96, 3, 3, True, 1, 4, True)),
-    "layer3": stage("uib",
-                    uib(96, 192, 3, 5, True, 2, 4, True),
-                    repeat(3, uib(192, 192, 3, 3, True, 1, 4, True)),
-                    uib(192, 192, 3, 5, True, 1, 4, True),
-                    repeat(2, uib(192, 192, 5, 3, True, 1, 4, True)),
-                    repeat(4, uib(192, 192, 5, 3, True, 1, 4, True, MHSA(8, 48, 48, 24))),
-                    uib(192, 192, 3, 0, True, 1, 4, True)),
-    "layer4": stage("uib",
-                    uib(192, 512, 5, 5, True, 2, 4, True),
-                    repeat(3, uib(512, 512, 5, 5, True, 1, 4, True)),
-                    uib(512, 512, 5, 0, True, 1, 4, True),
-                    uib(512, 512, 5, 3, True, 1, 4, True),
-                    repeat(2, uib(512, 512, 5, 0, True, 1, 4, True)),
-                    uib(512, 512, 5, 3, True, 1, 4, True),
-                    uib(512, 512, 5, 5, True, 1, 4, True, MHSA(8, 64, 64, 12)),
-                    repeat(3, uib(512, 512, 5, 0, True, 1, 4, True, MHSA(8, 64, 64, 12))),
-                    uib(512, 512, 5, 0, True, 1, 4, True)),
-    "layer5": stage("convbn",
-                    conv(512, 960, 1, 1),
-                    POOL,
-                    conv(960, 1280, 1, 1)),
-}
-
-MODEL_SPECS = {
-    "MobileNetV4ConvSmall": MNV4ConvSmall,
-    "MobileNetV4ConvMedium": MNV4ConvMedium,
-    "MobileNetV4ConvLarge": MNV4ConvLarge,
-    "MobileNetV4HybridMedium": MNV4HybridConvMedium,
-    "MobileNetV4HybridLarge": MNV4HybridConvLarge
-}
-
 def make_divisible(
         value: float,
         divisor: int,
@@ -318,94 +132,116 @@ class UniversalInvertedBottleneckBlock(nn.Module):
         return x
 
 class MultiQueryAttentionLayerWithDownSampling(nn.Module):
-    def __init__(self, inp, num_heads, key_dim, value_dim, query_h_strides, query_w_strides, kv_strides, dw_kernel_size=3, dropout=0.0):
-        """Multi Query Attention with spatial downsampling.
-        Referenced from here https://github.com/tensorflow/models/blob/master/official/vision/modeling/layers/nn_blocks.py &
-                             https://github.com/huggingface/pytorch-image-models/blob/main/timm/layers/attention2d.py
-        3 parameters are introduced for the spatial downsampling:
-        1. kv_strides: downsampling factor on Key and Values only.
-        2. query_h_strides: vertical strides on Query only.
-        3. query_w_strides: horizontal strides on Query only.
-
-        This is an optimized version.
-        1. Projections in Attention is explict written out as 1x1 Conv2D.
-        2. Additional reshapes are introduced to bring a up to 3x speed up.
-        """
+    """
+    Multi-Query Attention (shared K,V across heads) with optional spatial downsampling.
+    """
+    def __init__(
+        self,
+        inp: int,
+        num_heads: int,
+        key_dim: int,
+        value_dim: int,
+        query_h_strides: int = 1,
+        query_w_strides: int = 1,
+        kv_strides: int = 1,
+        dw_kernel_size: int = 3,
+        dropout: float = 0.0,
+    ):
         super().__init__()
+        assert key_dim > 0 and value_dim > 0
+        assert num_heads > 0
+
+        self.inp = inp
         self.num_heads = num_heads
         self.key_dim = key_dim
         self.value_dim = value_dim
         self.query_h_strides = query_h_strides
         self.query_w_strides = query_w_strides
         self.kv_strides = kv_strides
-        self.dw_kernel_size = dw_kernel_size
-        self.dropout = dropout
 
-        self.head_dim = key_dim // num_heads
+        self.query_downsample_bn = (
+            nn.BatchNorm2d(inp)
+            if (query_h_strides > 1 or query_w_strides > 1)
+            else None
+        )
 
+        # Q: 1x1 projection to (H * key_dim)
+        self.q_proj = Bit.Conv2d(inp, num_heads * key_dim, kernel_size=1, bias=False)
+
+        def make_kv_path(out_dim: int) -> nn.Sequential:
+            layers = []
+            if kv_strides > 1:
+                layers.extend(
+                    [
+                        Bit.Conv2d(
+                            inp,
+                            inp,
+                            kernel_size=dw_kernel_size,
+                            stride=kv_strides,
+                            padding=dw_kernel_size // 2,
+                            groups=inp,
+                            bias=False,
+                        ),
+                        nn.BatchNorm2d(inp),
+                    ]
+                )
+            layers.append(Bit.Conv2d(inp, out_dim, kernel_size=1, bias=False))
+            return nn.Sequential(*layers)
+
+        self.k_proj = make_kv_path(key_dim)
+        self.v_proj = make_kv_path(value_dim)
+
+        self.out_proj = Bit.Conv2d(num_heads * value_dim, inp, kernel_size=1, bias=False)
+        self.attn_drop = nn.Dropout(dropout)
+
+    def _reshape_q(self, q: torch.Tensor):
+        # q: [B, H*Kd, Hq, Wq] -> [B, Nq, H, Kd]
+        B, HC, Hq, Wq = q.shape
+        H = self.num_heads
+        Kd = self.key_dim
+        q = q.view(B, H, Kd, Hq * Wq).transpose(-1, -2).contiguous()
+        return q, Hq, Wq
+
+    @staticmethod
+    def _reshape_kv(t: torch.Tensor):
+        # t: [B, C, Hk, Wk] -> [B, 1, P, C]
+        B, C, Hk, Wk = t.shape
+        return t.view(B, C, Hk * Wk).transpose(1, 2).unsqueeze(1).contiguous()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+
+        # Query (optional spatial downsampling)
         if self.query_h_strides > 1 or self.query_w_strides > 1:
-            self._query_downsampling_norm = nn.BatchNorm2d(inp)
-        self._query_proj = conv_2d(inp, num_heads*key_dim, 1, 1, norm=False, act=False)
-       
-        self.key = nn.Sequential()
-        self.value = nn.Sequential()
-        if self.kv_strides > 1:
-            self.key.add_module('_key_dw_conv', conv_2d(inp, inp, dw_kernel_size, kv_strides, groups=inp, norm=True, act=False))
-            self.value.add_module('_value_dw_conv', conv_2d(inp, inp, dw_kernel_size, kv_strides, groups=inp, norm=True, act=False))
-        self.key.add_module('_key_proj', conv_2d(inp, key_dim, 1, 1, norm=False, act=False))
-        self.value.add_module('_value_proj', conv_2d(inp, key_dim, 1, 1, norm=False, act=False))
-
-        self._output_proj = conv_2d(num_heads*key_dim, inp, 1, 1, norm=False, act=False)
-        self.dropout = nn.Dropout(p=dropout)
-
-    def _reshape_projected_query(self, t: torch.Tensor, num_heads: int, key_dim: int):
-        """Reshapes projected query: [b, n, n, h x k] -> [b, n x n, h, k]."""
-        s = t.shape
-        t = t.reshape(s[0], num_heads, key_dim, -1)
-        return t.transpose(-1, -2).contiguous()
-       
-    def _reshape_input(self, t: torch.Tensor):
-        """Reshapes a tensor to three dimensions, keeping the batch and channels."""
-        s = t.shape
-        t = t.reshape(s[0], s[1], -1).transpose(1, 2)
-        return t.unsqueeze(1).contiguous()
-
-    def _reshape_output(self, t: torch.Tensor, num_heads: int, h_px: int, w_px: int):
-        """Reshape output:[b, n x n x h, k] -> [b, n, n, hk]."""
-        s = t.shape
-        feat_dim = s[-1] * num_heads
-        t = t.transpose(1, 2)
-        return t.reshape(s[0], h_px, w_px, feat_dim).permute(0, 3, 1, 2).contiguous()
-       
-    def forward(self, x):
-        batch_size, seq_length, H, W = x.size()
-        if self.query_h_strides > 1 or self.query_w_strides > 1:
-            q = F.avg_pool2d(self.query_h_stride, self.query_w_stride)
-            q = self._query_downsampling_norm(q)
-            q = self._query_proj(q)
+            q_in = F.avg_pool2d(
+                x,
+                kernel_size=(self.query_h_strides, self.query_w_strides),
+                stride=(self.query_h_strides, self.query_w_strides),
+            )
+            if self.query_downsample_bn is not None:
+                q_in = self.query_downsample_bn(q_in)
         else:
-            q = self._query_proj(x)
-        # desired q shape: [b, h, k, n x n] - [b, l, h, k]
-        q = self._reshape_projected_query(q, self.num_heads, self.key_dim)
-        k = self.key(x)
-        # output shape of k: [b, k, p], p = m x m
-        k = self._reshape_input(k)
-        v = self.value(x)  
-        # output shape of v: [ b, p, k], p = m x m
-        v = self._reshape_input(v)
+            q_in = x
+        q = self.q_proj(q_in)
+        q, Hq, Wq = self._reshape_q(q)  # [B, Nq, H, Kd]
 
-        # calculate attn score
+        # Keys/Values
+        k = self._reshape_kv(self.k_proj(x))  # [B, 1, P, Kd]
+        v = self._reshape_kv(self.v_proj(x))  # [B, 1, P, Vd]
+
+        # Attention
         q = q * (self.key_dim ** -0.5)
-        attn_score = q @ k.transpose(-1, -2)
-        attn_score = attn_score.softmax(dim=-1)
-        attn_score = self.dropout(attn_score)
-        output = attn_score @ v
+        attn = q @ k.transpose(-1, -2)  # [B, Nq, H, P]
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        out = attn @ v  # [B, Nq, H, Vd]
 
-        # reshape o into [b, hk, n, n,]
-        output = self._reshape_output(output, self.num_heads, H // self.query_h_strides, W // self.query_w_strides)
-        output = self._output_proj(output)
-        return output
-   
+        # Merge heads and restore spatial
+        out = out.transpose(1, 2).contiguous()  # [B, H, Nq, Vd]
+        out = out.view(B, self.num_heads * self.value_dim, Hq, Wq)
+        out = self.out_proj(out)  # [B, C, Hq, Wq]
+        return out
+
 class MNV4LayerScale(nn.Module):
     def __init__(self, dim: int, init_values: float = 1e-5):
         """LayerScale as introduced in CaiT: https://arxiv.org/abs/2103.17239
@@ -422,7 +258,6 @@ class MNV4LayerScale(nn.Module):
     def forward(self, x):
         gamma = self.gamma.view(1, -1, 1, 1)
         return x * gamma
-
 
 class MultiHeadSelfAttentionBlock(nn.Module):
     def __init__(
@@ -475,45 +310,7 @@ class MultiHeadSelfAttentionBlock(nn.Module):
         if self.use_residual:
             x = x + shortcut
         return x
-
-def build_blocks(layer_spec):
-    if not layer_spec.get('block_name'):
-        return nn.Sequential()
-    block_names = layer_spec['block_name']
-    layers = nn.Sequential()
-    if block_names == "convbn":
-        schema_ = ['inp', 'oup', 'kernel_size', 'stride']
-        for i in range(layer_spec['num_blocks']):
-            specs_ = layer_spec['block_specs'][i]
-            if isinstance(specs_, list):
-                args = dict(zip(schema_, layer_spec['block_specs'][i]))
-                layers.add_module(f"convbn_{i}", conv_2d(**args))
-            elif specs_ == "AdaptiveAvgPool2d":
-                layers.add_module(f"AdaptiveAvgPool2d", nn.AdaptiveAvgPool2d(1))
-            else:
-                raise NotImplementedError
-    elif block_names == "uib":
-        schema_ =  ['inp', 'oup', 'start_dw_kernel_size', 'middle_dw_kernel_size', 'middle_dw_downsample', 'stride', 'expand_ratio', 'use_layer_scale', 'mhsa']
-        for i in range(layer_spec['num_blocks']):
-            args = dict(zip(schema_, layer_spec['block_specs'][i]))
-            mhsa = args.pop("mhsa") if "mhsa" in args else 0
-            layers.add_module(f"uib_{i}", UniversalInvertedBottleneckBlock(**args))
-            if mhsa:
-                mhsa_schema_ = [
-                    "inp", "num_heads", "key_dim", "value_dim", "query_h_strides", "query_w_strides", "kv_strides", 
-                    "use_layer_scale", "use_multi_query", "use_residual"
-                ]
-                args = dict(zip(mhsa_schema_, [args['oup']] + (mhsa)))
-                layers.add_module(f"mhsa_{i}", MultiHeadSelfAttentionBlock(**args))
-    elif block_names == "fused_ib":
-        schema_ = ['inp', 'oup', 'stride', 'expand_ratio', 'act']
-        for i in range(layer_spec['num_blocks']):
-            args = dict(zip(schema_, layer_spec['block_specs'][i]))
-            layers.add_module(f"fused_ib_{i}", InvertedResidual(**args))
-    else:
-        raise NotImplementedError
-    return layers
-
+    
 class MobileNetV4Head(nn.Module):
     """
     Flexible head for MobileNet-V4.
@@ -583,8 +380,232 @@ class MobileNetV4Head(nn.Module):
         logits = self.fc(f)
         return (logits, f) if return_features else logits
 
+def build_blocks(layer_spec):
+    if not layer_spec.get('block_name'):
+        return nn.Sequential()
+    block_names = layer_spec['block_name']
+    layers = nn.Sequential()
+    if block_names == "convbn":
+        schema_ = ['inp', 'oup', 'kernel_size', 'stride']
+        for i in range(layer_spec['num_blocks']):
+            specs_ = layer_spec['block_specs'][i]
+            if isinstance(specs_, list):
+                args = dict(zip(schema_, layer_spec['block_specs'][i]))
+                layers.add_module(f"convbn_{i}", conv_2d(**args))
+            elif specs_ == "AdaptiveAvgPool2d":
+                layers.add_module(f"AdaptiveAvgPool2d", nn.AdaptiveAvgPool2d(1))
+            else:
+                raise NotImplementedError
+    elif block_names == "uib":
+        schema_ =  ['inp', 'oup', 'start_dw_kernel_size', 'middle_dw_kernel_size', 'middle_dw_downsample', 'stride', 'expand_ratio', 'use_layer_scale', 'mhsa']
+        for i in range(layer_spec['num_blocks']):
+            args = dict(zip(schema_, layer_spec['block_specs'][i]))
+            mhsa = args.pop("mhsa") if "mhsa" in args else 0
+            layers.add_module(f"uib_{i}", UniversalInvertedBottleneckBlock(**args))
+            if mhsa:
+                mhsa_schema_ = [
+                    "inp", "num_heads", "key_dim", "value_dim", "query_h_strides", "query_w_strides", "kv_strides", 
+                    "use_layer_scale", "use_multi_query", "use_residual"
+                ]
+                args = dict(zip(mhsa_schema_, [args['oup']] + (mhsa)))
+                layers.add_module(f"mhsa_{i}", MultiHeadSelfAttentionBlock(**args))
+    elif block_names == "fused_ib":
+        schema_ = ['inp', 'oup', 'stride', 'expand_ratio', 'act']
+        for i in range(layer_spec['num_blocks']):
+            args = dict(zip(schema_, layer_spec['block_specs'][i]))
+            layers.add_module(f"fused_ib_{i}", InvertedResidual(**args))
+    else:
+        raise NotImplementedError
+    return layers
 
 class MobileNetV4(nn.Module):
+    
+    POOL = "AdaptiveAvgPool2d"
+
+    def conv(in_c, out_c, k, s):
+        return [in_c, out_c, k, s]
+
+    def fused(in_c, out_c, stride, expand, flag=False, extra=None):
+        # 5-field (…flag) or 6-field (…flag, extra)
+        return [in_c, out_c, stride, expand, flag] if extra is None \
+            else [in_c, out_c, stride, expand, flag, extra]
+
+    def MHSA(num_heads, key_dim, value_dim, px):
+        kv_strides = 2 if px == 24 else 1 if px == 12 else 1
+        # [heads, kdim, vdim, q_h_s, q_w_s, kv_s, use_layer_scale, use_multi_query, use_residual]
+        return [num_heads, key_dim, value_dim, 1, 1, kv_strides, True, True, True]
+
+    def uib(in_c, out_c, k1, k2, se, stride, e, shortcut=False, mhsa=None):
+        base = [in_c, out_c, k1, k2, se, stride, e, shortcut]
+        return base if mhsa is None else base + [mhsa]
+
+    def stage(block_name, *blocks):
+        flat = []
+        for b in blocks:
+            if isinstance(b, list) and b and isinstance(b[0], list):
+                flat.extend(b)     # already a list of specs
+            else:
+                flat.append(b)     # single spec
+        return {"block_name": block_name, "num_blocks": len(flat), "block_specs": flat}
+
+    def repeat(n, spec):
+        # Deep-ish copy not required for immutable atoms; list() to avoid alias surprises.
+        return [list(spec) for _ in range(n)]
+
+    # ---- Specs (DRY) ------------------------------------------------------------
+
+    MNV4ConvSmall = {
+        "conv0":  stage("convbn", conv(3, 32, 3, 2)),
+        "layer1": stage("convbn",
+                        conv(32, 32, 3, 2),
+                        conv(32, 32, 1, 1)),
+        "layer2": stage("convbn",
+                        conv(32, 96, 3, 2),
+                        conv(96,  64, 1, 1)),
+        "layer3": stage("uib",
+                        uib(64, 96, 5, 5, True, 2, 3, False),
+                        repeat(4, uib(96, 96, 0, 3, True, 1, 2, False)),
+                        uib(96, 96, 3, 0, True, 1, 4, False)),
+        "layer4": stage("uib",
+                        uib(96,  128, 3, 3, True, 2, 6, False),
+                        uib(128, 128, 5, 5, True, 1, 4, False),
+                        uib(128, 128, 0, 5, True, 1, 4, False),
+                        uib(128, 128, 0, 5, True, 1, 3, False),
+                        repeat(2, uib(128, 128, 0, 3, True, 1, 4, False))),
+        "layer5": stage("convbn",
+                        conv(128, 960, 1, 1),
+                        POOL,
+                        conv(960, 1280, 1, 1)),
+    }
+
+    MNV4ConvMedium = {
+        "conv0":  stage("convbn", conv(3, 32, 3, 2)),
+        "layer1": stage("fused_ib", fused(32, 48, 2, 4.0, False)),
+        "layer2": stage("uib",
+                        uib(48, 80, 3, 5, True, 2, 4, False),
+                        uib(80, 80, 3, 3, True, 1, 2, False)),
+        "layer3": stage("uib",
+                        uib(80, 160, 3, 5, True, 2, 6, False),
+                        repeat(2, uib(160, 160, 3, 3, True, 1, 4, False)),
+                        uib(160, 160, 3, 5, True, 1, 4, False),
+                        uib(160, 160, 3, 3, True, 1, 4, False),
+                        uib(160, 160, 3, 0, True, 1, 4, False),
+                        uib(160, 160, 0, 0, True, 1, 2, False),
+                        uib(160, 160, 3, 0, True, 1, 4, False)),
+        "layer4": stage("uib",
+                        uib(160, 256, 5, 5, True, 2, 6, False),
+                        uib(256, 256, 5, 5, True, 1, 4, False),
+                        repeat(2, uib(256, 256, 3, 5, True, 1, 4, False)),
+                        uib(256, 256, 0, 0, True, 1, 4, False),
+                        uib(256, 256, 3, 0, True, 1, 4, False),
+                        uib(256, 256, 3, 5, True, 1, 2, False),
+                        uib(256, 256, 5, 5, True, 1, 4, False),
+                        repeat(2, uib(256, 256, 0, 0, True, 1, 4, False)),
+                        uib(256, 256, 5, 0, True, 1, 2, False)),
+        "layer5": stage("convbn",
+                        conv(256, 960, 1, 1),
+                        POOL,
+                        conv(960, 1280, 1, 1)),
+    }
+
+    MNV4ConvLarge = {
+        "conv0":  stage("convbn", conv(3, 24, 3, 2)),
+        "layer1": stage("fused_ib", fused(24, 48, 2, 4.0, False)),
+        "layer2": stage("uib",   # FIX: ensure 8 fields (…shortcut=False)
+                        uib(48, 96, 3, 5, True, 2, 4, False),
+                        uib(96, 96, 3, 3, True, 1, 4, False)),
+        "layer3": stage("uib",
+                        uib(96, 192, 3, 5, True, 2, 4, False),
+                        repeat(3, uib(192, 192, 3, 3, True, 1, 4, False)),
+                        uib(192, 192, 3, 5, True, 1, 4, False),
+                        repeat(5, uib(192, 192, 5, 3, True, 1, 4, False)),
+                        uib(192, 192, 3, 0, True, 1, 4, False)),
+        "layer4": stage("uib",
+                        uib(192, 512, 5, 5, True, 2, 4, False),
+                        repeat(3, uib(512, 512, 5, 5, True, 1, 4, False)),
+                        uib(512, 512, 5, 0, True, 1, 4, False),
+                        uib(512, 512, 5, 3, True, 1, 4, False),
+                        repeat(2, uib(512, 512, 5, 0, True, 1, 4, False)),
+                        uib(512, 512, 5, 3, True, 1, 4, False),
+                        uib(512, 512, 5, 5, True, 1, 4, False),
+                        repeat(3, uib(512, 512, 5, 0, True, 1, 4, False))),
+        "layer5": stage("convbn",
+                        conv(512, 960, 1, 1),
+                        POOL,
+                        conv(960, 1280, 1, 1)),
+    }
+
+    MNV4HybridConvMedium = {
+        "conv0":  stage("convbn", conv(3, 32, 3, 2)),
+        "layer1": stage("fused_ib", fused(32, 48, 2, 4.0, False)),
+        "layer2": stage("uib",
+                        uib(48, 80, 3, 5, True, 2, 4, True),
+                        uib(80, 80, 3, 3, True, 1, 2, True)),
+        "layer3": stage("uib",
+                        uib(80, 160, 3, 5, True, 2, 6, True),
+                        uib(160, 160, 0, 0, True, 1, 2, True),
+                        uib(160, 160, 3, 3, True, 1, 4, True),
+                        uib(160, 160, 3, 5, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                        uib(160, 160, 3, 3, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                        uib(160, 160, 3, 0, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                        uib(160, 160, 3, 3, True, 1, 4, True, MHSA(4, 64, 64, 24)),
+                        uib(160, 160, 3, 0, True, 1, 4, True)),
+        "layer4": stage("uib",
+                        uib(160, 256, 5, 5, True, 2, 6, True),
+                        uib(256, 256, 5, 5, True, 1, 4, True),
+                        uib(256, 256, 3, 5, True, 1, 4, True),
+                        uib(256, 256, 3, 5, True, 1, 4, True),
+                        uib(256, 256, 0, 0, True, 1, 2, True),
+                        uib(256, 256, 3, 5, True, 1, 2, True),
+                        uib(256, 256, 0, 0, True, 1, 2, True),
+                        uib(256, 256, 0, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                        uib(256, 256, 3, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                        uib(256, 256, 5, 5, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                        uib(256, 256, 5, 0, True, 1, 4, True, MHSA(4, 64, 64, 12)),
+                        uib(256, 256, 5, 0, True, 1, 4, True)),
+        "layer5": stage("convbn",
+                        conv(256, 960, 1, 1),
+                        POOL,
+                        conv(960, 1280, 1, 1)),
+    }
+
+    MNV4HybridConvLarge = {
+        "conv0":  stage("convbn", conv(3, 24, 3, 2)),
+        "layer1": stage("fused_ib", fused(24, 48, 2, 4.0, False, True)),
+        "layer2": stage("uib",
+                        uib(48, 96, 3, 5, True, 2, 4, True),
+                        uib(96, 96, 3, 3, True, 1, 4, True)),
+        "layer3": stage("uib",
+                        uib(96, 192, 3, 5, True, 2, 4, True),
+                        repeat(3, uib(192, 192, 3, 3, True, 1, 4, True)),
+                        uib(192, 192, 3, 5, True, 1, 4, True),
+                        repeat(2, uib(192, 192, 5, 3, True, 1, 4, True)),
+                        repeat(4, uib(192, 192, 5, 3, True, 1, 4, True, MHSA(8, 48, 48, 24))),
+                        uib(192, 192, 3, 0, True, 1, 4, True)),
+        "layer4": stage("uib",
+                        uib(192, 512, 5, 5, True, 2, 4, True),
+                        repeat(3, uib(512, 512, 5, 5, True, 1, 4, True)),
+                        uib(512, 512, 5, 0, True, 1, 4, True),
+                        uib(512, 512, 5, 3, True, 1, 4, True),
+                        repeat(2, uib(512, 512, 5, 0, True, 1, 4, True)),
+                        uib(512, 512, 5, 3, True, 1, 4, True),
+                        uib(512, 512, 5, 5, True, 1, 4, True, MHSA(8, 64, 64, 12)),
+                        repeat(3, uib(512, 512, 5, 0, True, 1, 4, True, MHSA(8, 64, 64, 12))),
+                        uib(512, 512, 5, 0, True, 1, 4, True)),
+        "layer5": stage("convbn",
+                        conv(512, 960, 1, 1),
+                        POOL,
+                        conv(960, 1280, 1, 1)),
+    }
+
+    MODEL_SPECS = {
+        "MobileNetV4ConvSmall": MNV4ConvSmall,
+        "MobileNetV4ConvMedium": MNV4ConvMedium,
+        "MobileNetV4ConvLarge": MNV4ConvLarge,
+        "MobileNetV4HybridMedium": MNV4HybridConvMedium,
+        "MobileNetV4HybridLarge": MNV4HybridConvLarge
+    }
+
     def __init__(self, model_name, num_classes):
         # MobileNetV4ConvSmall  MobileNetV4ConvMedium  MobileNetV4ConvLarge
         # MobileNetV4HybridMedium  MobileNetV4HybridLarge
@@ -606,10 +627,10 @@ class MobileNetV4(nn.Module):
             "MobileNetV4HybridLarge":"MobileNetV4HybridLarge",
             "hybrid_large":"MobileNetV4HybridLarge",
         }[model_name]
-        assert model_name in MODEL_SPECS.keys()
+        assert model_name in MobileNetV4.MODEL_SPECS.keys()
         self.model_name = model_name
         self.num_classes = num_classes
-        self.spec = MODEL_SPECS[self.model_name]
+        self.spec = MobileNetV4.MODEL_SPECS[self.model_name]
        
         # conv0
         self.conv0 = build_blocks(self.spec['conv0'])
@@ -624,7 +645,7 @@ class MobileNetV4(nn.Module):
         # layer5   
         self.layer5 = build_blocks(self.spec['layer5'])
 
-        print("Check output shape ...")
+        # print("Check output shape ...")
         x = torch.rand(2, 3, 224, 224)
         y = self.feature(x)[-1]
         self.head = MobileNetV4Head(y.shape[1],num_classes=num_classes)
@@ -646,7 +667,7 @@ class MobileNetV4(nn.Module):
         return self.__class__(
                 self.model_name,
                 self.num_classes)
-    
+
 # model = MobileNetV4("MobileNetV4HybridMedium",200)
 # # Check the trainable params
 # total_params = sum(p.numel() for p in model.parameters())
