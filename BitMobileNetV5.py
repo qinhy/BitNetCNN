@@ -262,12 +262,23 @@ class MobileNetV5Classifier(nn.Module):
         in_chans: int = 3,
         stem_size: int = 64,
         channel_multiplier: float = 1.0,
-        msfa_indices: Sequence[int] = (-2, -1),
+        msfa_indices: Sequence[int] = None,
         msfa_output_resolution: int = 16,
         out_channels: int = 2048,
         drop_rate: float = 0.0,
     ):
         super().__init__()
+
+        
+        self.num_classes=num_classes
+        self.arch_def=arch_def
+        self.in_chans=in_chans
+        self.stem_size=stem_size
+        self.channel_multiplier=channel_multiplier
+        self.msfa_indices=msfa_indices
+        self.msfa_output_resolution=msfa_output_resolution
+        self.out_channels=out_channels
+        self.drop_rate=drop_rate
 
         self.backbone = MobileNetV5Backbone(
             arch_def=arch_def,
@@ -283,7 +294,7 @@ class MobileNetV5Classifier(nn.Module):
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(1),
             nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity(),
-            nn.Linear(out_channels, num_classes)
+            Bit.Linear(out_channels, num_classes)
         )
     
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -292,6 +303,19 @@ class MobileNetV5Classifier(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.head(self.encode(x))
 
+
+    def clone(self) -> "MobileNetV5Classifier":
+        return self.__class__(
+            num_classes=self.num_classes,
+            arch_def=self.arch_def,
+            in_chans=self.in_chans,
+            stem_size=self.stem_size,
+            channel_multiplier=self.channel_multiplier,
+            msfa_indices=self.msfa_indices,
+            msfa_output_resolution=self.msfa_output_resolution,
+            out_channels=self.out_channels,
+            drop_rate=self.drop_rate,
+        )
 
 MNv5_TINY_ARCH_DEF: list[list[str]] = [
     # Stage 0: 128x128 in
@@ -593,193 +617,196 @@ MNv5_300M_ARCH_DEF: list[list[str]] = [
             ],
         ]
 
-model = MobileNetV5Backbone(
-    arch_def=MNv5_BASE_ARCH_DEF,
-    in_chans=3,
-    stem_size=64,
-    channel_multiplier=1.0,
-    msfa_output_resolution=16,    # final H=W=16
-)
+# model = MobileNetV5Backbone(
+#     arch_def=MNv5_BASE_ARCH_DEF,
+#     in_chans=3,
+#     stem_size=64,
+#     channel_multiplier=1.0,
+#     msfa_output_resolution=16,    # final H=W=16
+# )
 
-x = torch.randn(1, 3, 256, 256)
-feat = model(x)
-print(feat.shape)  # -> [1, 256, 16, 16]
-info = summ(model,False)
-
-
-# def make_mobilenetv5_teacher(size="300m",dataset=None,num_classes=None,device="cpu",pretrained=True):
-#     model = timm.create_model('mobilenetv5_300m.gemma3n', pretrained=True)
-#     model = model.eval().to(device=device)
+# x = torch.randn(1, 3, 256, 256)
+# feat = model(x)
+# print(feat.shape)  # -> [1, 256, 16, 16]
+# info = summ(model,False)
 
 
-# # ----------------------------
-# # LightningModule: KD + hints
-# # ----------------------------
-# class LitMobileNetV5KD(LitBit):
-#     def __init__(
-#         self,
-#         lr, wd, epochs,
-#         dataset_name='c100',
-#         model_size="small",            # 'small'|'medium'|'large' or 'hybrid_medium'|'hybrid_large' (alias: hybrid_medium)
-#         label_smoothing=0.1, alpha_kd=0.0, alpha_hint=0.0, T=4.0,
-#         amp=True, export_dir="./ckpt_mnv5",
-#         drop_path_rate=0.0,
-#         teacher_pretrained=True
-#     ):
-#         # dataset -> classes
-#         ds = dataset_name.lower()
-#         if ds in ['c10', 'cifar10']:
-#             num_classes = 10
-#         elif ds in ['c100', 'cifar100']:
-#             num_classes = 100
-#         elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-#             num_classes = 200
-#         elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-#             num_classes = 1000
-#         else:
-#             raise ValueError(f"Unsupported dataset: {dataset_name}")
+def make_mobilenetv5_teacher(size="300m",dataset=None,num_classes=None,device="cpu",pretrained=True):
+    model = timm.create_model('mobilenetv5_300m.gemma3n', pretrained=True)
+    model = model.eval().to(device=device)
+    return model
+
+
+# ----------------------------
+# LightningModule: KD + hints
+# ----------------------------
+class LitMobileNetV5KD(LitBit):
+    def __init__(
+        self,
+        lr, wd, epochs,
+        dataset_name='c100',
+        model_size="small",            # 'small'|'medium'|'large' or 'hybrid_medium'|'hybrid_large' (alias: hybrid_medium)
+        label_smoothing=0.1, alpha_kd=0.0, alpha_hint=0.0, T=4.0,
+        amp=True, export_dir="./ckpt_mnv5",
+        drop_path_rate=0.0,
+        teacher_pretrained=True
+    ):
+        # dataset -> classes
+        ds = dataset_name.lower()
+        if ds in ['c10', 'cifar10']:
+            num_classes = 10
+        elif ds in ['c100', 'cifar100']:
+            num_classes = 100
+        elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+            num_classes = 200
+        elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+            num_classes = 1000
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset_name}")
         
-#         def get_mnv5_arch_def(model_size: str) -> list[list[str]]:
-#             size = model_size.lower()
-#             if size == "tiny":
-#                 return MNv5_TINY_ARCH_DEF
-#             elif size == "small":
-#                 return MNv5_SMALL_ARCH_DEF
-#             elif size == "base":
-#                 return MNv5_BASE_ARCH_DEF
-#             elif size == "large":
-#                 return MNv5_LARGE_ARCH_DEF
-#             elif size == "300m":
-#                 return MNv5_300M_ARCH_DEF
-#             else:
-#                 raise ValueError(f"Unknown MobileNetV5 model_size: {model_size}")
+        def get_mnv5_arch_def(model_size: str) -> list[list[str]]:
+            size = model_size.lower()
+            if size == "tiny":
+                return MNv5_TINY_ARCH_DEF
+            elif size == "small":
+                return MNv5_SMALL_ARCH_DEF
+            elif size == "base":
+                return MNv5_BASE_ARCH_DEF
+            elif size == "large":
+                return MNv5_LARGE_ARCH_DEF
+            elif size == "300m":
+                return MNv5_300M_ARCH_DEF
+            else:
+                raise ValueError(f"Unknown MobileNetV5 model_size: {model_size}")
 
-#         # student & teacher
-#         student = MobileNetV5Classifier(arch_def=get_mnv5_arch_def(model_size),
-#                                         num_classes=num_classes,
-#                                         drop_path_rate=drop_path_rate)
+        # student & teacher
+        student = MobileNetV5Classifier(arch_def=get_mnv5_arch_def(model_size),
+                                        num_classes=num_classes,
+                                        drop_rate=drop_path_rate)
 
-#         teacher = make_mobilenetv5_teacher(
-#             size="300m",
-#             dataset=ds,
-#             num_classes=num_classes,
-#             device="cpu",
-#             pretrained=teacher_pretrained
-#         )
+        teacher = make_mobilenetv5_teacher(
+            size="300m",
+            dataset=ds,
+            num_classes=num_classes,
+            device="cpu",
+            pretrained=teacher_pretrained
+        )
 
-#         # summ(student)
-#         # summ(teacher)
+        summ(student)
+        # summ(teacher)
 
-#         # pick robust hint tap points via timm feature_info
-#         hint_points = [("layer1","blocks.0"), ("layer2","blocks.1"), ("layer3","blocks.2"), ("layer4","blocks.3")]
+        # pick robust hint tap points via timm feature_info
+        hint_points = [("backbone.blocks.0","blocks.0"), ("backbone.blocks.1","blocks.1"),
+                       ("backbone.blocks.2","blocks.2"), ("backbone.blocks.3","blocks.3"),
+                       ("backbone.msfa","msfa")]
 
-#         super().__init__(
-#             lr, wd, epochs, label_smoothing,
-#             alpha_kd, alpha_hint, T,
-#             amp,
-#             export_dir,
-#             dataset_name=ds,
-#             model_name='mobilenetv5',
-#             model_size=model_size,
-#             hint_points=hint_points,
-#             student=student,
-#             teacher=teacher,
-#             num_classes=num_classes
-#         )
+        super().__init__(
+            lr, wd, epochs, label_smoothing,
+            alpha_kd, alpha_hint, T,
+            amp,
+            export_dir,
+            dataset_name=ds,
+            model_name='mobilenetv5',
+            model_size=model_size,
+            hint_points=hint_points,
+            student=student,
+            teacher=teacher,
+            num_classes=num_classes
+        )
 
-# # ----------------------------
-# # CLI / main (MobileNetV5)
-# # ----------------------------
-# def parse_args_mnv5():
-#     p = argparse.ArgumentParser()
-#     p = add_common_args(p)
+# ----------------------------
+# CLI / main (MobileNetV5)
+# ----------------------------
+def parse_args_mnv5():
+    p = argparse.ArgumentParser()
+    p = add_common_args(p)
 
-#     p.add_argument("--dataset", type=str, default="timnet",
-#                    choices=["c10", "cifar10", "c100", "cifar100", "timnet", "tiny",
-#                             "tinyimagenet", "tiny-imagenet", "imnet", "imagenet", "in1k", "imagenet1k"],
-#                    help="Target dataset (affects datamodule, num_classes, transforms).")
+    p.add_argument("--dataset", type=str, default="timnet",
+                   choices=["c10", "cifar10", "c100", "cifar100", "timnet", "tiny",
+                            "tinyimagenet", "tiny-imagenet", "imnet", "imagenet", "in1k", "imagenet1k"],
+                   help="Target dataset (affects datamodule, num_classes, transforms).")
 
-#     # For MobileNetV5 we accept conv + hybrid tags in one flag
-#     p.add_argument("--model-size", type=str, default="hybrid_medium",
-#                    choices=["tiny", "small", "base", "large", "300m"],
-#                    help="MobileNetV5 variant.")
+    # For MobileNetV5 we accept conv + hybrid tags in one flag
+    p.add_argument("--model-size", type=str, default="small",
+                   choices=["tiny", "small", "base", "large", "300m"],
+                   help="MobileNetV5 variant.")
 
-#     p.add_argument("--drop-path", type=float, default=0.0)
-#     p.add_argument("--teacher-pretrained", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=True,
-#                    help="Use ImageNet-pretrained teacher backbone when classes != 1000 (head is replaced).")
+    p.add_argument("--drop-path", type=float, default=0.0)
+    p.add_argument("--teacher-pretrained", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=True,
+                   help="Use ImageNet-pretrained teacher backbone when classes != 1000 (head is replaced).")
 
-#     p.set_defaults(out=None,batch_size=512,lr=0.2,alpha_kd=0.0,alpha_hint=0.05)
+    p.set_defaults(out=None,batch_size=16,lr=0.2,alpha_kd=0.0,alpha_hint=0.05)
 
-#     args = p.parse_args()
-#     if args.out is None:
-#         args.out = f"./ckpt_{args.dataset}_mnv5_{args.model_size}"
-#     return args
-
-
-# def _pick_datamodule_mnv5(dataset_name: str, dmargs: dict):
-#     # reuse your existing modules; same as before
-#     ds = dataset_name.lower()
-#     if ds in ['c100', 'cifar100']:
-#         if 'CIFAR100DataModule' in globals():
-#             return CIFAR100DataModule(**dmargs)
-#         else:
-#             raise RuntimeError("CIFAR100DataModule not found in common_utils.")
-#     elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-#         if 'TinyImageNetDataModule' in globals():
-#             return TinyImageNetDataModule(**dmargs)
-#         else:
-#             raise RuntimeError("TinyImageNetDataModule not found in common_utils.")
-#     elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-#         if 'ImageNetDataModule' in globals():
-#             return ImageNetDataModule(**dmargs)
-#         else:
-#             raise RuntimeError("ImageNetDataModule not found in common_utils.")
-#     else:
-#         raise ValueError(f"Unsupported dataset: {dataset_name}")
+    args = p.parse_args()
+    if args.out is None:
+        args.out = f"./ckpt_{args.dataset}_mnv5_{args.model_size}"
+    return args
 
 
-# def main_mnv5():
-#     args = parse_args_mnv5()
-
-#     # Derive num_classes for export dir naming (same as your convnext main)
-#     ds = args.dataset.lower()
-#     if ds in ['c10', 'cifar10']:
-#         ncls = 10
-#     elif ds in ['c100', 'cifar100']:
-#         ncls = 100
-#     elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-#         ncls = 200
-#     elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-#         ncls = 1000
-#     else:
-#         raise ValueError(f"Unsupported dataset: {args.dataset}")
-
-#     out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
-
-#     lit = LitMobileNetV5KD(
-#         lr=args.lr, wd=args.wd, epochs=args.epochs,
-#         dataset_name=args.dataset,
-#         model_size=args.model_size,
-#         label_smoothing=args.label_smoothing,
-#         alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
-#         amp=args.amp, export_dir=out_dir, drop_path_rate=args.drop_path,
-#         teacher_pretrained=args.teacher_pretrained
-#     )
-
-#     dmargs = dict(
-#         data_dir=args.data,
-#         batch_size=args.batch_size,
-#         num_workers=4,
-#         aug_mixup=args.mixup,
-#         aug_cutmix=args.cutmix,
-#         alpha=args.mix_alpha
-#     )
-#     dm = _pick_datamodule_mnv5(args.dataset, dmargs)
-
-#     trainer, dm = setup_trainer(args, lit, dm)
-#     trainer.fit(lit, datamodule=dm)
-#     trainer.validate(lit, datamodule=dm)
+def _pick_datamodule_mnv5(dataset_name: str, dmargs: dict):
+    # reuse your existing modules; same as before
+    ds = dataset_name.lower()
+    if ds in ['c100', 'cifar100']:
+        if 'CIFAR100DataModule' in globals():
+            return CIFAR100DataModule(**dmargs)
+        else:
+            raise RuntimeError("CIFAR100DataModule not found in common_utils.")
+    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+        if 'TinyImageNetDataModule' in globals():
+            return TinyImageNetDataModule(**dmargs)
+        else:
+            raise RuntimeError("TinyImageNetDataModule not found in common_utils.")
+    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+        if 'ImageNetDataModule' in globals():
+            return ImageNetDataModule(**dmargs)
+        else:
+            raise RuntimeError("ImageNetDataModule not found in common_utils.")
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
 
 
-# if __name__ == "__main__":
-#     main_mnv5()
+def main_mnv5():
+    args = parse_args_mnv5()
+
+    # Derive num_classes for export dir naming (same as your convnext main)
+    ds = args.dataset.lower()
+    if ds in ['c10', 'cifar10']:
+        ncls = 10
+    elif ds in ['c100', 'cifar100']:
+        ncls = 100
+    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+        ncls = 200
+    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+        ncls = 1000
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+
+    out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
+
+    lit = LitMobileNetV5KD(
+        lr=args.lr, wd=args.wd, epochs=args.epochs,
+        dataset_name=args.dataset,
+        model_size=args.model_size,
+        label_smoothing=args.label_smoothing,
+        alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
+        amp=args.amp, export_dir=out_dir, drop_path_rate=args.drop_path,
+        teacher_pretrained=args.teacher_pretrained
+    )
+
+    dmargs = dict(
+        data_dir=args.data,
+        batch_size=args.batch_size,
+        num_workers=4,
+        aug_mixup=args.mixup,
+        aug_cutmix=args.cutmix,
+        alpha=args.mix_alpha
+    )
+    dm = _pick_datamodule_mnv5(args.dataset, dmargs)
+
+    trainer, dm = setup_trainer(args, lit, dm)
+    trainer.fit(lit, datamodule=dm)
+    trainer.validate(lit, datamodule=dm)
+
+
+if __name__ == "__main__":
+    main_mnv5()

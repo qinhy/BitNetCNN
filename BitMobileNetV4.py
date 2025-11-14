@@ -359,7 +359,7 @@ class MobileNetV4Head(nn.Module):
             raise ValueError(f"Unsupported act: {act}")
 
         self.drop = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
-        self.fc = nn.Linear(out_ch, num_classes)
+        self.fc = Bit.Linear(out_ch, num_classes)
 
     @torch.no_grad()
     def feature_dim(self) -> int:
@@ -776,27 +776,7 @@ def make_mobilenetv4_teacher_for_dataset(
             head_out = getattr(cls, "out_features", None)
     head_out = head_out or 1000
 
-    if head_out != num_classes:
-        # if hasattr(t, "reset_classifier"):
-        #     try:
-        #         t.reset_classifier(num_classes=num_classes)
-        #     except TypeError:
-        #         t.reset_classifier(num_classes=num_classes, global_pool=getattr(t, "global_pool", "avg"))
-        # else:
-        #     # manual swap
-        #     in_f = None
-        #     getc = getattr(t, "get_classifier", None)
-        #     if callable(getc):
-        #         cls = getc()
-        #         in_f = getattr(cls, "in_features", None)
-        #     if in_f is not None and hasattr(t, "classifier"):
-        #         t.classifier = nn.Linear(in_f, num_classes)
-        #     elif hasattr(t, "head") and hasattr(t.head, "in_features"):
-        #         t.head = nn.Linear(t.head.in_features, num_classes)
-        #     elif hasattr(t, "fc") and hasattr(t.fc, "in_features"):
-        #         t.fc = nn.Linear(t.fc.in_features, num_classes)
-        #     else:
-        #         raise RuntimeError("Could not locate classifier head to replace.")        
+    if head_out != num_classes:     
         mapping = load_tiny200_to_in1k_map("timnet_to_imagenet1k_indices.txt")
         adapter = IN1kToTiny200Adapter(mapping, temperature=2.0, renormalize=True).to("cuda")
         tt = nn.Sequential(

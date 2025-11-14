@@ -121,7 +121,7 @@ class ConvNeXtV2(nn.Module):
             self.head.bias.data.mul_(head_init_scale)
 
     def _init_weights(self, m):
-        if isinstance(m, (nn.Conv2d, nn.Linear)):
+        if isinstance(m, (Bit.Conv2d, Bit.Linear)):
             trunc_normal_(m.weight, std=.02)
             if getattr(m, "bias", None) is not None:
                 nn.init.constant_(m.bias, 0)

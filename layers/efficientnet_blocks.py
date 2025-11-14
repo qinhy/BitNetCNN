@@ -11,6 +11,8 @@ from torch.nn import functional as F
 from timm.layers import create_conv2d, DropPath, make_divisible, create_act_layer, create_aa, to_2tuple, LayerType,\
     ConvNormAct, get_norm_act_layer, MultiQueryAttention2d, Attention2d
 
+from .bit import Bit
+
 __all__ = [
     'SqueezeExcite', 'ConvBnAct', 'DepthwiseSeparableConv', 'InvertedResidual', 'CondConvResidual', 'EdgeResidual',
     'UniversalInvertedResidual', 'MobileAttention'
@@ -55,9 +57,9 @@ class SqueezeExcite(nn.Module):
             rd_round_fn = rd_round_fn or round
             rd_channels = rd_round_fn(in_chs * rd_ratio)
         act_layer = force_act_layer or act_layer
-        self.conv_reduce = nn.Conv2d(in_chs, rd_channels, 1, bias=True)
+        self.conv_reduce = Bit.Conv2d(in_chs, rd_channels, 1, bias=True)
         self.act1 = create_act_layer(act_layer, inplace=True)
-        self.conv_expand = nn.Conv2d(rd_channels, in_chs, 1, bias=True)
+        self.conv_expand = Bit.Conv2d(rd_channels, in_chs, 1, bias=True)
         self.gate = create_act_layer(gate_layer)
 
     def forward(self, x):
@@ -608,7 +610,7 @@ class CondConvResidual(InvertedResidual):
             conv_kwargs=conv_kwargs,
             drop_path_rate=drop_path_rate,
         )
-        self.routing_fn = nn.Linear(in_chs, self.num_experts)
+        self.routing_fn = Bit.Linear(in_chs, self.num_experts)
 
     def forward(self, x):
         shortcut = x
