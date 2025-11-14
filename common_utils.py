@@ -15,8 +15,10 @@ import warnings
 from PIL import Image, ImageTk
 
 import random
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple, Type, Union
 import torch
+
+from layers.create_attn import get_attn
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,9 +41,12 @@ EPS = 1e-12
 # ----------------------------
 # Quantization Utilities
 # ----------------------------
-def summ(model):
+def summ(model,verbose=True):
+    info = []
     for name, module in model.named_modules():
-        print(name, sum(param.numel() for param in module.parameters()))
+        info.append( (name, sum(param.numel() for param in module.parameters())) )
+        if verbose: print(*info[-1])
+    return info
 
 @torch.no_grad()
 def _pow2_quantize_scale(s: torch.Tensor, min_exp: int = -32, max_exp: int = 31):
