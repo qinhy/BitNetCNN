@@ -1,16 +1,18 @@
 from __future__ import annotations
+import argparse
 from functools import partial
 from typing import List, Sequence, Union, Optional
 
+import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from timm.layers import ConvNormAct, RmsNorm2d
 from timm.models._efficientnet_blocks import SqueezeExcite, UniversalInvertedResidual
-from timm.models._efficientnet_builder import EfficientNetBuilder, decode_arch_def, round_channels
+from layers.efficientnet_builder import EfficientNetBuilder, decode_arch_def, round_channels
 
-from common_utils import summ
+from common_utils import *
 
 _GELU = partial(nn.GELU, approximate="tanh")
 
@@ -138,7 +140,7 @@ class MobileNetV5Backbone(nn.Module):
         in_chans: int = 3,
         stem_size: int = 64,
         channel_multiplier: float = 1.0,
-        msfa_indices: Sequence[int] = (-2, -1),  # which features to fuse (in feature_info space)
+        msfa_indices: Sequence[int] = None,  # which features to fuse (in feature_info space) (-2, -1)
         msfa_output_resolution: int = 16,
         out_channels: int = 2048,
         pad_type: str = "same",
@@ -189,8 +191,9 @@ class MobileNetV5Backbone(nn.Module):
         self.blocks = nn.Sequential(*builder(stem_size, block_args))
         self.feature_info = builder.features  # list of dicts with 'stage', 'num_chs', ...
 
-        # ---- MSFA index + channel calc (THIS WAS THE BUGGY PART) ----
         # 1) choose which entries in feature_info we want to fuse
+        if msfa_indices is None:
+            msfa_indices = list(range(len(self.feature_info)))
         feat_indices = _take_indices(len(self.feature_info), msfa_indices)
         self.msfa_feat_indices = feat_indices
 
@@ -292,62 +295,84 @@ class MobileNetV5Classifier(nn.Module):
 
 MNv5_TINY_ARCH_DEF: list[list[str]] = [
     # Stage 0: 128x128 in
+    # Keep only the initial downsampling block
     [
         'er_r1_k3_s2_e4_c128',
-        'er_r1_k3_s1_e4_c128',
     ],
+
     # Stage 1: 256x256 in
+    # Keep downsample + 1 follow-up block
     [
         'uir_r1_a3_k5_s2_e6_c256',
         'uir_r1_a5_k0_s1_e4_c256',
     ],
+
     # Stage 2: 640x640 in
+    # Keep first conv, a light conv, and a single (MQA + UIR) pair
     [
-        "uir_r1_a5_k5_s2_e6_c512",
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
+        "uir_r1_a5_k5_s2_e6_c512",   # main downsample
+        "uir_r1_a0_k0_s1_e1_c512",   # lightweight conv
+
+        'mqa_r1_k3_h8_s2_d64_c512',  # one attention block
+        "uir_r1_a0_k0_s1_e2_c512",   # follow-up conv
+        "uir_r1_a0_k0_s1_e2_c512",   # extra conv depth (still cheap)
     ],
+
     # Stage 3: 1280x1280 in
+    # Keep downsample + 1 MQA + 2 light convs
     [
-        "uir_r1_a5_k5_s2_e6_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
+        "uir_r1_a5_k5_s2_e6_c1024",      # downsample
+
+        'mqa_r1_k3_h16_s1_d64_c1024',    # single MQA at top
+        "uir_r1_a0_k0_s1_e2_c1024",      # conv
+        "uir_r1_a0_k0_s1_e2_c1024",      # one more conv for a bit of depth
     ],
 ]
 
 MNv5_SMALL_ARCH_DEF: list[list[str]] = [
     # Stage 0: 128x128 in
+    # Keep first s2 block + 1 repeat
     [
         'er_r1_k3_s2_e4_c128',
         'er_r1_k3_s1_e4_c128',
-        'er_r1_k3_s1_e4_c128',
     ],
+
     # Stage 1: 256x256 in
+    # Keep downsample + two follow-up blocks (drop 2 repeats)
     [
         'uir_r1_a3_k5_s2_e6_c256',
         'uir_r1_a5_k0_s1_e4_c256',
         'uir_r1_a3_k0_s1_e4_c256',
-        'uir_r1_a5_k0_s1_e4_c256',
     ],
+
     # Stage 2: 640x640 in
+    # Keep first conv sequence and only 3 (MQA + UIR) pairs instead of 6
     [
         "uir_r1_a5_k5_s2_e6_c512",
         "uir_r1_a5_k0_s1_e4_c512",
         "uir_r1_a0_k0_s1_e1_c512",
+
         'mqa_r1_k3_h8_s2_d64_c512',
         "uir_r1_a0_k0_s1_e2_c512",
+
         'mqa_r1_k3_h8_s2_d64_c512',
         "uir_r1_a0_k0_s1_e2_c512",
+
         'mqa_r1_k3_h8_s2_d64_c512',
         "uir_r1_a0_k0_s1_e2_c512",
     ],
+
     # Stage 3: 1280x1280 in
+    # Keep the first downsample + 3 (MQA + UIR) pairs instead of 7
     [
         "uir_r1_a5_k5_s2_e6_c1024",
+
         'mqa_r1_k3_h16_s1_d64_c1024',
         "uir_r1_a0_k0_s1_e2_c1024",
+
         'mqa_r1_k3_h16_s1_d64_c1024',
         "uir_r1_a0_k0_s1_e2_c1024",
+
         'mqa_r1_k3_h16_s1_d64_c1024',
         "uir_r1_a0_k0_s1_e2_c1024",
     ],
@@ -407,16 +432,354 @@ MNv5_BASE_ARCH_DEF: list[list[str]] = [
     ],
 ]
 
+MNv5_LARGE_ARCH_DEF: list[list[str]] = [
+    # Stage 0: 128x128 in
+    [
+        'er_r1_k3_s2_e4_c128',
+        'er_r1_k3_s1_e4_c128',
+        'er_r1_k3_s1_e4_c128',
+    ],
+    # Stage 1: 256x256 in
+    [
+        'uir_r1_a3_k5_s2_e6_c256',
+        'uir_r1_a5_k0_s1_e4_c256',
+        'uir_r1_a3_k0_s1_e4_c256',
+        'uir_r1_a5_k0_s1_e4_c256',
+        'uir_r1_a3_k0_s1_e4_c256',
+    ],
+    # Stage 2: 640x640 in (reduced)
+    [
+        "uir_r1_a5_k5_s2_e6_c640",       # downsample, keep
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",       # 3 conv blocks instead of 7
+
+        "uir_r1_a0_k0_s1_e1_c640",       # keep transition block
+
+        # 6x (MQA + UIR) pairs instead of 13
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+    ],
+    # Stage 3: 1280x1280 in (reduced)
+    [
+        "uir_r1_a5_k5_s2_e6_c1280",      # downsample, keep
+
+        # 8x (MQA + UIR) pairs instead of 19
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+    ],
+]
+
+MNv5_300M_ARCH_DEF: list[list[str]] = [
+            # Stage 0: 128x128 in
+            [
+                'er_r1_k3_s2_e4_c128',
+                'er_r1_k3_s1_e4_c128',
+                'er_r1_k3_s1_e4_c128',
+            ],
+            # Stage 1: 256x256 in
+            [
+                'uir_r1_a3_k5_s2_e6_c256',
+                'uir_r1_a5_k0_s1_e4_c256',
+                'uir_r1_a3_k0_s1_e4_c256',
+                'uir_r1_a5_k0_s1_e4_c256',
+                'uir_r1_a3_k0_s1_e4_c256',
+            ],
+            # Stage 2: 640x640 in
+            [
+                "uir_r1_a5_k5_s2_e6_c640",
+                "uir_r1_a5_k0_s1_e4_c640",
+                "uir_r1_a5_k0_s1_e4_c640",
+                "uir_r1_a5_k0_s1_e4_c640",
+                "uir_r1_a5_k0_s1_e4_c640",
+                "uir_r1_a5_k0_s1_e4_c640",
+                "uir_r1_a5_k0_s1_e4_c640",
+                "uir_r1_a5_k0_s1_e4_c640",
+                "uir_r1_a0_k0_s1_e1_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+                "mqa_r1_k3_h12_v2_s1_d64_c640",
+                "uir_r1_a0_k0_s1_e2_c640",
+            ],
+            # Stage 3: 1280x1280 in
+            [
+                "uir_r1_a5_k5_s2_e6_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+                "mqa_r1_k3_h16_s1_d96_c1280",
+                "uir_r1_a0_k0_s1_e2_c1280",
+            ],
+        ]
+
 model = MobileNetV5Backbone(
-    arch_def=MNv5_SMALL_ARCH_DEF,
+    arch_def=MNv5_BASE_ARCH_DEF,
     in_chans=3,
     stem_size=64,
     channel_multiplier=1.0,
-    msfa_indices=(-2, -1),        # fuse last 2 stages
     msfa_output_resolution=16,    # final H=W=16
 )
 
 x = torch.randn(1, 3, 256, 256)
 feat = model(x)
 print(feat.shape)  # -> [1, 256, 16, 16]
-summ(model)
+info = summ(model,False)
+
+
+# def make_mobilenetv5_teacher(size="300m",dataset=None,num_classes=None,device="cpu",pretrained=True):
+#     model = timm.create_model('mobilenetv5_300m.gemma3n', pretrained=True)
+#     model = model.eval().to(device=device)
+
+
+# # ----------------------------
+# # LightningModule: KD + hints
+# # ----------------------------
+# class LitMobileNetV5KD(LitBit):
+#     def __init__(
+#         self,
+#         lr, wd, epochs,
+#         dataset_name='c100',
+#         model_size="small",            # 'small'|'medium'|'large' or 'hybrid_medium'|'hybrid_large' (alias: hybrid_medium)
+#         label_smoothing=0.1, alpha_kd=0.0, alpha_hint=0.0, T=4.0,
+#         amp=True, export_dir="./ckpt_mnv5",
+#         drop_path_rate=0.0,
+#         teacher_pretrained=True
+#     ):
+#         # dataset -> classes
+#         ds = dataset_name.lower()
+#         if ds in ['c10', 'cifar10']:
+#             num_classes = 10
+#         elif ds in ['c100', 'cifar100']:
+#             num_classes = 100
+#         elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+#             num_classes = 200
+#         elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+#             num_classes = 1000
+#         else:
+#             raise ValueError(f"Unsupported dataset: {dataset_name}")
+        
+#         def get_mnv5_arch_def(model_size: str) -> list[list[str]]:
+#             size = model_size.lower()
+#             if size == "tiny":
+#                 return MNv5_TINY_ARCH_DEF
+#             elif size == "small":
+#                 return MNv5_SMALL_ARCH_DEF
+#             elif size == "base":
+#                 return MNv5_BASE_ARCH_DEF
+#             elif size == "large":
+#                 return MNv5_LARGE_ARCH_DEF
+#             elif size == "300m":
+#                 return MNv5_300M_ARCH_DEF
+#             else:
+#                 raise ValueError(f"Unknown MobileNetV5 model_size: {model_size}")
+
+#         # student & teacher
+#         student = MobileNetV5Classifier(arch_def=get_mnv5_arch_def(model_size),
+#                                         num_classes=num_classes,
+#                                         drop_path_rate=drop_path_rate)
+
+#         teacher = make_mobilenetv5_teacher(
+#             size="300m",
+#             dataset=ds,
+#             num_classes=num_classes,
+#             device="cpu",
+#             pretrained=teacher_pretrained
+#         )
+
+#         # summ(student)
+#         # summ(teacher)
+
+#         # pick robust hint tap points via timm feature_info
+#         hint_points = [("layer1","blocks.0"), ("layer2","blocks.1"), ("layer3","blocks.2"), ("layer4","blocks.3")]
+
+#         super().__init__(
+#             lr, wd, epochs, label_smoothing,
+#             alpha_kd, alpha_hint, T,
+#             amp,
+#             export_dir,
+#             dataset_name=ds,
+#             model_name='mobilenetv5',
+#             model_size=model_size,
+#             hint_points=hint_points,
+#             student=student,
+#             teacher=teacher,
+#             num_classes=num_classes
+#         )
+
+# # ----------------------------
+# # CLI / main (MobileNetV5)
+# # ----------------------------
+# def parse_args_mnv5():
+#     p = argparse.ArgumentParser()
+#     p = add_common_args(p)
+
+#     p.add_argument("--dataset", type=str, default="timnet",
+#                    choices=["c10", "cifar10", "c100", "cifar100", "timnet", "tiny",
+#                             "tinyimagenet", "tiny-imagenet", "imnet", "imagenet", "in1k", "imagenet1k"],
+#                    help="Target dataset (affects datamodule, num_classes, transforms).")
+
+#     # For MobileNetV5 we accept conv + hybrid tags in one flag
+#     p.add_argument("--model-size", type=str, default="hybrid_medium",
+#                    choices=["tiny", "small", "base", "large", "300m"],
+#                    help="MobileNetV5 variant.")
+
+#     p.add_argument("--drop-path", type=float, default=0.0)
+#     p.add_argument("--teacher-pretrained", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=True,
+#                    help="Use ImageNet-pretrained teacher backbone when classes != 1000 (head is replaced).")
+
+#     p.set_defaults(out=None,batch_size=512,lr=0.2,alpha_kd=0.0,alpha_hint=0.05)
+
+#     args = p.parse_args()
+#     if args.out is None:
+#         args.out = f"./ckpt_{args.dataset}_mnv5_{args.model_size}"
+#     return args
+
+
+# def _pick_datamodule_mnv5(dataset_name: str, dmargs: dict):
+#     # reuse your existing modules; same as before
+#     ds = dataset_name.lower()
+#     if ds in ['c100', 'cifar100']:
+#         if 'CIFAR100DataModule' in globals():
+#             return CIFAR100DataModule(**dmargs)
+#         else:
+#             raise RuntimeError("CIFAR100DataModule not found in common_utils.")
+#     elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+#         if 'TinyImageNetDataModule' in globals():
+#             return TinyImageNetDataModule(**dmargs)
+#         else:
+#             raise RuntimeError("TinyImageNetDataModule not found in common_utils.")
+#     elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+#         if 'ImageNetDataModule' in globals():
+#             return ImageNetDataModule(**dmargs)
+#         else:
+#             raise RuntimeError("ImageNetDataModule not found in common_utils.")
+#     else:
+#         raise ValueError(f"Unsupported dataset: {dataset_name}")
+
+
+# def main_mnv5():
+#     args = parse_args_mnv5()
+
+#     # Derive num_classes for export dir naming (same as your convnext main)
+#     ds = args.dataset.lower()
+#     if ds in ['c10', 'cifar10']:
+#         ncls = 10
+#     elif ds in ['c100', 'cifar100']:
+#         ncls = 100
+#     elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+#         ncls = 200
+#     elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+#         ncls = 1000
+#     else:
+#         raise ValueError(f"Unsupported dataset: {args.dataset}")
+
+#     out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
+
+#     lit = LitMobileNetV5KD(
+#         lr=args.lr, wd=args.wd, epochs=args.epochs,
+#         dataset_name=args.dataset,
+#         model_size=args.model_size,
+#         label_smoothing=args.label_smoothing,
+#         alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
+#         amp=args.amp, export_dir=out_dir, drop_path_rate=args.drop_path,
+#         teacher_pretrained=args.teacher_pretrained
+#     )
+
+#     dmargs = dict(
+#         data_dir=args.data,
+#         batch_size=args.batch_size,
+#         num_workers=4,
+#         aug_mixup=args.mixup,
+#         aug_cutmix=args.cutmix,
+#         alpha=args.mix_alpha
+#     )
+#     dm = _pick_datamodule_mnv5(args.dataset, dmargs)
+
+#     trainer, dm = setup_trainer(args, lit, dm)
+#     trainer.fit(lit, datamodule=dm)
+#     trainer.validate(lit, datamodule=dm)
+
+
+# if __name__ == "__main__":
+#     main_mnv5()
