@@ -11,7 +11,7 @@ class Linear(Bit.Linear):
     pass
     # r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
 
-    # Wraps torch.nn.Linear to support AMP + torchscript usage by manually casting
+    # Wraps torch nn Linear to support AMP + torchscript usage by manually casting
     # weight & bias to input.dtype to work around an issue w/ torch.addmm in this use case.
     # """
     # def forward(self, input: torch.Tensor) -> torch.Tensor:
