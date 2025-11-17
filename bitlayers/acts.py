@@ -1,5 +1,9 @@
-from typing import Optional
+from __future__ import annotations
 
+import json
+from typing import Optional, Type
+
+from pydantic import BaseModel
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -212,3 +216,119 @@ def create_act_layer(
     except TypeError:
         # some layers don't accept `inplace`
         return act_layer(**kwargs)
+
+
+class ActControllers:
+    class ActController(nn.Module):
+        def __init__(
+            self,
+            para: BaseModel | dict,
+            para_cls: Type[BaseModel],
+            layer_cls: Type[nn.Module],
+        ):
+            if isinstance(para, dict):
+                para = para_cls(**para)
+            self.para = json.loads(para.model_dump_json())
+
+            super().__init__()
+            kwargs = para.model_dump(exclude_none=True)
+            self.act = layer_cls(**kwargs)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.act(x)
+
+
+class _ActBase(BaseModel):
+    def _build(self, layer_cls: Type[nn.Module]) -> nn.Module:
+        return ActControllers.ActController(self, type(self), layer_cls)
+
+
+class _InplaceActBase(_ActBase):
+    inplace: bool = False
+
+
+class ActModels:
+    class ReLU(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.ReLU)
+
+    class ReLU6(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.ReLU6)
+
+    class LeakyReLU(_InplaceActBase):
+        negative_slope: float = 0.01
+
+        def build(self) -> nn.Module:
+            return self._build(nn.LeakyReLU)
+
+    class ELU(_InplaceActBase):
+        alpha: float = 1.0
+
+        def build(self) -> nn.Module:
+            return self._build(nn.ELU)
+
+    class CELU(_InplaceActBase):
+        alpha: float = 1.0
+
+        def build(self) -> nn.Module:
+            return self._build(nn.CELU)
+
+    class SELU(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.SELU)
+
+    class GELU(_ActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.GELU)
+
+    class GELUTanh(_ActBase):
+        def build(self) -> nn.Module:
+            return self._build(GELUTanh)
+
+    class QuickGELU(_ActBase):
+        def build(self) -> nn.Module:
+            return self._build(QuickGELU)
+
+    class PReLU(_ActBase):
+        num_parameters: int = 1
+        init: float = 0.25
+
+        def build(self) -> nn.Module:
+            return self._build(nn.PReLU)
+
+    class SiLU(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.SiLU)
+
+    class Swish(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.SiLU)
+
+    class Mish(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.Mish)
+
+    class HardMish(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(HardMish)
+
+    class HardSigmoid(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.Hardsigmoid)
+
+    class HardSwish(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.Hardswish)
+
+    class Sigmoid(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.Sigmoid)
+
+    class Tanh(_InplaceActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.Tanh)
+
+    class Identity(_ActBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.Identity)

@@ -1,194 +1,190 @@
 from __future__ import annotations
 
 import json
-from typing import Optional, Sequence, Tuple, Union
+from typing import Optional, Type
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 from torch import nn
-import torch
 
-from bitlayers.bit import Bit
-from .padding import PadSame
-from timmlayers.mixed_conv2d import MixedConv2d as _MixedConv2d
-from timmlayers.separable_conv import SeparableConv2d as _SeparableConv2d
-from timmlayers.split_batchnorm import SplitBatchNorm2d as _SplitBatchNorm2d
-from timmlayers.std_conv import (
-    ScaledStdConv2d as _ScaledStdConv2d,
-    ScaledStdConv2dSame as _ScaledStdConv2dSame,
-    StdConv2d as _StdConv2d,
-    StdConv2dSame as _StdConv2dSame,
+from timmlayers.norm import (
+    GroupNorm as _GroupNorm,
+    GroupNorm1 as _GroupNorm1,
+    LayerNorm as _LayerNorm,
+    LayerNorm2d as _LayerNorm2d,
+    LayerNorm2dFp32 as _LayerNorm2dFp32,
+    LayerNormExp2d as _LayerNormExp2d,
+    LayerNormFp32 as _LayerNormFp32,
+    RmsNorm as _RmsNorm,
+    RmsNorm2d as _RmsNorm2d,
+    RmsNorm2dFp32 as _RmsNorm2dFp32,
+    RmsNormFp32 as _RmsNormFp32,
+    SimpleNorm as _SimpleNorm,
+    SimpleNorm2d as _SimpleNorm2d,
+    SimpleNorm2dFp32 as _SimpleNorm2dFp32,
+    SimpleNormFp32 as _SimpleNormFp32,
 )
+from torchvision.ops.misc import FrozenBatchNorm2d as _FrozenBatchNorm2d
 
-IntOrPair = Union[int, Tuple[int, int]]
-KernelSizeArg = Union[int, Tuple[int, int], Sequence[int]]
-PadArg = Union[str, int, Tuple[int, int]]
 
-class Conv2dModels:
-    """Lightweight Pydantic wrappers for key convolutional primitives."""
+class NormControllers:
+    class NormController(nn.Module):
+        def __init__(
+            self,
+            para: BaseModel | dict,
+            para_cls: Type[BaseModel],
+            layer_cls: Type[nn.Module],
+        ):
+            if isinstance(para, dict):
+                para = para_cls(**para)
+            self.para = json.loads(para.model_dump_json())
 
-    class Conv2d(BaseModel):
-        in_channels: int
-        out_channels: int
-        kernel_size: IntOrPair
-        stride: IntOrPair = 1
-        padding: PadArg = 0
-        dilation: IntOrPair = 1
-        groups: int = 1
-        bias: bool = True
-        bit: bool = True
-        padding_mode: str = 'zeros'
-        scale_op: str ="median"
-        
-        def build(self) -> nn.Module:
-            return Conv2dControllers.Conv2dController(self)
+            super().__init__()
+            self.norm = layer_cls(**para.model_dump())
 
-    class Conv2dSame(Conv2d):
-        in_channels: int
-        out_channels: int
-        kernel_size: IntOrPair
-        stride: IntOrPair = 1
-        padding: PadArg = 0
-        dilation: IntOrPair = 1
-        groups: int = 1
-        bias: bool = True
+        def forward(self, x):
+            return self.norm(x)
 
-        def build(self) -> nn.Module:
-            return Conv2dControllers.Conv2dSameController(self)
 
-    class MixedConv2d(Conv2d):
-        in_channels: int
-        out_channels: int
-        kernel_size: KernelSizeArg
-        stride: int = 1
-        padding: PadArg = ''
-        dilation: int = 1
-        depthwise: bool = False
-        bias: bool = True
+class _NormBase(BaseModel):
+    def _build(self, layer_cls: Type[nn.Module]) -> nn.Module:
+        return NormControllers.NormController(self, type(self), layer_cls)
 
-        def build(self) -> nn.Module:
-            return _MixedConv2d(**self.model_dump())
 
-    class SeparableConv2d(Conv2d):
-        in_channels: int
-        out_channels: int
-        kernel_size: IntOrPair = 3
-        stride: int = 1
-        dilation: int = 1
-        padding: PadArg = ''
-        bias: bool = False
-        channel_multiplier: float = 1.0
-        pw_kernel_size: int = 1
-
-        def build(self) -> nn.Module:
-            return _SeparableConv2d(**self.model_dump())
-
-    class SplitBatchNorm2d(Conv2d):
+class NormModels:
+    class _BatchNormBase(_NormBase):
         num_features: int
         eps: float = 1e-5
         momentum: float = 0.1
         affine: bool = True
         track_running_stats: bool = True
-        num_splits: int = 2
+
+    class BatchNorm1d(_BatchNormBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.BatchNorm1d)
+
+    class BatchNorm2d(_BatchNormBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.BatchNorm2d)
+
+    class BatchNorm3d(_BatchNormBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.BatchNorm3d)
+
+    class SyncBatchNorm(_BatchNormBase):
+        process_group: Optional[object] = None
 
         def build(self) -> nn.Module:
-            return _SplitBatchNorm2d(**self.model_dump())
+            return self._build(nn.SyncBatchNorm)
 
-    class StdConv2d(Conv2d):
-        in_channel: int
-        out_channels: int
-        kernel_size: IntOrPair
-        stride: int = 1
-        padding: Optional[PadArg] = None
-        dilation: int = 1
-        groups: int = 1
-        bias: bool = False
+    class _InstanceNormBase(_NormBase):
+        num_features: int
+        eps: float = 1e-5
+        momentum: float = 0.1
+        affine: bool = False
+        track_running_stats: bool = False
+
+    class InstanceNorm1d(_InstanceNormBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.InstanceNorm1d)
+
+    class InstanceNorm2d(_InstanceNormBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.InstanceNorm2d)
+
+    class InstanceNorm3d(_InstanceNormBase):
+        def build(self) -> nn.Module:
+            return self._build(nn.InstanceNorm3d)
+
+    class GroupNorm(_NormBase):
+        num_channels: int
+        num_groups: int = 32
+        eps: float = 1e-5
+        affine: bool = True
+
+        def build(self) -> nn.Module:
+            return self._build(_GroupNorm)
+
+    class GroupNorm1(_NormBase):
+        num_channels: int
+        eps: float = 1e-5
+        affine: bool = True
+
+        def build(self) -> nn.Module:
+            return self._build(_GroupNorm1)
+
+    class LayerNorm(_NormBase):
+        num_channels: int
         eps: float = 1e-6
+        affine: bool = True
 
         def build(self) -> nn.Module:
-            return _StdConv2d(**self.model_dump())
+            return self._build(_LayerNorm)
 
-    class StdConv2dSame(Conv2d):
-        in_channel: int
-        out_channels: int
-        kernel_size: IntOrPair
-        stride: int = 1
-        padding: PadArg = 'SAME'
-        dilation: int = 1
-        groups: int = 1
-        bias: bool = False
+    class LayerNormFp32(LayerNorm):
+        def build(self) -> nn.Module:
+            return self._build(_LayerNormFp32)
+
+    class LayerNorm2d(LayerNorm):
+        def build(self) -> nn.Module:
+            return self._build(_LayerNorm2d)
+
+    class LayerNorm2dFp32(LayerNorm):
+        def build(self) -> nn.Module:
+            return self._build(_LayerNorm2dFp32)
+
+    class LayerNormExp2d(LayerNorm):
+        def build(self) -> nn.Module:
+            return self._build(_LayerNormExp2d)
+
+    class _RmsNormBase(_NormBase):
+        num_channels: int
         eps: float = 1e-6
+        affine: bool = True
 
+    class RmsNorm(_RmsNormBase):
         def build(self) -> nn.Module:
-            return _StdConv2dSame(**self.model_dump())
+            return self._build(_RmsNorm)
 
-    class ScaledStdConv2d(Conv2d):
-        in_channels: int
-        out_channels: int
-        kernel_size: IntOrPair
-        stride: int = 1
-        padding: Optional[PadArg] = None
-        dilation: int = 1
-        groups: int = 1
-        bias: bool = True
-        gamma: float = 1.0
+    class RmsNormFp32(_RmsNormBase):
+        def build(self) -> nn.Module:
+            return self._build(_RmsNormFp32)
+
+    class RmsNorm2d(_RmsNormBase):
+        def build(self) -> nn.Module:
+            return self._build(_RmsNorm2d)
+
+    class RmsNorm2dFp32(_RmsNormBase):
+        def build(self) -> nn.Module:
+            return self._build(_RmsNorm2dFp32)
+
+    class _SimpleNormBase(_NormBase):
+        num_channels: int
         eps: float = 1e-6
-        gain_init: float = 1.0
+        affine: bool = True
+
+    class SimpleNorm(_SimpleNormBase):
+        def build(self) -> nn.Module:
+            return self._build(_SimpleNorm)
+
+    class SimpleNormFp32(_SimpleNormBase):
+        def build(self) -> nn.Module:
+            return self._build(_SimpleNormFp32)
+
+    class SimpleNorm2d(_SimpleNormBase):
+        def build(self) -> nn.Module:
+            return self._build(_SimpleNorm2d)
+
+    class SimpleNorm2dFp32(_SimpleNormBase):
+        def build(self) -> nn.Module:
+            return self._build(_SimpleNorm2dFp32)
+
+    class FrozenBatchNorm2d(_NormBase):
+        num_features: int
+        eps: float = 1e-5
 
         def build(self) -> nn.Module:
-            return _ScaledStdConv2d(**self.model_dump())
+            return self._build(_FrozenBatchNorm2d)
 
-    class ScaledStdConv2dSame(Conv2d):
-        in_channels: int
-        out_channels: int
-        kernel_size: IntOrPair
-        stride: int = 1
-        padding: PadArg = 'SAME'
-        dilation: int = 1
-        groups: int = 1
-        bias: bool = True
-        gamma: float = 1.0
-        eps: float = 1e-6
-        gain_init: float = 1.0
-
+    class Identity(_NormBase):
         def build(self) -> nn.Module:
-            return _ScaledStdConv2dSame(**self.model_dump())
-
-class Conv2dControllers:
-    class Conv2dController(nn.Module):
-        def __init__(self,para:Conv2dModels.Conv2d,para_cls=Conv2dModels.Conv2d):
-            if type(para) is dict: para = para_cls(**para)
-            self.para = json.loads(para.model_dump_json())
-
-            super().__init__()
-            if para.bit:
-                self.conv = Bit.Conv2d(**para.model_dump())
-            else:                
-                self.conv = nn.Conv2d(**para.model_dump(exclude=['scale_op']))
-
-        def forward(self,x):
-            return self.conv(x)
-
-        @torch.no_grad()
-        def to_ternary(self):
-            if hasattr(self.conv,'to_ternary'):return self.conv.to_ternary()
-            print('to_ternary is no support!')
-            return self.conv.to_ternary()
-
-    class Conv2dSameController(Conv2dController):
-        """ Tensorflow like 'SAME' convolution wrapper for 2D convolutions
-        """
-        def __init__(self,para:Conv2dModels.Conv2dSame,para_cls=Conv2dModels.Conv2dSame):
-            super().__init__(para,para_cls)
-            w,s,d = self.conv.weight.shape[-2:], self.conv.stride, self.conv.dilation
-            self.pad = PadSame(w,s,d)
-
-        def forward(self, x):
-            return super().forward(self.pad(x))
-        
-        @torch.no_grad()
-        def to_ternary(self):
-            return nn.Sequential(
-                    self.pad,
-                    super().to_ternary())
-
-    #...
+            return self._build(nn.Identity)
