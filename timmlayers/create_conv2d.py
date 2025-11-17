@@ -12,6 +12,8 @@ def create_conv2d(in_channels, out_channels, kernel_size, **kwargs):
     Creates and returns one of torch nn Conv2d, Conv2dSame, MixedConv2d, or CondConv2d.
 
     Used extensively by EfficientNet, MobileNetv3 and related networks.
+    Conv2dSame, conv2d_same , MixedConv2d , SeparableConv2d , SplitBatchNorm2d 
+    StdConv2d, StdConv2dSame, ScaledStdConv2d, ScaledStdConv2dSame
     """
     if isinstance(kernel_size, list):
         assert 'num_experts' not in kwargs  # MixNet + CondConv combo not supported currently

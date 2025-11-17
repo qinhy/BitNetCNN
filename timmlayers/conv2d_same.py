@@ -25,8 +25,16 @@ def conv2d_same(
         groups: int = 1,
 ):
     x = pad_same(x, weight.shape[-2:], stride, dilation)
-    return Bit.conv2d(x, weight, bias, stride, (0, 0), dilation, groups)
+    return Bit.functional.conv2d(input=x,weight=weight,bias=bias,stride=stride,
+                                 padding=(0,0),dilation=dilation,groups=groups)
 
+class PadSame(nn.Module):
+    def __init__(self, shape, stride, dilation):
+        super().__init__()
+        self.shape, self.stride, self.dilation = shape, stride, dilation
+
+    def forward(self, x):
+        return pad_same(x, self.shape[-2:], self.stride, self.dilation)
 
 @register_notrace_module
 class Conv2dSame(Bit.Conv2d):
@@ -45,8 +53,14 @@ class Conv2dSame(Bit.Conv2d):
             bias=True,
     ):
         super(Conv2dSame, self).__init__(
-            in_channels, out_channels, kernel_size,
-            stride, 0, dilation, groups, bias,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=0,
+            dilation=dilation,
+            groups=groups,
+            bias=bias,
         )
 
     def forward(self, x):        
@@ -56,6 +70,13 @@ class Conv2dSame(Bit.Conv2d):
         #     x, self.weight, self.bias,
         #     self.stride, self.padding, self.dilation, self.groups,
         # )
+
+    @torch.no_grad()
+    def to_ternary(self):
+        w,s,d = self.weight.shape[-2:], self.stride, self.dilation
+        return nn.Sequential(
+                PadSame(w,s,d),
+                super().to_ternary())
 
 
 class Conv2dSameExport(Bit.Conv2d):
@@ -77,8 +98,14 @@ class Conv2dSameExport(Bit.Conv2d):
             bias=True,
     ):
         super(Conv2dSameExport, self).__init__(
-            in_channels, out_channels, kernel_size,
-            stride, 0, dilation, groups, bias,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=0,
+            dilation=dilation,
+            groups=groups,
+            bias=bias
         )
         self.pad = None
         self.pad_input_size = (0, 0)
@@ -97,6 +124,11 @@ class Conv2dSameExport(Bit.Conv2d):
         #     self.stride, self.padding, self.dilation, self.groups,
         # )
 
+    @torch.no_grad()
+    def to_ternary(self):
+        return nn.Sequential(
+                self.pad,
+                super().to_ternary())
 
 def create_conv2d_pad(in_chs, out_chs, kernel_size, **kwargs):
     padding = kwargs.pop('padding', '')
