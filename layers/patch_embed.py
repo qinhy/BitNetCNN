@@ -560,23 +560,23 @@ class PatchEmbedInterpolator(nn.Module):
 
                 # Flatten patches and apply linear projection
                 patches_flat = patches.reshape(B, N, -1)
-                output = torch.nn.functional.linear(patches_flat, weight_resampled, proj_bias)
+                output = Bit.functional.linear(patches_flat, weight_resampled, proj_bias)
             else:
                 # No resampling needed, patches can be pre-flattened
                 if patches.ndim == 5:
                     B, N, Ph, Pw, C = patches.shape
                     patches = patches.reshape(B, N, -1)
-                output = torch.nn.functional.linear(patches, proj_weight, proj_bias)
+                output = Bit.functional.linear(patches, proj_weight, proj_bias)
         else:
             # Conv mode
             if patch_size != self.base_patch_size:
                 weight_resampled = self.resample_conv_weight(proj_weight, patch_size)
-                output = torch.nn.functional.conv2d(
+                output = Bit.functional.conv2d(
                     patches, weight_resampled, proj_bias,
                     stride=patch_size, padding=0
                 )
             else:
-                output = torch.nn.functional.conv2d(
+                output = Bit.functional.conv2d(
                     patches, proj_weight, proj_bias,
                     stride=patch_size, padding=0
                 )

@@ -12,10 +12,12 @@ import torch
 from torch import nn as nn
 from torch.nn import functional as F
 
+from .bit import Bit
+
 from ._fx import register_notrace_module
 from .helpers import to_2tuple
-from .conv2d_same import conv2d_same
-from .padding import get_padding_value
+# from .conv2d_same import conv2d_same
+from .padding import get_padding_value, pad_same
 
 
 def get_condconv_initializer(initializer, num_experts, expert_shape):
@@ -32,7 +34,7 @@ def get_condconv_initializer(initializer, num_experts, expert_shape):
 
 
 @register_notrace_module
-class CondConv2d(nn.Module):
+class CondConv2d(Bit.Conv2d):
     """ Conditionally Parameterized Convolution
     Inspired by: https://github.com/tensorflow/tpu/blob/master/models/official/efficientnet/condconv/condconv_layers.py
 
@@ -94,14 +96,11 @@ class CondConv2d(nn.Module):
         # move batch elements with channels so each batch element can be efficiently convolved with separate kernel
         # reshape instead of view to work with channels_last input
         x = x.reshape(1, B * C, H, W)
-        if self.dynamic_padding:
-            out = conv2d_same(
-                x, weight, bias, stride=self.stride, padding=self.padding,
-                dilation=self.dilation, groups=self.groups * B)
-        else:
-            out = F.conv2d(
-                x, weight, bias, stride=self.stride, padding=self.padding,
-                dilation=self.dilation, groups=self.groups * B)
+        if self.dynamic_padding:            
+            x = pad_same(x, weight.shape[-2:], self.stride, self.dilation)
+        out = super().forward(x)
+        # out = F . c o nv2d(x, weight, bias, stride=self.stride, padding=self.padding,
+        #                 dilation=self.dilation, groups=self.groups * B)
         out = out.permute([1, 0, 2, 3]).view(B, self.out_channels, out.shape[-2], out.shape[-1])
 
         # Literal port (from TF definition)

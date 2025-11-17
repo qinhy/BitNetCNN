@@ -58,6 +58,11 @@ def pad_same(
         value: float = 0,
 ):
     ih, iw = x.size()[-2:]
+    
+    if type(kernel_size)==int:kernel_size=(kernel_size,kernel_size)
+    if type(stride)==int:stride=(stride,stride)
+    if type(dilation)==int:dilation=(dilation,dilation)
+    
     pad_h = get_same_padding(ih, kernel_size[0], stride[0], dilation[0])
     pad_w = get_same_padding(iw, kernel_size[1], stride[1], dilation[1])
     x = F.pad(x, (pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2), value=value)

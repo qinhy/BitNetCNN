@@ -2,7 +2,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.layers import trunc_normal_, DropPath
+from .layers import trunc_normal_, DropPath
 from common_utils import *  # provides Bit, LitBit, add_common_args, setup_trainer, *DataModule classes if available
 
 EPS = 1e-12

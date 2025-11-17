@@ -10,7 +10,7 @@ import torch.utils.checkpoint
 from torch import nn as nn
 from torch import Tensor
 
-from timm.layers import use_reentrant_ckpt
+from . import use_reentrant_ckpt
 
 
 __all__ = ['model_parameters', 'named_apply', 'named_modules', 'named_modules_with_params', 'adapt_input_conv',

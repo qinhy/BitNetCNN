@@ -86,6 +86,24 @@ class Bit:
     Collection of classes for bit-level quantization of neural networks.
     Includes fake-quant building blocks, inference modules, and training modules.
     """
+    class functional:
+        @staticmethod
+        def bit1p58_weight(weight:torch.Tensor, dim=0, scale_op="median"):
+            s = _reduce_abs(weight, keep_dim=dim, op=scale_op)
+            w_bar = (weight / s).detach()
+            w_q = torch.round(w_bar).clamp_(-1, 1)
+            return weight + (w_q * s - weight).detach()
+        
+        @staticmethod
+        def conv2d(input, weight, bias = None, stride = 1, padding = 0, padding_mode='zeros', dilation = 1, groups = 1, dim=0, scale_op="median"):            
+            weight = Bit.functional.bit1p58_weight(weight,dim,scale_op)
+            return F.conv2d(input,weight,bias,stride,padding,padding_mode,dilation,groups)
+        
+        @staticmethod
+        def linear(input, weight, bias = None, dim=0, scale_op="median"):
+            weight = Bit.functional.bit1p58_weight(weight,dim,scale_op)
+            return F.linear(input, weight, bias)
+        
     # ----------------------------
     # Fake-quant building blocks (QAT) — activation quantization removed
     # ----------------------------
@@ -230,22 +248,27 @@ class Bit:
         Conv2d with ternary weights (fake-quant for training).
         No BatchNorm inside. Add your own nonlinearity outside if desired.
         """
-        def __init__(self, in_c, out_c, kernel_size, stride=1, padding=0, dilation=1, groups=1,
-                    bias=True, scale_op="median"):
+        def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0,
+                     padding_mode='zeros', dilation=1, groups=1,
+                     bias=True, scale_op="median"):
             super().__init__()
+            if type(padding_mode) == int :
+                raise ValueError('padding_mode must be string')
             if isinstance(kernel_size, int):
                 kh = kw = kernel_size
             else:
                 kh, kw = kernel_size
-            self.weight = nn.Parameter(torch.empty(out_c, in_c // groups, kh, kw))
+            self.weight = nn.Parameter(torch.empty(out_channels, in_channels // groups, kh, kw))
             nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
-            self.bias = nn.Parameter(torch.zeros(out_c)) if bias else None
+            self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
             self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
+            self.in_channels, self.out_channels, self.kernel_size = in_channels, out_channels, kernel_size
             self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
-            self.scale_op = scale_op
+            self.padding_mode, self.scale_op = padding_mode, scale_op
 
-        def forward(self, x):
-            wq = self.w_q(self.weight)
+        def forward(self, x, weight=None):
+            weight = self.weight if weight is None else weight
+            wq = self.w_q(weight)
             return F.conv2d(x, wq, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
         @torch.no_grad()

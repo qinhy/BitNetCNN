@@ -25,7 +25,7 @@ def conv2d_same(
         groups: int = 1,
 ):
     x = pad_same(x, weight.shape[-2:], stride, dilation)
-    return F.conv2d(x, weight, bias, stride, (0, 0), dilation, groups)
+    return Bit.conv2d(x, weight, bias, stride, (0, 0), dilation, groups)
 
 
 @register_notrace_module
@@ -49,11 +49,13 @@ class Conv2dSame(Bit.Conv2d):
             stride, 0, dilation, groups, bias,
         )
 
-    def forward(self, x):
-        return conv2d_same(
-            x, self.weight, self.bias,
-            self.stride, self.padding, self.dilation, self.groups,
-        )
+    def forward(self, x):        
+        x = pad_same(x, self.weight.shape[-2:], self.stride, self.dilation)
+        return super().forward(x)
+        # return c o n v2d_ sa me(
+        #     x, self.weight, self.bias,
+        #     self.stride, self.padding, self.dilation, self.groups,
+        # )
 
 
 class Conv2dSameExport(Bit.Conv2d):
@@ -89,10 +91,11 @@ class Conv2dSameExport(Bit.Conv2d):
             self.pad_input_size = input_size
 
         x = self.pad(x)
-        return F.conv2d(
-            x, self.weight, self.bias,
-            self.stride, self.padding, self.dilation, self.groups,
-        )
+        return super().forward(x)
+        # return F . c onv2d(
+        #     x, self.weight, self.bias,
+        #     self.stride, self.padding, self.dilation, self.groups,
+        # )
 
 
 def create_conv2d_pad(in_chs, out_chs, kernel_size, **kwargs):
