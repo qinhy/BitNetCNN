@@ -45,8 +45,8 @@ class StdConv2d(Bit.Conv2d):
         weight = F.batch_norm(
             self.weight.reshape(1, self.out_channels, -1), None, None,
             training=True, momentum=0., eps=self.eps).reshape_as(self.weight)
-        x = F.conv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-        return x
+        # x = F . c o nv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        return super().forward(x,weight)
 
 
 @register_notrace_module
@@ -72,8 +72,9 @@ class StdConv2dSame(Bit.Conv2d):
         weight = F.batch_norm(
             self.weight.reshape(1, self.out_channels, -1), None, None,
             training=True, momentum=0., eps=self.eps).reshape_as(self.weight)
-        x = F.conv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-        return x
+        return super().forward(x,weight)
+        # x = F . c onv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        # return x
 
 
 class ScaledStdConv2d(Bit.Conv2d):
@@ -102,7 +103,8 @@ class ScaledStdConv2d(Bit.Conv2d):
             self.weight.reshape(1, self.out_channels, -1), None, None,
             weight=(self.gain * self.scale).view(-1),
             training=True, momentum=0., eps=self.eps).reshape_as(self.weight)
-        return F.conv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        return super().forward(x,weight)
+        # return  F . c onv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
 
 @register_notrace_module
@@ -134,4 +136,5 @@ class ScaledStdConv2dSame(Bit.Conv2d):
             self.weight.reshape(1, self.out_channels, -1), None, None,
             weight=(self.gain * self.scale).view(-1),
             training=True, momentum=0., eps=self.eps).reshape_as(self.weight)
-        return F.conv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        return super().forward(x,weight)
+        # return F . c o nv2d(x, weight, self.bias, self.stride, self.padding, self.dilation, self.groups)

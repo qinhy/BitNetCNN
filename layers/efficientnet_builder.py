@@ -16,7 +16,7 @@ from typing import Any, Dict, List
 
 import torch.nn as nn
 
-from timm.layers import CondConv2d, get_condconv_initializer, get_act_layer, get_attn, make_divisible, LayerType
+from . import CondConv2d, get_condconv_initializer, get_act_layer, get_attn, make_divisible, LayerType
 
 from layers.bit import Bit
 from .efficientnet_blocks import *
