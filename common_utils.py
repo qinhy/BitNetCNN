@@ -18,7 +18,6 @@ import random
 from typing import Callable, List, Optional, Sequence, Tuple, Type, Union
 import torch
 
-from layers.create_attn import get_attn
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
