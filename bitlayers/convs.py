@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict
 from torch import nn
 import torch
 
 from bitlayers.bit import Bit
-from .padding import Conv2dSame as _Conv2dSame, PadSame
+from .padding import PadSame
 from timmlayers.mixed_conv2d import MixedConv2d as _MixedConv2d
 from timmlayers.separable_conv import SeparableConv2d as _SeparableConv2d
 from timmlayers.split_batchnorm import SplitBatchNorm2d as _SplitBatchNorm2d
@@ -29,7 +29,7 @@ class Conv2dModels:
     class Conv2d(BaseModel):
         in_channels: int
         out_channels: int
-        kernel_size: IntOrPair
+        kernel_size: IntOrPair = 3
         stride: IntOrPair = 1
         padding: PadArg = 0
         dilation: IntOrPair = 1
@@ -40,8 +40,91 @@ class Conv2dModels:
         scale_op: str ="median"
         
         def build(self) -> nn.Module:
-            if self.bit : return Bit.Conv2d(**self.model_dump())
-            return nn.Conv2d(**self.model_dump(exclude=['scale_op']))
+            return Conv2dControllers.Conv2dController(self)
+        
+
+        # ---------- main entry point users call ----------
+        @classmethod
+        def shortcut(cls,
+            cmd: str = "conv_i3_o32_k3_s1_p1_d1_bs_bit",
+            prefix: str = "conv"
+        ):
+            if not cmd.startswith(prefix):
+                return None
+
+            kwargs = cls.parse_shortcut_kwargs(cmd)
+            if not kwargs:
+                return None
+
+            return cls(**kwargs)
+
+        # ---------- parsing logic, easy to override/extend ----------
+        @classmethod
+        def parse_shortcut_kwargs(cls, cmd: str,
+                                    # tokens like i3, o32, k3, s1, p1, d1, g1
+                                    shortcut_prefix_fields: Dict[str, str] = {
+                                        "i": "in_channels",
+                                        "o": "out_channels",
+                                        "k": "kernel_size",
+                                        "s": "stride",
+                                        "p": "padding",
+                                        "d": "dilation",
+                                        "g": "groups",
+                                    },
+
+                                    # flag tokens like bs, nobs, bit, nobit
+                                    shortcut_flag_tokens: Dict[str, tuple[str, Any]] = {
+                                        "bs": ("bias", True),
+                                        "nobs": ("bias", False),
+                                        "bit": ("bit", True),
+                                        "nobit": ("bit", False),
+                                    }
+                                ) -> Dict[str, Any]:
+            """
+            Parse a shortcut command into kwargs for the model constructor.
+            Subclasses can override this to add new tokens but still call super().
+            """
+            parts = cmd.split("_")[1:]  # drop the 'conv' prefix or whatever prefix is used
+            kwargs: Dict[str, Any] = {}
+
+            for part in parts:
+                # 1) flags like bs, nobs, bit, nobit
+                if part in cls.shortcut_flag_tokens:
+                    field, value = cls.shortcut_flag_tokens[part]
+                    kwargs[field] = value
+                    continue
+
+                # 2) padding_mode: e.g. pmreflect -> padding_mode="reflect"
+                if part.startswith("pm"):
+                    # e.g. "pmzeros", "pmreflect", etc.
+                    mode = part[2:] or "zeros"
+                    kwargs["padding_mode"] = mode
+                    continue
+
+                # 3) scale_op: e.g. scale-median, scale_mean, scale_max
+                if part.startswith("scale"):
+                    # allow "scale-median" or "scale_median" or just "scale"
+                    if "-" in part:
+                        op = part.split("-", 1)[1]
+                    elif "_" in part:
+                        op = part.split("_", 1)[1]
+                    else:
+                        op = "median"
+                    kwargs["scale_op"] = op or "median"
+                    continue
+
+                # 4) numeric prefix tokens: i3, o32, k3, s1, p1, d1, g1
+                field = cls.shortcut_prefix_fields.get(part[0])
+                if field is not None:
+                    value_str = part[1:]
+                    if value_str:  # guard against malformed tokens like "i"
+                        kwargs[field] = int(value_str)
+                    continue
+
+                # 5) unknown tokens -> ignore, or you might choose to raise here
+
+            return kwargs
+
 
     class Conv2dSame(Conv2d):
         in_channels: int
@@ -54,7 +137,7 @@ class Conv2dModels:
         bias: bool = True
 
         def build(self) -> nn.Module:
-            return _Conv2dSame(**self.model_dump())
+            return Conv2dControllers.Conv2dSameController(self)
 
     class MixedConv2d(Conv2d):
         in_channels: int
@@ -156,16 +239,17 @@ class Conv2dModels:
 
 class Conv2dControllers:
     class Conv2dController(nn.Module):
-        def __init__(self,para:Conv2dModels.Conv2d):
+        def __init__(self,para:Conv2dModels.Conv2d,para_cls=Conv2dModels.Conv2d):
+            if type(para) is dict: para = para_cls(**para)
+            self.para = json.loads(para.model_dump_json())
+
             super().__init__()
-            if type(para) is dict:
-                para = Conv2dModels.Conv2d(**para)       
-            if self.para.bit:
+            if para.bit:
                 self.conv = Bit.Conv2d(**para.model_dump())
             else:                
                 self.conv = nn.Conv2d(**para.model_dump(exclude=['scale_op']))
 
-            self.para = json.loads(para.model_dump_json())
+            self.para:Conv2dModels.Conv2d = self.para
 
         def forward(self,x):
             return self.conv(x)
@@ -179,10 +263,11 @@ class Conv2dControllers:
     class Conv2dSameController(Conv2dController):
         """ Tensorflow like 'SAME' convolution wrapper for 2D convolutions
         """
-        def __init__(self,para:Conv2dModels.Conv2dSame):
-            super().__init__(para)
+        def __init__(self,para:Conv2dModels.Conv2dSame,para_cls=Conv2dModels.Conv2dSame):
+            super().__init__(para,para_cls)
             w,s,d = self.conv.weight.shape[-2:], self.conv.stride, self.conv.dilation
             self.pad = PadSame(w,s,d)
+            self.para:Conv2dModels.Conv2dSame = self.para
 
         def forward(self, x):
             return super().forward(self.pad(x))
