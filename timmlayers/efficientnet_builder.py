@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from . import CondConv2d, get_condconv_initializer, get_act_layer, get_attn, make_divisible, LayerType
 
-from layers.bit import Bit
+from .bit import Bit
 from .efficientnet_blocks import *
 from ._manipulate import named_modules
 

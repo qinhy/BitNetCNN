@@ -9,10 +9,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common_utils import CIFAR100DataModule, ImageNetDataModule, LitBit, TinyImageNetDataModule, add_common_args, setup_trainer, summ
-from layers import ConvNormAct, RmsNorm2d
-from layers.bit import Bit
-from layers.efficientnet_blocks import SqueezeExcite, UniversalInvertedResidual
-from layers.efficientnet_builder import EfficientNetBuilder, decode_arch_def, round_channels
+from timmlayers import ConvNormAct, RmsNorm2d
+from timmlayers.bit import Bit
+from timmlayers.efficientnet_blocks import SqueezeExcite, UniversalInvertedResidual
+from timmlayers.efficientnet_builder import EfficientNetBuilder, decode_arch_def, round_channels
 
 
 _GELU = partial(nn.GELU, approximate="tanh")
