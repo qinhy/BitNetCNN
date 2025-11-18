@@ -33,11 +33,24 @@ class Conv2dModels:
             return mod.__dict__[f'{self.__class__.__name__}Controller'](self)
         
         @classmethod
-        def shortcut_prefix_fields(cls):
-            return cls
-            
+        def shortcut_prefix_fields(cls,exclude:Dict[str,str]={},le=1,alow=['integer','boolean']):
+            ts = cls.model_json_schema()['properties'].items()
+            ts = [([v.get('type')] or [i['type'] for i in v['anyOf']]) for k,v in ts]
+            ts = [set(i).intersection(set(alow)) for i in ts]
 
-    class Conv2d(BaseModel):
+            ms = [i for i,j in zip(cls.model_fields.keys(),ts) if len(i)>0]
+            ks = {i:i[:le] for i in ms if i not in exclude}
+            if len(ks)!=len(ms):
+                raise ValueError(f'short keys is duplicat, {ks} <=> {ms}')
+            ks.update(exclude)
+            return {v:k for k,v in ks.items() if v is not None}
+
+        @classmethod
+        def parse_shortcut_kwargs(cls, cmd: str, prefix: str):
+            if not cmd.startswith(prefix): return None
+            shortcut_prefix_fields = cls.shortcut_prefix_fields()
+            
+    class Conv2d(BasicModel):
         in_channels: int
         out_channels: int
         kernel_size: IntOrPair = 3
@@ -49,12 +62,17 @@ class Conv2dModels:
         bit: bool = True
         padding_mode: str = 'zeros'
         scale_op: str ="median"
-        
-        def build(self) -> nn.Module:
-            return Conv2dControllers.Conv2dController(self)
-        
 
         # ---------- main entry point users call ----------
+        @classmethod
+        def shortcut_prefix_fields(cls,exclude:Dict[str,str]={
+            'bias':'bs',
+            'bit':'bit',
+            'padding_mode':None,
+            'scale_op':None
+            }):
+            return super().shortcut_prefix_fields(exclude)
+        
         @classmethod
         def shortcut(cls,
             cmd: str = "conv_i3_o32_k3_s1_p1_d1_bs_bit",
@@ -143,8 +161,6 @@ class Conv2dModels:
         groups: int = 1
         bias: bool = True
 
-        def build(self) -> nn.Module:
-            return Conv2dControllers.Conv2dSameController(self)
 
     class MixedConv2d(Conv2d):
         in_channels: int
