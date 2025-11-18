@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from torch import nn
 import torch
 
-from bitlayers.bit import Bit
+from .bit import Bit
 from .padding import PadSame
 from timmlayers.mixed_conv2d import MixedConv2d as _MixedConv2d
 from timmlayers.separable_conv import SeparableConv2d as _SeparableConv2d
@@ -25,6 +25,17 @@ PadArg = Union[str, int, Tuple[int, int]]
 
 class Conv2dModels:
     """Lightweight Pydantic wrappers for key convolutional primitives."""
+
+    class BasicModel(BaseModel):
+
+        def build(self):
+            mod = Conv2dControllers
+            return mod.__dict__[f'{self.__class__.__name__}Controller'](self)
+        
+        @classmethod
+        def shortcut_prefix_fields(cls):
+            return cls
+            
 
     class Conv2d(BaseModel):
         in_channels: int
@@ -49,13 +60,9 @@ class Conv2dModels:
             cmd: str = "conv_i3_o32_k3_s1_p1_d1_bs_bit",
             prefix: str = "conv"
         ):
-            if not cmd.startswith(prefix):
-                return None
-
+            if not cmd.startswith(prefix): return None
             kwargs = cls.parse_shortcut_kwargs(cmd)
-            if not kwargs:
-                return None
-
+            if not kwargs: return None
             return cls(**kwargs)
 
         # ---------- parsing logic, easy to override/extend ----------
@@ -89,8 +96,8 @@ class Conv2dModels:
 
             for part in parts:
                 # 1) flags like bs, nobs, bit, nobit
-                if part in cls.shortcut_flag_tokens:
-                    field, value = cls.shortcut_flag_tokens[part]
+                if part in shortcut_flag_tokens:
+                    field, value = shortcut_flag_tokens[part]
                     kwargs[field] = value
                     continue
 
@@ -114,7 +121,7 @@ class Conv2dModels:
                     continue
 
                 # 4) numeric prefix tokens: i3, o32, k3, s1, p1, d1, g1
-                field = cls.shortcut_prefix_fields.get(part[0])
+                field = shortcut_prefix_fields.get(part[0])
                 if field is not None:
                     value_str = part[1:]
                     if value_str:  # guard against malformed tokens like "i"
