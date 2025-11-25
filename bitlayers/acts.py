@@ -218,8 +218,8 @@ def create_act_layer(
         return act_layer(**kwargs)
 
 
-class ActControllers:
-    class ActController(nn.Module):
+class ActModules:
+    class Activation(nn.Module):
         def __init__(
             self,
             para: BaseModel | dict,
@@ -240,7 +240,7 @@ class ActControllers:
 
 class _ActBase(BaseModel):
     def _build(self, layer_cls: Type[nn.Module]) -> nn.Module:
-        return ActControllers.ActController(self, type(self), layer_cls)
+        return ActModules.Activation(self, type(self), layer_cls)
 
 
 class _InplaceActBase(_ActBase):
