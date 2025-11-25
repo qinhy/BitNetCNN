@@ -29,8 +29,8 @@ class Conv2dModels:
     class BasicModel(BaseModel):
 
         def build(self):
-            mod = Conv2dControllers
-            return mod.__dict__[f'{self.__class__.__name__}Controller'](self)
+            mod = Conv2dModules
+            return mod.__dict__[f'{self.__class__.__name__}'](self)
         
         @classmethod
         def shortcut_prefix_fields(cls,specifics:Dict[str,str]={},le=1,alow=['integer','boolean']):
@@ -196,8 +196,8 @@ class Conv2dModels:
     def create_conv2d():
         pass
     
-class Conv2dControllers:
-    class Conv2dController(nn.Module):
+class Conv2dModules:
+    class Conv2d(nn.Module):
         def __init__(self,para:Conv2dModels.Conv2d,para_cls=Conv2dModels.Conv2d):
             if type(para) is dict: para = para_cls(**para)
             self.para = json.loads(para.model_dump_json())
@@ -219,7 +219,7 @@ class Conv2dControllers:
             print('to_ternary is no support!')
             return self.conv.to_ternary()
 
-    class Conv2dSameController(Conv2dController):
+    class Conv2dSame(Conv2d):
         """ Tensorflow like 'SAME' convolution wrapper for 2D convolutions
         """
         def __init__(self,para:Conv2dModels.Conv2dSame,para_cls=Conv2dModels.Conv2dSame):
