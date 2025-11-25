@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple
 
 import math
 from typing import List, Tuple, Union
@@ -10,8 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from .helpers import to_2tuple
-from .padding import pad_same, pad_same_arg, get_padding_value
-from .bit import Bit
+
 
 # Calculate symmetric padding for a convolution
 def get_padding(kernel_size: int, stride: int = 1, dilation: int = 1, **_) -> Union[int, List[int]]:
