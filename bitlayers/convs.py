@@ -257,10 +257,9 @@ class Conv2dModels:
         exp_kernel_size: int = 1
 
         conv_pwl_layer: Union['Conv2dModels.Conv2dBnAct'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dBnAct(
+            default_factory=lambda: Conv2dModels.Conv2dBn(
                 in_channels=-1,
                 bn=NormModels.BatchNorm2d(),
-                act=ActModels.Identity(),
             )
         )
 
@@ -322,7 +321,6 @@ class Conv2dModels:
             self.conv_pwl_layer.out_channels = self.out_channels
             self.conv_pwl_layer.kernel_size = self.pw_kernel_size
             self.conv_pwl_layer.padding = self.padding
-            self.conv_pwl_layer.act = ActModels.Identity()
             return self
         
 class Conv2dModules:
@@ -479,36 +477,18 @@ class Conv2dModules:
         
         def forward(self, x):
             shortcut = x
-            if self.para.conv_s2d_layer is not None:
+            if self.conv_s2d is not None:
                 x = self.conv_s2d(x) # with bn and act
 
+            x = self.conv_pw(x) # with bn and act
             x = self.conv_dw(x) # with bn and act
 
             if self.para.aa_layer is not None:
                 x = self.aa(x)
-                
-            if self.para.se_layer is not None:
-                x = self.se(x)
-                
-            x = self.conv_pw(x) # with bn and act            
-            if (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (not self.para.noskip):                
-                x = self.drop_path(x) + shortcut
-            return x
-        
-        def forward(self, x):
-            shortcut = x
-            if self.conv_s2d is not None:
-                x = self.conv_s2d(x)
-
-            x = self.conv_pw(x)
-            x = self.conv_dw(x)
-
-            if self.para.aa_layer is not None:
-                x = self.aa(x)
             if self.para.se_layer is not None:
                 x = self.se(x)
 
-            x = self.conv_pwl(x)
+            x = self.conv_pwl(x) # with bn and no act
 
             if (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (not self.para.noskip):                
                 x = self.drop_path(x) + shortcut
