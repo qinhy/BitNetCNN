@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Optional, Type
+from typing import Optional, Type, Union
 
 from pydantic import BaseModel
 import torch
@@ -332,3 +332,5 @@ class ActModels:
     class Identity(_ActBase):
         def build(self) -> nn.Module:
             return self._build(nn.Identity)
+
+    type = Union[ReLU,ReLU6,LeakyReLU,ELU,CELU,SELU,GELU,GELUTanh,QuickGELU,PReLU,SiLU,Swish,Mish,HardMish,HardSigmoid,HardSwish,Sigmoid,Tanh,Identity,]

@@ -1,33 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Optional, Type
+from typing import Optional, Type, Union
 
 from pydantic import BaseModel
 from torch import nn
+from torchvision.ops.misc import FrozenBatchNorm2d
 
-from timmlayers.norm import (
-    GroupNorm as _GroupNorm,
-    GroupNorm1 as _GroupNorm1,
-    LayerNorm as _LayerNorm,
-    LayerNorm2d as _LayerNorm2d,
-    LayerNorm2dFp32 as _LayerNorm2dFp32,
-    LayerNormExp2d as _LayerNormExp2d,
-    LayerNormFp32 as _LayerNormFp32,
-    RmsNorm as _RmsNorm,
-    RmsNorm2d as _RmsNorm2d,
-    RmsNorm2dFp32 as _RmsNorm2dFp32,
-    RmsNormFp32 as _RmsNormFp32,
-    SimpleNorm as _SimpleNorm,
-    SimpleNorm2d as _SimpleNorm2d,
-    SimpleNorm2dFp32 as _SimpleNorm2dFp32,
-    SimpleNormFp32 as _SimpleNormFp32,
-)
-from torchvision.ops.misc import FrozenBatchNorm2d as _FrozenBatchNorm2d
-
-
-class NormControllers:
-    class NormController(nn.Module):
+class NormdModules:
+    class Norm(nn.Module):
         def __init__(
             self,
             para: BaseModel | dict,
@@ -44,14 +25,8 @@ class NormControllers:
         def forward(self, x):
             return self.norm(x)
 
-
-class _NormBase(BaseModel):
-    def _build(self, layer_cls: Type[nn.Module]) -> nn.Module:
-        return NormControllers.NormController(self, type(self), layer_cls)
-
-
 class NormModels:
-    class _BatchNormBase(_NormBase):
+    class _BatchNormBase(BaseModel):
         num_features: int
         eps: float = 1e-5
         momentum: float = 0.1
@@ -60,23 +35,23 @@ class NormModels:
 
     class BatchNorm1d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return self._build(nn.BatchNorm1d)
+            return NormdModules.Norm(self, type(self), nn.BatchNorm1d)
 
     class BatchNorm2d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return self._build(nn.BatchNorm2d)
+            return NormdModules.Norm(self, type(self), nn.BatchNorm2d)
 
     class BatchNorm3d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return self._build(nn.BatchNorm3d)
+            return NormdModules.Norm(self, type(self), nn.BatchNorm3d)
 
     class SyncBatchNorm(_BatchNormBase):
         process_group: Optional[object] = None
 
         def build(self) -> nn.Module:
-            return self._build(nn.SyncBatchNorm)
+            return NormdModules.Norm(self, type(self), nn.SyncBatchNorm)
 
-    class _InstanceNormBase(_NormBase):
+    class _InstanceNormBase(BaseModel):
         num_features: int
         eps: float = 1e-5
         momentum: float = 0.1
@@ -85,106 +60,108 @@ class NormModels:
 
     class InstanceNorm1d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return self._build(nn.InstanceNorm1d)
+            return NormdModules.Norm(self, type(self), nn.InstanceNorm1d)
 
     class InstanceNorm2d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return self._build(nn.InstanceNorm2d)
+            return NormdModules.Norm(self, type(self), nn.InstanceNorm2d)
 
     class InstanceNorm3d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return self._build(nn.InstanceNorm3d)
+            return NormdModules.Norm(self, type(self), nn.InstanceNorm3d)
 
-    class GroupNorm(_NormBase):
+    class GroupNorm(BaseModel):
         num_channels: int
         num_groups: int = 32
         eps: float = 1e-5
         affine: bool = True
 
         def build(self) -> nn.Module:
-            return self._build(_GroupNorm)
+            return NormdModules.Norm(self, type(self), nn.GroupNorm)
 
-    class GroupNorm1(_NormBase):
-        num_channels: int
-        eps: float = 1e-5
-        affine: bool = True
+    # class GroupNorm1(BaseModel):
+    #     num_channels: int
+    #     eps: float = 1e-5
+    #     affine: bool = True
 
-        def build(self) -> nn.Module:
-            return self._build(_GroupNorm1)
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.GroupNorm1)
 
-    class LayerNorm(_NormBase):
+    class LayerNorm(BaseModel):
         num_channels: int
         eps: float = 1e-6
         affine: bool = True
 
         def build(self) -> nn.Module:
-            return self._build(_LayerNorm)
+            return NormdModules.Norm(self, type(self), nn.LayerNorm)
 
-    class LayerNormFp32(LayerNorm):
-        def build(self) -> nn.Module:
-            return self._build(_LayerNormFp32)
+    # class LayerNormFp32(LayerNorm):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.LayerNormFp32)
 
-    class LayerNorm2d(LayerNorm):
-        def build(self) -> nn.Module:
-            return self._build(_LayerNorm2d)
+    # class LayerNorm2d(LayerNorm):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.LayerNorm2d)
 
-    class LayerNorm2dFp32(LayerNorm):
-        def build(self) -> nn.Module:
-            return self._build(_LayerNorm2dFp32)
+    # class LayerNorm2dFp32(LayerNorm):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.LayerNorm2dFp32)
 
-    class LayerNormExp2d(LayerNorm):
-        def build(self) -> nn.Module:
-            return self._build(_LayerNormExp2d)
+    # class LayerNormExp2d(LayerNorm):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.LayerNormExp2d)
 
-    class _RmsNormBase(_NormBase):
+    class _RmsNormBase(BaseModel):
         num_channels: int
         eps: float = 1e-6
         affine: bool = True
 
     class RmsNorm(_RmsNormBase):
         def build(self) -> nn.Module:
-            return self._build(_RmsNorm)
+            return NormdModules.Norm(self, type(self), nn.RMSNorm)
 
-    class RmsNormFp32(_RmsNormBase):
-        def build(self) -> nn.Module:
-            return self._build(_RmsNormFp32)
+    # class RmsNormFp32(_RmsNormBase):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.RMSNormFp32)
 
-    class RmsNorm2d(_RmsNormBase):
-        def build(self) -> nn.Module:
-            return self._build(_RmsNorm2d)
+    # class RmsNorm2d(_RmsNormBase):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.RMSNorm2d)
 
-    class RmsNorm2dFp32(_RmsNormBase):
-        def build(self) -> nn.Module:
-            return self._build(_RmsNorm2dFp32)
+    # class RmsNorm2dFp32(_RmsNormBase):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.RMSNorm2dFp32)
 
-    class _SimpleNormBase(_NormBase):
-        num_channels: int
-        eps: float = 1e-6
-        affine: bool = True
+    # class _SimpleNormBase(BaseModel):
+    #     num_channels: int
+    #     eps: float = 1e-6
+    #     affine: bool = True
 
-    class SimpleNorm(_SimpleNormBase):
-        def build(self) -> nn.Module:
-            return self._build(_SimpleNorm)
+    # class SimpleNorm(_SimpleNormBase):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.SimpleNorm)
 
-    class SimpleNormFp32(_SimpleNormBase):
-        def build(self) -> nn.Module:
-            return self._build(_SimpleNormFp32)
+    # class SimpleNormFp32(_SimpleNormBase):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.SimpleNormFp32)
 
-    class SimpleNorm2d(_SimpleNormBase):
-        def build(self) -> nn.Module:
-            return self._build(_SimpleNorm2d)
+    # class SimpleNorm2d(_SimpleNormBase):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.SimpleNorm2d)
 
-    class SimpleNorm2dFp32(_SimpleNormBase):
-        def build(self) -> nn.Module:
-            return self._build(_SimpleNorm2dFp32)
+    # class SimpleNorm2dFp32(_SimpleNormBase):
+    #     def build(self) -> nn.Module:
+    #         return NormdModules.Norm(self, type(self), nn.SimpleNorm2dFp32)
 
-    class FrozenBatchNorm2d(_NormBase):
+    class FrozenBatchNorm2d(BaseModel):
         num_features: int
         eps: float = 1e-5
 
         def build(self) -> nn.Module:
-            return self._build(_FrozenBatchNorm2d)
+            return NormdModules.Norm(self, type(self), FrozenBatchNorm2d)
 
-    class Identity(_NormBase):
+    class Identity(BaseModel):
         def build(self) -> nn.Module:
-            return self._build(nn.Identity)
+            return NormdModules.Norm(self, type(self), nn.Identity)
+
+    type = Union[BatchNorm1d,BatchNorm2d,BatchNorm3d,SyncBatchNorm,InstanceNorm1d,InstanceNorm2d,InstanceNorm3d,GroupNorm,LayerNorm,RmsNorm,FrozenBatchNorm2d,Identity]
