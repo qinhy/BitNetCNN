@@ -39,7 +39,16 @@ class LinearModels:
         bn: NormModels.type
         act: ActModels.type
 
-    type = Union[Linear,LinearBn,LinearAct,LinearBnAct]
+    class LayerScale2d(BaseModel):
+        dim: int
+        init_values: float = 1e-5
+        inplace: bool = False
+
+        def build(self):
+            mod = LinearModules
+            return mod.__dict__[f'{self.__class__.__name__}'](self)
+
+    type = Union[Linear,LinearBn,LinearAct,LinearBnAct,LayerScale2d]
 
 
 class LinearModules:
@@ -117,3 +126,14 @@ class LinearModules:
         @torch.no_grad()
         def to_ternary(self):
             return nn.Sequential(super().to_ternary(),self.bn,self.act)
+
+    class LayerScale2d(Module):
+        def __init__(self, para: LinearModels.LayerScale2d, para_cls=LinearModels.LayerScale2d):
+            super().__init__(para, para_cls)
+            self.para: LinearModels.LayerScale2d = self.para
+            self.inplace = para.inplace
+            self.gamma = nn.Parameter(para.init_values * torch.ones(para.dim))
+
+        def forward(self, x):
+            gamma = self.gamma.view(1, -1, 1, 1)
+            return x.mul_(gamma) if self.inplace else x * gamma
