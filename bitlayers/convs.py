@@ -371,10 +371,7 @@ class Conv2dModules:
         
         @torch.no_grad()
         def to_ternary(self):
-            return nn.Sequential(
-                    self.pad,
-                    super().to_ternary())
-
+            return nn.Sequential(self.pad,super().to_ternary())
     class Conv2dBn(Conv2d):
         def __init__(self,para:Conv2dModels.Conv2dBn,para_cls=Conv2dModels.Conv2dBn):
             super().__init__(para,para_cls)
@@ -385,9 +382,7 @@ class Conv2dModules:
         
         @torch.no_grad()
         def to_ternary(self):
-            return nn.Sequential(
-                    super().to_ternary(),
-                    self.bn)
+            return nn.Sequential(super().to_ternary(),self.bn)
         
     class Conv2dAct(Conv2d):
         def __init__(self,para:Conv2dModels.Conv2dAct,para_cls=Conv2dModels.Conv2dAct):
@@ -399,9 +394,7 @@ class Conv2dModules:
         
         @torch.no_grad()
         def to_ternary(self):
-            return nn.Sequential(
-                    super().to_ternary(),
-                    self.act)
+            return nn.Sequential(super().to_ternary(),self.act)
         
     class Conv2dBnAct(Conv2d):
         def __init__(self,para:Conv2dModels.Conv2dBnAct,para_cls=Conv2dModels.Conv2dBnAct):
@@ -414,10 +407,7 @@ class Conv2dModules:
         
         @torch.no_grad()
         def to_ternary(self):
-            return nn.Sequential(
-                    super().to_ternary(),
-                    self.bn,
-                    self.act)
+            return nn.Sequential(super().to_ternary(),self.bn,self.act)
         
     class SqueezeExcite(Module):
 
