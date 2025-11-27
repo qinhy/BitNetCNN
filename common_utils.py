@@ -165,7 +165,7 @@ class Bit:
             super().__init__()
             # Make them Parameters so param counters include them (but keep frozen)
             self.w_q  = nn.Parameter(w_q.to(torch.int8), requires_grad=False)   # [out,in,kh,kw]
-            self.s    = nn.Parameter(s,                     requires_grad=False) # [out,1,1]
+            self.s    = nn.Parameter(s,                  requires_grad=False) # [out,1,1]
             if bias is None:
                 self.register_parameter("bias", None)
             else:
