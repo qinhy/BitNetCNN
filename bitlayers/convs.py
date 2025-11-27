@@ -610,11 +610,11 @@ class Conv2dModules:
         @torch.no_grad()
         def to_ternary(self):
             if not self.weight_used:
-                return nn.Identity()
+                self.conv = nn.Identity()
             if not self.bit:
-                print('to_ternary is no support!')            
+                print('to_ternary is no support!')       
             if self.weight_used and self.bit:
-                return self.conv.to_ternary()                
+                self.conv = self.conv.to_ternary()                
             return self
                 
     class Conv2dBn(Conv2d):
@@ -757,7 +757,7 @@ class Conv2dModules:
             return x
         
         @torch.no_grad()
-        def to_ternary(self,mods=['conv_s2d','conv_dw','se','aa','conv_pw']):
+        def to_ternary(self,mods=['conv_s2d','conv_pw','conv_dw','se','aa','conv_pwl']):
             self.convert_to_ternary(self,mods)
             self.drop_path = nn.Identity()
             return self
