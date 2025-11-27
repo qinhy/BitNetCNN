@@ -45,7 +45,7 @@ InvertedResidualModule = convs.Conv2dModules.InvertedResidual
 
 class NetCNN(nn.Module):
     def __init__(self, in_channels=1, num_classes=10, expand_ratio=5,
-                 drop2d_p=0.05, drop_p=0.1, scale_op="median"):
+                 drop2d_p=0.05, drop_p=0.1, scale_op="median", bias=True):
         super().__init__()
         self.in_channels = in_channels
         self.num_classes = num_classes
@@ -57,24 +57,24 @@ class NetCNN(nn.Module):
                             in_channels=in_channels,
                             out_channels=2**expand_ratio,
                             kernel_size=3, stride=1, padding=1,
-                            bias=True, scale_op=scale_op,
+                            bias=bias, scale_op=scale_op,
                             bn = NormModels.BatchNorm2d(num_features=-1),
                             act= ActModels.SiLU(inplace=True)).build()
 
         self.stage1:InvertedResidualModule = InvertedResidual(in_channels=2**expand_ratio,out_channels=2**(expand_ratio+1),
-                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p).build()
+                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p,bias=bias).build()
         
         self.stage2:InvertedResidualModule = InvertedResidual(in_channels=2**(expand_ratio+1),out_channels=2**(expand_ratio+2),
-                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p).build()
+                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p,bias=bias).build()
         
         self.stage3:InvertedResidualModule = InvertedResidual(in_channels=2**(expand_ratio+2),out_channels=2**(expand_ratio+3),
-                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p).build()
+                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p,bias=bias).build()
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Dropout(p=drop_p),
-            Bit.Linear(2**(expand_ratio+3), num_classes, bias=True, scale_op=scale_op),
+            Bit.Linear(2**(expand_ratio+3), num_classes, bias=bias, scale_op=scale_op),
         )
 
     def forward(self, x):
@@ -87,7 +87,7 @@ class NetCNN(nn.Module):
     def clone(self):
         return NetCNN(self.in_channels, self.num_classes, self.expand_ratio,
                      self.drop2d_p, self.drop_p, self.scale_op)
-summ(convert_to_ternary(NetCNN()))
+# summ(convert_to_ternary(NetCNN()))
 # ----------------------------
 # LightningModule wrapper using LitBit
 # ----------------------------
