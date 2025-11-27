@@ -2,7 +2,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .layers import trunc_normal_, DropPath
+from timmlayers import trunc_normal_, DropPath
 from common_utils import *  # provides Bit, LitBit, add_common_args, setup_trainer, *DataModule classes if available
 
 EPS = 1e-12
@@ -61,7 +61,7 @@ class ConvNeXtV2Block(nn.Module):
         self.pwconv2 = Bit.Linear(4 * dim, dim, scale_op=scale_op)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor):
         input = x
         x = self.dwconv(x)
         x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)

@@ -23,7 +23,7 @@ class LinearModels:
 
     class Linear(BasicModel):
         in_features: int
-        out_features: int
+        out_features: int = -1
         bias: bool = True
 
         bit: bool = True

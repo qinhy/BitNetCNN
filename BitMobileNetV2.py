@@ -1,6 +1,9 @@
 import argparse
 import torch
 import torch.nn as nn
+from bitlayers import convs
+from bitlayers.acts import ActModels
+from bitlayers.norms import NormModels
 from common_utils import *
 
 # ----------------------------
@@ -14,41 +17,43 @@ def _make_divisible(v, divisor=8, min_value=None):
         new_v += divisor
     return new_v
 
-class ConvBNActBit(nn.Module):
-    def __init__(self, in_ch, out_ch, k, s, p, groups=1, scale_op="median", act="silu"):
-        super().__init__()
-        self.conv = Bit.Conv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
-                              groups=groups, scale_op=scale_op)
-        self.bn   = nn.BatchNorm2d(out_ch)
-        if act == "relu6":
-            self.act = nn.ReLU6(inplace=True)
-        elif act == "silu":
-            self.act = nn.SiLU(inplace=True)
-        else:
-            self.act = nn.Identity()
-    def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
+ConvBNActBit = convs.Conv2dModels.Conv2dBnAct
+# class ConvBNActBit(nn.Module):
+#     def __init__(self, in_ch, out_ch, k, s, p, groups=1, scale_op="median", act="silu"):
+#         super().__init__()
+#         self.conv = Bit.Conv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
+#                               groups=groups, scale_op=scale_op)
+#         self.bn   = nn.BatchNorm2d(out_ch)
+#         if act == "relu6":
+#             self.act = nn.ReLU6(inplace=True)
+#         elif act == "silu":
+#             self.act = nn.SiLU(inplace=True)
+#         else:
+#             self.act = nn.Identity()
+#     def forward(self, x):
+#         return self.act(self.bn(self.conv(x)))
 
-class InvertedResidualBit(nn.Module):
-    def __init__(self, inp, oup, stride, expand_ratio, scale_op="median", act="silu"):
-        super().__init__()
-        assert stride in [1, 2]
-        hidden_dim = int(round(inp * expand_ratio))
-        self.use_res_connect = (stride == 1 and inp == oup)
-        layers = []
-        if expand_ratio != 1:
-            layers.append(ConvBNActBit(inp, hidden_dim, 1, 1, 0, scale_op=scale_op, act=act))
-        layers.append(ConvBNActBit(hidden_dim, hidden_dim, 3, stride, 1,
-                                   groups=hidden_dim, scale_op=scale_op, act=act))
-        layers.append(Bit.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False, scale_op=scale_op))
-        layers.append(nn.BatchNorm2d(oup))
-        self.block = nn.Sequential(*layers)
+InvertedResidualBit = convs.Conv2dModels.InvertedResidual
+# class InvertedResidualBit(nn.Module):
+#     def __init__(self, inp, oup, stride, expand_ratio, scale_op="median", act="silu"):
+#         super().__init__()
+#         assert stride in [1, 2]
+#         hidden_dim = int(round(inp * expand_ratio))
+#         self.use_res_connect = (stride == 1 and inp == oup)
+#         layers = []
+#         if expand_ratio != 1:
+#             layers.append(ConvBNActBit(inp, hidden_dim, 1, 1, 0, scale_op=scale_op, act=act))
+#         layers.append(ConvBNActBit(hidden_dim, hidden_dim, 3, stride, 1,
+#                                    groups=hidden_dim, scale_op=scale_op, act=act))
+#         layers.append(Bit.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False, scale_op=scale_op))
+#         layers.append(nn.BatchNorm2d(oup))
+#         self.block = nn.Sequential(*layers)
 
-    def forward(self, x):
-        out = self.block(x)
-        if self.use_res_connect:
-            out = x + out
-        return out
+#     def forward(self, x):
+#         out = self.block(x)
+#         if self.use_res_connect:
+#             out = x + out
+#         return out
 
 class BitMobileNetV2(nn.Module):
     """
@@ -58,7 +63,7 @@ class BitMobileNetV2(nn.Module):
       - Collects stage-end names in self.hint_names for hooks
     """
     def __init__(self, num_classes=100, width_mult=1.0, round_nearest=8,
-                 scale_op="median", in_ch=3, act="silu", last_channel_override=None):
+                 scale_op="median", in_ch=3, act=ActModels.SiLU(), last_channel_override=None):
         super().__init__()
         self.num_classes, self.width_mult, self.round_nearest, self.scale_op, self.in_ch, self.act, self.last_channel_override = \
             num_classes, width_mult, round_nearest, scale_op, in_ch, act, last_channel_override
@@ -77,7 +82,10 @@ class BitMobileNetV2(nn.Module):
         else:
             last_channel = _make_divisible(1280 * max(1.0, width_mult), round_nearest)
 
-        self.stem = ConvBNActBit(in_ch, input_channel, k=3, s=1, p=1, scale_op=scale_op, act=act)
+        self.stem = ConvBNActBit(in_channels=in_ch,out_channels=input_channel,
+                                 kernel_size=3,stride=1,padding=1,scale_op=scale_op,
+                                 bn=NormModels.BatchNorm2d(num_features=-1),
+                                 act=act).build()
 
         features = []
         self.hint_names = []
@@ -86,15 +94,18 @@ class BitMobileNetV2(nn.Module):
             for i in range(n):
                 stride = s if i == 0 else 1
                 features.append(
-                    InvertedResidualBit(input_channel, output_channel, stride,
-                                        expand_ratio=t, scale_op=scale_op, act=act)
+                    InvertedResidualBit(in_channels=input_channel, out_channels=output_channel, stride=stride,
+                                        expand_ratio=t, scale_op=scale_op,act=act).build()
                 )
                 input_channel = output_channel
             self.hint_names.append(f"features.{len(features)-1}")
         self.features = nn.Sequential(*features)
 
-        self.head_conv  = ConvBNActBit(input_channel, last_channel, k=1, s=1, p=0,
-                                       scale_op=scale_op, act=act)
+        self.head_conv = ConvBNActBit(in_channels=input_channel,out_channels=last_channel,
+                                 kernel_size=1,stride=1,padding=0,scale_op=scale_op,
+                                 bn=NormModels.BatchNorm2d(num_features=-1),
+                                 act=act).build()
+        
         self.pool       = nn.AdaptiveAvgPool2d(1)
         self.classifier = Bit.Linear(last_channel, num_classes, bias=True, scale_op=scale_op)
 
@@ -185,7 +196,7 @@ class LitBitMBv2KD(LitBit):
 def parse_args():
     p = argparse.ArgumentParser()
     p = add_common_args(p)
-    p.set_defaults(out=None, batch_size=512)
+    p.set_defaults(out=None, batch_size=16)
     p.add_argument("--width-mult", type=float, default=1.4)
     p.add_argument("--teacher-variant", type=str, default="cifar100_mobilenetv2_x1_4")
     p.add_argument("--dataset", type=str, default="timnet",

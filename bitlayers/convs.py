@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 from torch import nn
 import torch
+import torch.nn.functional as F
 
-from bitlayers.helpers import make_divisible
-from bitlayers.pool import PoolModels
 
+from .helpers import make_divisible, to_2tuple
+from .pool import PoolModels
 from .norms import NormModels
 from .drop import DropPath
 from .acts import ActModels
 from .bit import Bit
 from .padding import PadSame
+from .linear import LinearModels, LinearModules
+
+from timmlayers import create_conv2d, create_pool2d, use_fused_attn
 
 IntOrPair = Union[int, Tuple[int, int]]
 KernelSizeArg = Union[int, Tuple[int, int], Sequence[int]]
@@ -59,7 +62,6 @@ def parse_shortcut_kwargs(cmd: str, prefix: str, json_schema:Dict,
 
 class Conv2dModels:
     """Lightweight Pydantic wrappers for key convolutional primitives."""
-
     class BasicModel(BaseModel):
         bit: bool = True
         scale_op: str = "median"
@@ -106,6 +108,7 @@ class Conv2dModels:
             return cls(**kwargs)
 
     class Conv2dSame(Conv2d):
+        padding: PadArg = 'same'
         @classmethod
         def shortcut(cls, cmd = "cons_i3_o32_k3_s1_p1_d1_bs_bit"):
             return super().shortcut(cmd,prefix="cons")
@@ -166,7 +169,7 @@ class Conv2dModels:
         conv_dw_layer: Union['Conv2dModels.Conv2dBnAct'] = Field(
             default_factory=lambda: Conv2dModels.Conv2dBnAct(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(),
+                bn=NormModels.BatchNorm2d(num_features=-1),
                 act=ActModels.ReLU(),
             )
         )
@@ -177,7 +180,7 @@ class Conv2dModels:
         conv_pw_layer: Union['Conv2dModels.Conv2dBnAct'] = Field(
             default_factory=lambda: Conv2dModels.Conv2dBnAct(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(),
+                bn=NormModels.BatchNorm2d(num_features=-1),
                 act=ActModels.ReLU(),
             )
         )
@@ -248,7 +251,6 @@ class Conv2dModels:
             self.conv_pw_layer.stride = 1
             self.conv_pw_layer.padding = self.padding
             self.conv_pw_layer.bias = False
-
             return self
         
     class InvertedResidual(DepthwiseSeparableConv):
@@ -259,7 +261,7 @@ class Conv2dModels:
         conv_pwl_layer: Union['Conv2dModels.Conv2dBnAct'] = Field(
             default_factory=lambda: Conv2dModels.Conv2dBn(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(),
+                bn=NormModels.BatchNorm2d(num_features=-1),
             )
         )
 
@@ -322,39 +324,334 @@ class Conv2dModels:
             self.conv_pwl_layer.kernel_size = self.pw_kernel_size
             self.conv_pwl_layer.padding = self.padding
             return self
+
+    class CondConvResidual(InvertedResidual):
+        num_experts:int
+        routing_layer: LinearModels.Linear =  Field(
+            default_factory=lambda: LinearModels.Linear(in_features=-1)
+        )
         
+        @model_validator(mode='after')
+        def valid_model(self):
+            super().valid_model()
+            self.routing_layer.in_features = self.in_channels
+            self.routing_layer.out_features = self.num_experts
+
+    class UniversalInvertedResidual(BasicModel):
+        """Universal Inverted Bottleneck with configurable depthwise stages."""
+
+        in_channels: int
+        out_channels: int
+
+        dw_kernel_size_start: int = 0
+        dw_kernel_size_mid: int = 3
+        dw_kernel_size_end: int = 0
+
+        stride: int = 1
+        dilation: int = 1
+        group_size: int = 1
+        padding: PadArg = ''
+        noskip: bool = False
+        exp_ratio: float = 1.0
+
+        aa_layer: Optional[PoolModels.type] = None
+        se_layer: Optional['Conv2dModels.SqueezeExcite'] = None
+
+        conv_dw_start_layer: Optional[Union['Conv2dModels.Conv2dBn']] = Field(default=None)
+        conv_pw_exp_layer: Union['Conv2dModels.Conv2dBnAct'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dBnAct(
+                in_channels=-1,
+                bn=NormModels.BatchNorm2d(),
+                act=ActModels.ReLU(),
+            )
+        )
+        conv_dw_mid_layer: Optional[Union['Conv2dModels.Conv2dBnAct']] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dBnAct(
+                in_channels=-1,
+                bn=NormModels.BatchNorm2d(),
+                act=ActModels.ReLU(),
+            )
+        )
+        conv_pw_proj_layer: Union['Conv2dModels.Conv2dBn'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dBn(
+                in_channels=-1,
+                bn=NormModels.BatchNorm2d(),
+            )
+        )
+        conv_dw_end_layer: Optional[Union['Conv2dModels.Conv2dBn']] = Field(default=None)
+
+        drop_path_rate: float = 0.0
+        layer_scale_init_value: Optional[float] = 1e-5
+
+        @model_validator(mode='after')
+        def valid_model(self):
+            if self.stride > 1 and not (
+                self.dw_kernel_size_start or self.dw_kernel_size_mid or self.dw_kernel_size_end
+            ):
+                raise ValueError("UniversalInvertedResidual needs a depthwise kernel when stride > 1.")
+
+            self.padding = Conv2dModels.DepthwiseSeparableConv._convert_padding(self.padding)
+
+            def num_groups(group_size: Optional[int], channels: int):
+                if not group_size:
+                    return 1
+                assert channels % group_size == 0
+                return channels // group_size
+
+            mid_chs = make_divisible(self.in_channels * self.exp_ratio)
+
+            if self.dw_kernel_size_start:
+                if self.conv_dw_start_layer is None:
+                    self.conv_dw_start_layer = Conv2dModels.Conv2dBn(
+                        in_channels=-1,
+                        bn=NormModels.BatchNorm2d(),
+                    )
+                dw_start_stride = self.stride if not self.dw_kernel_size_mid else 1
+                use_aa_start = self.aa_layer is not None and dw_start_stride > 1
+                self.conv_dw_start_layer.in_channels = self.in_channels
+                self.conv_dw_start_layer.out_channels = self.in_channels
+                self.conv_dw_start_layer.kernel_size = self.dw_kernel_size_start
+                self.conv_dw_start_layer.stride = 1 if use_aa_start else dw_start_stride
+                self.conv_dw_start_layer.padding = self.padding
+                self.conv_dw_start_layer.groups = num_groups(self.group_size, self.in_channels)
+                self.conv_dw_start_layer.bias = False
+                self.conv_dw_start_layer.dilation = self.dilation
+            else:
+                self.conv_dw_start_layer = None
+
+            self.conv_pw_exp_layer.in_channels = self.in_channels
+            self.conv_pw_exp_layer.out_channels = mid_chs
+            self.conv_pw_exp_layer.kernel_size = 1
+            self.conv_pw_exp_layer.stride = 1
+            self.conv_pw_exp_layer.padding = self.padding
+            self.conv_pw_exp_layer.bias = False
+
+            if self.dw_kernel_size_mid:
+                if self.conv_dw_mid_layer is None:
+                    self.conv_dw_mid_layer = Conv2dModels.Conv2dBnAct(
+                        in_channels=-1,
+                        bn=NormModels.BatchNorm2d(),
+                        act=ActModels.ReLU(),
+                    )
+                use_aa_mid = self.aa_layer is not None and self.stride > 1
+                self.conv_dw_mid_layer.in_channels = mid_chs
+                self.conv_dw_mid_layer.out_channels = mid_chs
+                self.conv_dw_mid_layer.kernel_size = self.dw_kernel_size_mid
+                self.conv_dw_mid_layer.stride = 1 if use_aa_mid else self.stride
+                self.conv_dw_mid_layer.padding = self.padding
+                self.conv_dw_mid_layer.groups = num_groups(self.group_size, mid_chs)
+                self.conv_dw_mid_layer.bias = False
+                self.conv_dw_mid_layer.dilation = self.dilation
+            else:
+                self.conv_dw_mid_layer = None
+
+            if self.se_layer is not None:
+                self.se_layer.in_channels = mid_chs
+
+            self.conv_pw_proj_layer.in_channels = mid_chs
+            self.conv_pw_proj_layer.out_channels = self.out_channels
+            self.conv_pw_proj_layer.kernel_size = 1
+            self.conv_pw_proj_layer.stride = 1
+            self.conv_pw_proj_layer.padding = self.padding
+            self.conv_pw_proj_layer.bias = False
+
+            if self.dw_kernel_size_end:
+                if self.conv_dw_end_layer is None:
+                    self.conv_dw_end_layer = Conv2dModels.Conv2dBn(
+                        in_channels=-1,
+                        bn=NormModels.BatchNorm2d(),
+                    )
+                dw_end_stride = self.stride if not (self.dw_kernel_size_start or self.dw_kernel_size_mid) else 1
+                if self.aa_layer is not None and dw_end_stride > 1:
+                    raise ValueError("Anti-aliasing on the ending depthwise stage with stride > 1 is not supported.")
+                self.conv_dw_end_layer.in_channels = self.out_channels
+                self.conv_dw_end_layer.out_channels = self.out_channels
+                self.conv_dw_end_layer.kernel_size = self.dw_kernel_size_end
+                self.conv_dw_end_layer.stride = dw_end_stride
+                self.conv_dw_end_layer.padding = self.padding
+                self.conv_dw_end_layer.groups = num_groups(self.group_size, self.out_channels)
+                self.conv_dw_end_layer.bias = False
+                self.conv_dw_end_layer.dilation = self.dilation
+            else:
+                self.conv_dw_end_layer = None
+
+            if self.aa_layer is not None and hasattr(self.aa_layer, "in_channels"):
+                if self.dw_kernel_size_mid and self.stride > 1:
+                    self.aa_layer.in_channels = mid_chs
+                elif self.dw_kernel_size_start and self.stride > 1 and not self.dw_kernel_size_mid:
+                    self.aa_layer.in_channels = self.in_channels
+
+            return self
+
+    class Attention2d(BasicModel):
+        """Multi-head attention for 2D NCHW tensors."""
+
+        in_channels: int
+        out_channels: Optional[int] = None
+        num_heads: int = 32
+        bias: bool = True
+        expand_first: bool = False
+        head_first: bool = False
+        attn_drop: float = 0.0
+        proj_drop: float = 0.0
+
+        qkv_layer: Union['Conv2dModels.Conv2d'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2d(in_channels=-1))
+        proj_layer: Union['Conv2dModels.Conv2d'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2d(in_channels=-1))
+
+        # derived, not part of the public schema
+        dim_attn: Optional[int] = Field(default=None, exclude=True)
+        dim_head: Optional[int] = Field(default=None, exclude=True)
+
+        fused_attn:bool = False # TODO
+
+
+        @model_validator(mode='after')
+        def valid_model(self):
+            self.out_channels = self.in_channels if self.out_channels is None else self.out_channels
+            self.dim_attn = self.out_channels if self.expand_first else self.in_channels
+            if self.dim_attn % self.num_heads != 0:
+                raise ValueError("dim_attn must be divisible by num_heads.")
+            self.dim_head = self.dim_attn // self.num_heads
+
+            self.qkv_layer.in_channels  = self.in_channels
+            self.qkv_layer.out_channels = self.dim_attn * 3
+            self.qkv_layer.kernel_size  = 1
+            self.qkv_layer.bias  = self.bias
+
+            self.proj_layer.in_channels  = self.dim_attn
+            self.proj_layer.out_channels = self.out_channels
+            self.proj_layer.kernel_size  = 1
+            self.proj_layer.bias  = self.bias
+            return self
+
+
+    class MultiQueryAttention2d(BasicModel):
+        """Multi Query Attention with optional spatial downsampling."""
+        in_channels: int
+        out_channels: Optional[int] = None
+        num_heads: int = 8
+        key_dim: Optional[int] = None
+        value_dim: Optional[int] = None
+        query_strides: IntOrPair = 1
+        kv_stride: int = 1
+        dw_kernel_size: int = 3
+        dilation: int = 1
+        padding: PadArg = ''
+        attn_drop: float = 0.0
+        proj_drop: float = 0.0
+        bias: bool = False
+        
+        norm_layer: NormModels.BatchNorm2d = Field(
+            default_factory=lambda:NormModels.BatchNorm2d(num_features=-1))
+        
+        einsum: bool = False
+
+        has_query_strides: bool = Field(default=False)
+        fused_attn: bool = False # TODO
+
+
+        @model_validator(mode='after')
+        def valid_model(self):
+            self.out_channels = self.in_channels if self.out_channels is None else self.out_channels
+            self.key_dim = self.in_channels // self.num_heads if self.key_dim is None else self.key_dim
+            self.value_dim = self.in_channels // self.num_heads if self.value_dim is None else self.value_dim
+            self.query_strides = to_2tuple(self.query_strides)
+            self.has_query_strides = any(s > 1 for s in self.query_strides)
+            self.norm_layer.num_features = self.in_channels
+            return self
+
+
 class Conv2dModules:
     class Module(nn.Module):
         def __init__(self,para:BaseModel,para_cls):
             if type(para) is dict: para = para_cls(**para)
-            self.para = json.loads(para.model_dump_json())
+            self.para = para.model_copy(deep=True)
             super().__init__()
         
-        @torch.no_grad()
-        def to_ternary(self,mods=[]):
-            for m in mods:
-                if self.__dict__[m] and hasattr(self.__dict__[m],'to_ternary'):
-                    setattr(self,m,self.__dict__[m].to_ternary())
-            return self
+        @staticmethod
+        @torch.no_grad()            
+        def convert_to_ternary(module: nn.Module,mods=None) -> nn.Module:
+            """
+            Recursively replace Bit.Conv2d/Bit.Linear with Ternary*Infer modules.
+            Returns a new nn.Module (original left untouched if you deepcopy before).
+            """
+            for name, child in list(module.named_children()):
+                if mods is not None:
+                    if name not in mods:continue
+                if hasattr(child, 'to_ternary'):
+                    setattr(module, name, child.to_ternary())
+                else:
+                    Conv2dModules.Module.convert_to_ternary(child)
 
     class Conv2d(Module):
         def __init__(self,para:Conv2dModels.Conv2d,para_cls=Conv2dModels.Conv2d):
             super().__init__(para,para_cls)
-            self.para:Conv2dModels.Conv2d = self.para
+            self.bit = para.bit
 
             if para.bit:
-                self.conv = Bit.Conv2d(**para.model_dump())
-            else:                
-                self.conv = nn.Conv2d(**para.model_dump(exclude=['scale_op']))
+                self.conv_para = para.model_dump(exclude=['bit','bn','act'])
+                self.conv = Bit.Conv2d(**self.conv_para)
+            else:
+                self.conv_para = para.model_dump(exclude=['bit','bn','act','scale_op'])
+                self.conv = nn.Conv2d(**self.conv_para)
+            self.weight_used = True
+
+        def forward_weight(self,x, weight:Optional[torch.Tensor]=None):
+            self.weight_used = False
+            if self.bit:
+                return Bit.functional.conv2d(x,weight=weight,**self.conv_para)
+            return torch.nn.functional.conv2d(x,weight=weight,**self.conv_para)
 
         def forward(self,x):
             return self.conv(x)
 
         @torch.no_grad()
         def to_ternary(self):
-            if hasattr(self.conv,'to_ternary'):return self.conv.to_ternary()
-            print('to_ternary is no support!')
+            if not self.weight_used:
+                return nn.Identity()
+            if not self.bit:
+                print('to_ternary is no support!')            
+            if self.weight_used and self.bit:
+                return self.conv.to_ternary()                
+            return self
+                
+    class Conv2dBn(Conv2d):
+        def __init__(self,para:Conv2dModels.Conv2dBn,para_cls=Conv2dModels.Conv2dBn):
+            super().__init__(para,para_cls)
+            para.bn.num_features = para.out_channels
+            self.bn = para.bn.build()     
 
+        def forward_weight(self, x, weight = None):
+            return self.bn(super().forward_weight(x, weight))
+
+        def forward(self, x):
+            return self.bn(super().forward(x))
+        
+    class Conv2dBnAct(Conv2dBn):
+        def __init__(self,para:Conv2dModels.Conv2dBnAct,para_cls=Conv2dModels.Conv2dBnAct):
+            super().__init__(para,para_cls)
+            self.para:Conv2dModels.Conv2dBnAct = self.para
+            self.act = self.para.act.build()
+
+        def forward_weight(self, x, weight = None):
+            return self.act(super().forward_weight(x, weight))
+
+        def forward(self, x):
+            return self.act(super().forward(x))
+        
+    class Conv2dAct(Conv2d):
+        def __init__(self,para:Conv2dModels.Conv2dAct,para_cls=Conv2dModels.Conv2dAct):
+            super().__init__(para,para_cls)
+            self.act = para.act.build()
+
+        def forward_weight(self, x, weight = None):
+            return self.act(super().forward_weight(x, weight))
+
+        def forward(self, x):
+            return self.act(super().forward(x))
+        
     class Conv2dSame(Conv2d):
         """ Tensorflow like 'SAME' convolution wrapper for 2D convolutions
         """
@@ -366,47 +663,7 @@ class Conv2dModules:
 
         def forward(self, x):
             return super().forward(self.pad(x))
-        
-        @torch.no_grad()
-        def to_ternary(self):
-            return nn.Sequential(self.pad,super().to_ternary())
-    class Conv2dBn(Conv2d):
-        def __init__(self,para:Conv2dModels.Conv2dBn,para_cls=Conv2dModels.Conv2dBn):
-            super().__init__(para,para_cls)
-            self.bn = para.bn.build()           
-
-        def forward(self, x):
-            return self.bn(super().forward(x))
-        
-        @torch.no_grad()
-        def to_ternary(self):
-            return nn.Sequential(super().to_ternary(),self.bn)
-        
-    class Conv2dAct(Conv2d):
-        def __init__(self,para:Conv2dModels.Conv2dAct,para_cls=Conv2dModels.Conv2dAct):
-            super().__init__(para,para_cls)
-            self.act = para.act.build()
-
-        def forward(self, x):
-            return self.act(super().forward(x))
-        
-        @torch.no_grad()
-        def to_ternary(self):
-            return nn.Sequential(super().to_ternary(),self.act)
-        
-    class Conv2dBnAct(Conv2d):
-        def __init__(self,para:Conv2dModels.Conv2dBnAct,para_cls=Conv2dModels.Conv2dBnAct):
-            super().__init__(para,para_cls)
-            self.bn = para.bn.build()
-            self.act = para.act.build()
-
-        def forward(self, x):
-            return self.act(self.bn(super().forward(x)))
-        
-        @torch.no_grad()
-        def to_ternary(self):
-            return nn.Sequential(super().to_ternary(),self.bn,self.act)
-        
+    
     class SqueezeExcite(Module):
 
         def __init__(self,para,para_cls=Conv2dModels.SqueezeExcite):
@@ -424,7 +681,8 @@ class Conv2dModules:
         @torch.no_grad()
         def to_ternary(self,mods=['conv_reduce','conv_reduce']):
             self.drop_path = nn.Identity()
-            return super().to_ternary(mods)
+            self.convert_to_ternary(self,mods)
+            return self
 
     class DepthwiseSeparableConv(Module):
         """Depthwise-separable block with Pydantic config and string layer names."""
@@ -467,13 +725,17 @@ class Conv2dModules:
         @torch.no_grad()
         def to_ternary(self,mods=['conv_s2d','conv_dw','se','aa','conv_pw']):
             self.drop_path = nn.Identity()
-            return super().to_ternary(mods)
+            self.convert_to_ternary(self,mods)
+            return self
 
     class InvertedResidual(DepthwiseSeparableConv):
         def __init__(self, para, para_cls=Conv2dModels.InvertedResidual):
             super().__init__(para, para_cls)
             self.para:Conv2dModels.InvertedResidual=self.para
             self.conv_pwl = self.para.conv_pwl_layer.build()
+            self.has_skip = (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (
+                not self.para.noskip
+            )
         
         def forward(self, x):
             shortcut = x
@@ -490,16 +752,345 @@ class Conv2dModules:
 
             x = self.conv_pwl(x) # with bn and no act
 
-            if (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (not self.para.noskip):                
+            if self.has_skip:
                 x = self.drop_path(x) + shortcut
             return x
         
         @torch.no_grad()
         def to_ternary(self,mods=['conv_s2d','conv_dw','se','aa','conv_pw']):
+            self.convert_to_ternary(self,mods)
+            self.drop_path = nn.Identity()
+            return self
+
+    class UniversalInvertedResidual(Module):
+        def __init__(self, para, para_cls=Conv2dModels.UniversalInvertedResidual):
+            super().__init__(para, para_cls)
+            self.para: Conv2dModels.UniversalInvertedResidual = self.para
+
+            self.dw_start = self.para.conv_dw_start_layer.build() if self.para.conv_dw_start_layer else nn.Identity()
+            self.pw_exp = self.para.conv_pw_exp_layer.build()
+            self.dw_mid = self.para.conv_dw_mid_layer.build() if self.para.conv_dw_mid_layer else nn.Identity()
+            self.se = self.para.se_layer.build() if self.para.se_layer else nn.Identity()
+            self.pw_proj = self.para.conv_pw_proj_layer.build()
+            self.dw_end = self.para.conv_dw_end_layer.build() if self.para.conv_dw_end_layer else nn.Identity()
+            self.aa = self.para.aa_layer.build() if self.para.aa_layer else None
+
+            if self.para.layer_scale_init_value is not None:
+                self.layer_scale = LinearModules.LayerScale2d(
+                    LinearModels.LayerScale2d(
+                        dim=self.para.out_channels,
+                        init_values=self.para.layer_scale_init_value,
+                    )
+                )
+            else:
+                self.layer_scale = nn.Identity()
+
+            self.drop_path = DropPath(self.para.drop_path_rate) if self.para.drop_path_rate else nn.Identity()
+            self.has_skip = (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (
+                not self.para.noskip
+            )
+            self._aa_after = self._resolve_aa_location()
+
+        def _resolve_aa_location(self):
+            if self.para.aa_layer is None:
+                return None
+            if self.para.dw_kernel_size_mid and self.para.stride > 1:
+                return "mid"
+            if self.para.dw_kernel_size_start and not self.para.dw_kernel_size_mid and self.para.stride > 1:
+                return "start"
+            return None
+
+        def feature_info(self, location):
+            if location == 'expansion':  # after SE, input to PWL
+                return dict(module='pw_proj.conv', hook_type='forward_pre', num_chs=self.para.conv_pw_proj_layer.in_channels)
+            else:  # location == 'bottleneck', block output
+                return dict(module='', num_chs=self.para.conv_pw_proj_layer.out_channels)
+
+        def forward(self, x):
+            shortcut = x
+            x = self.dw_start(x)
+            if self._aa_after == "start" and self.aa is not None:
+                x = self.aa(x)
+            x = self.pw_exp(x)
+            x = self.dw_mid(x)
+            if self._aa_after == "mid" and self.aa is not None:
+                x = self.aa(x)
+            x = self.se(x)
+            x = self.pw_proj(x)
+            x = self.dw_end(x)
+            x = self.layer_scale(x)
+            if self.has_skip:
+                x = self.drop_path(x) + shortcut
+            return x
+
+        @torch.no_grad()
+        def to_ternary(self, mods=['dw_start', 'pw_exp', 'dw_mid', 'se', 'aa', 'pw_proj', 'dw_end']):
+            self.drop_path = nn.Identity()
             return super().to_ternary(mods)
 
+    class CondConvResidual(InvertedResidual):
+        """ Inverted residual block w/ CondConv routing"""
+        def __init__(self, para, para_cls=Conv2dModels.CondConvResidual):
+            super().__init__(para, para_cls)
+            self.para:Conv2dModels.CondConvResidual=self.para
+            self.routing_fn = self.para.routing_layer.build()
 
+        def forward(self, x):
+            shortcut = x
+            # CondConv routing
+            pooled_inputs = torch.nn.functional.adaptive_avg_pool2d(x, 1).flatten(1)
+            routing_weights = torch.sigmoid(self.routing_fn(pooled_inputs))
+            x = self.conv_pw(x, routing_weights)
+            x = self.conv_dw(x, routing_weights)
+            x = self.se(x)
+            x = self.conv_pwl(x, routing_weights)
+            if self.has_skip:
+                x = self.drop_path(x) + shortcut
+            return x
+        
+        @torch.no_grad()
+        def to_ternary(self, mods=['routing_fn']):
+            self.drop_path = nn.Identity()
+            return super().to_ternary(mods)
+        
+    class MultiQueryAttention2d(Module):
+        fused_attn: torch.jit.Final[bool]
 
+        def __init__(self, para, para_cls=Conv2dModels.MultiQueryAttention2d):
+            super().__init__(para, para_cls)
+            self.para: Conv2dModels.MultiQueryAttention2d = self.para
+
+            self.num_heads = self.para.num_heads
+            self.key_dim = self.para.key_dim
+            self.value_dim = self.para.value_dim
+            self.query_strides = self.para.query_strides
+            self.kv_stride = self.para.kv_stride
+            self.has_query_strides = self.para.has_query_strides
+            self.scale = self.key_dim ** -0.5
+            self.fused_attn = self.para.fused_attn
+            self.einsum = self.para.einsum
+
+            def _build_norm():
+                if self.para.norm_layer is None:
+                    return nn.Identity()
+                return self.para.norm_layer.model_copy().build()
+
+            self.query = nn.Sequential()
+            if self.has_query_strides:
+                if self.para.padding == 'same':
+                    self.query.add_module(
+                        'down_pool',
+                        create_pool2d(
+                            'avg',
+                            kernel_size=self.query_strides,
+                            padding='same',
+                        ),
+                    )
+                else:
+                    self.query.add_module('down_pool', nn.AvgPool2d(kernel_size=self.query_strides))
+                self.query.add_module('norm', _build_norm())
+            self.query.add_module('proj', create_conv2d(
+                self.para.in_channels,
+                self.num_heads * self.key_dim,
+                kernel_size=1,
+                bias=self.para.use_bias,
+            ))
+
+            self.key = nn.Sequential()
+            if self.kv_stride > 1:
+                self.key.add_module('down_conv', create_conv2d(
+                    self.para.in_channels,
+                    self.para.in_channels,
+                    kernel_size=self.para.dw_kernel_size,
+                    stride=self.kv_stride,
+                    dilation=self.para.dilation,
+                    padding=self.para.padding,
+                    depthwise=True,
+                ))
+                self.key.add_module('norm', _build_norm())
+            self.key.add_module('proj', create_conv2d(
+                self.para.in_channels,
+                self.key_dim,
+                kernel_size=1,
+                padding=self.para.padding,
+                bias=self.para.use_bias,
+            ))
+
+            self.value = nn.Sequential()
+            if self.kv_stride > 1:
+                self.value.add_module('down_conv', create_conv2d(
+                    self.para.in_channels,
+                    self.para.in_channels,
+                    kernel_size=self.para.dw_kernel_size,
+                    stride=self.kv_stride,
+                    dilation=self.para.dilation,
+                    padding=self.para.padding,
+                    depthwise=True,
+                ))
+                self.value.add_module('norm', _build_norm())
+            self.value.add_module('proj', create_conv2d(
+                self.para.in_channels,
+                self.value_dim,
+                kernel_size=1,
+                bias=self.para.use_bias,
+            ))
+
+            self.attn_drop = nn.Dropout(self.para.attn_drop)
+
+            self.output = nn.Sequential()
+            if self.has_query_strides:
+                self.output.add_module(
+                    'upsample',
+                    nn.Upsample(scale_factor=self.query_strides, mode='bilinear', align_corners=False),
+                )
+            self.output.add_module('proj', create_conv2d(
+                self.value_dim * self.num_heads,
+                self.para.out_channels,
+                kernel_size=1,
+                bias=self.para.use_bias,
+            ))
+            self.output.add_module('drop', nn.Dropout(self.para.proj_drop))
+
+        def init_weights(self):
+            nn.init.xavier_uniform_(self.query.proj.weight)
+            nn.init.xavier_uniform_(self.key.proj.weight)
+            nn.init.xavier_uniform_(self.value.proj.weight)
+            if self.kv_stride > 1:
+                nn.init.xavier_uniform_(self.key.down_conv.weight)
+                nn.init.xavier_uniform_(self.value.down_conv.weight)
+            nn.init.xavier_uniform_(self.output.proj.weight)
+
+        def _reshape_input(self, t: torch.Tensor):
+            s = t.shape
+            t = t.reshape(s[0], s[1], -1).transpose(1, 2)
+            if self.einsum:
+                return t
+            return t.unsqueeze(1).contiguous()
+
+        def _reshape_projected_query(self, t: torch.Tensor, num_heads: int, key_dim: int):
+            s = t.shape
+            t = t.reshape(s[0], num_heads, key_dim, -1)
+            if self.einsum:
+                return t.permute(0, 3, 1, 2).contiguous()
+            return t.transpose(-1, -2).contiguous()
+
+        def _reshape_output(self, t: torch.Tensor, num_heads: int, h_px: int, w_px: int):
+            s = t.shape
+            feat_dim = s[-1] * num_heads
+            if not self.einsum:
+                t = t.transpose(1, 2)
+            return t.reshape(s[0], h_px, w_px, feat_dim).permute(0, 3, 1, 2).contiguous()
+
+        def forward(self, x, attn_mask: Optional[torch.Tensor] = None):
+            B, C, H, W = x.shape
+
+            q = self.query(x)
+            q = self._reshape_projected_query(q, self.num_heads, self.key_dim)
+
+            k = self.key(x)
+            k = self._reshape_input(k)
+
+            v = self.value(x)
+            v = self._reshape_input(v)
+
+            if self.einsum:
+                attn = torch.einsum('blhk,bpk->blhp', q, k) * self.scale
+                if attn_mask is not None:
+                    attn = attn + attn_mask
+                attn = attn.softmax(dim=-1)
+                attn = self.attn_drop(attn)
+                o = torch.einsum('blhp,bpk->blhk', attn, v)
+            else:
+                if self.fused_attn:
+                    o = F.scaled_dot_product_attention(
+                        q,
+                        k,
+                        v,
+                        attn_mask=attn_mask,
+                        dropout_p=self.attn_drop.p if self.training else 0.,
+                    )
+                else:
+                    q = q * self.scale
+                    attn = q @ k.transpose(-1, -2)
+                    if attn_mask is not None:
+                        attn = attn + attn_mask
+                    attn = attn.softmax(dim=-1)
+                    attn = self.attn_drop(attn)
+                    o = attn @ v
+
+            o = self._reshape_output(o, self.num_heads, H // self.query_strides[0], W // self.query_strides[1])
+            x = self.output(o)
+            return x
+
+        @torch.no_grad()
+        def to_ternary(self, mods=['query', 'key', 'value', 'output']):
+            self.attn_drop = nn.Identity()
+            if hasattr(self.output, 'drop'):
+                self.output.drop = nn.Identity()
+            for name in mods:
+                mod = getattr(self, name, None)
+                if mod is None:
+                    continue
+                if hasattr(mod, 'to_ternary'):
+                    setattr(self, name, mod.to_ternary())
+                else:
+                    for child_name, child in mod.named_children():
+                        if hasattr(child, 'to_ternary'):
+                            mod._modules[child_name] = child.to_ternary()
+            return self
+        
+    class Attention2d(Module):
+        def __init__(self, para, para_cls=Conv2dModels.Attention2d):
+            super().__init__(para, para_cls)
+            self.para: Conv2dModels.Attention2d = self.para
+
+            self.num_heads = self.para.num_heads
+            self.dim_head = self.para.dim_head
+            self.head_first = self.para.head_first
+            self.fused_attn = self.para.fused_attn
+
+            self.qkv = self.para.qkv_layer.build()
+            self.attn_drop = nn.Dropout(self.para.attn_drop)
+            self.proj = self.para.proj_layer.build()
+            self.proj_drop = nn.Dropout(self.para.proj_drop)
+
+        def forward(self, x:torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+            B, C, H, W = x.shape
+            res:torch.Tensor = self.qkv(x)
+
+            if self.head_first:
+                q, k, v = res.view(B, self.num_heads, self.dim_head * 3, -1).chunk(3, dim=2)
+            else:
+                q, k, v = res.reshape(B, 3, self.num_heads, self.dim_head, -1).unbind(1)
+
+            if self.fused_attn:
+                x = torch.nn.functional.scaled_dot_product_attention(
+                    q.transpose(-1, -2).contiguous(),
+                    k.transpose(-1, -2).contiguous(),
+                    v.transpose(-1, -2).contiguous(),
+                    attn_mask=attn_mask,
+                    dropout_p=self.attn_drop.p if self.training else 0.,
+                ).transpose(-1, -2).reshape(B, -1, H, W)
+            else:
+                q = q.transpose(-1, -2)
+                v = v.transpose(-1, -2)
+                attn:torch.Tensor = q @ k * q.size(-1) ** -0.5
+                if attn_mask is not None:
+                    # NOTE: assumes mask is float and in correct shape
+                    attn = attn + attn_mask
+                attn = attn.softmax(dim=-1)
+                attn = self.attn_drop(attn)
+                x = (attn @ v).transpose(-1, -2).reshape(B, -1, H, W)
+
+            x = self.proj(x)
+            x = self.proj_drop(x)
+            return x
+
+        @torch.no_grad()
+        def to_ternary(self, mods=['qkv', 'proj']):
+            self.attn_drop = nn.Identity()
+            self.proj_drop = nn.Identity()
+            return super().to_ternary(mods)
 
 
 
