@@ -87,7 +87,7 @@ class NetCNN(nn.Module):
     def clone(self):
         return NetCNN(self.in_channels, self.num_classes, self.expand_ratio,
                      self.drop2d_p, self.drop_p, self.scale_op)
-
+summ(convert_to_ternary(NetCNN()))
 # ----------------------------
 # LightningModule wrapper using LitBit
 # ----------------------------
