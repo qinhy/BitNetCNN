@@ -160,8 +160,9 @@ class Conv2dModels:
         padding: PadArg = 'same'
 
         stride: IntOrPair = 1
-        noskip: bool = False
+        bias: bool = False
 
+        noskip: bool = False
         drop_path_rate: float = 0.0
 
         conv_s2d_layer: Optional[Union['Conv2dModels.Conv2dBnAct']] = Field(default=None)
@@ -213,7 +214,7 @@ class Conv2dModels:
                 self.conv_s2d_layer.kernel_size = 2
                 self.conv_s2d_layer.stride = 2
                 self.conv_s2d_layer.padding = 'same'
-                self.conv_s2d_layer.bias = False
+                self.conv_s2d_layer.bias = self.bias
 
                 dw_kernel_local = (dw_kernel_local + 1) // 2
                 dw_pad_type = 'same' if dw_kernel_local == 2 else pad_type_local
@@ -242,15 +243,16 @@ class Conv2dModels:
             self.conv_dw_layer.stride = 1 if use_aa else self.stride
             self.conv_dw_layer.padding = dw_pad_type
             self.conv_dw_layer.groups = groups
-            self.conv_dw_layer.bias = False
+            self.conv_dw_layer.bias = self.bias
 
             # Pointwise conv
             self.conv_pw_layer.in_channels = mid_chs
             self.conv_pw_layer.out_channels = self.out_channels
-            self.conv_pw_layer.kernel_size = self.pw_kernel_size
+            self.conv_pw_layer.kernel_size = self.pw_kernel_size # always 1
             self.conv_pw_layer.stride = 1
             self.conv_pw_layer.padding = self.padding
-            self.conv_pw_layer.bias = False
+            self.conv_dw_layer.groups = 1
+            self.conv_pw_layer.bias = self.bias
             return self
         
     class InvertedResidual(DepthwiseSeparableConv):
@@ -281,7 +283,7 @@ class Conv2dModels:
                 self.conv_s2d_layer.kernel_size = 2
                 self.conv_s2d_layer.stride = 2
                 self.conv_s2d_layer.padding = 'same'
-                self.conv_s2d_layer.bias = False
+                self.conv_s2d_layer.bias = self.bias
 
                 dw_kernel_local = (dw_kernel_local + 1) // 2
                 dw_pad_type = 'same' if dw_kernel_local == 2 else pad_type_local
@@ -307,8 +309,9 @@ class Conv2dModels:
             # Point-wise expansion
             self.conv_pw_layer.in_channels = in_chs_local
             self.conv_pw_layer.out_channels = mid_chs
-            self.conv_pw_layer.kernel_size = self.exp_kernel_size
+            self.conv_pw_layer.kernel_size = self.exp_kernel_size  # always 1
             self.conv_pw_layer.padding = self.padding
+            self.conv_pw_layer.bias = self.bias
 
             # Depth-wise convolution
             self.conv_dw_layer.in_channels = mid_chs
@@ -316,6 +319,7 @@ class Conv2dModels:
             self.conv_dw_layer.kernel_size = dw_kernel_local
             self.conv_dw_layer.stride = 1 if use_aa else self.stride
             self.conv_dw_layer.padding = dw_pad_type
+            self.conv_dw_layerbias = self.bias
             self.conv_dw_layer.groups = groups            
             
             # Point-wise linear projection
@@ -323,6 +327,7 @@ class Conv2dModels:
             self.conv_pwl_layer.out_channels = self.out_channels
             self.conv_pwl_layer.kernel_size = self.pw_kernel_size
             self.conv_pwl_layer.padding = self.padding
+            self.conv_pwl_layer.bias = self.bias
             return self
 
     class CondConvResidual(InvertedResidual):
@@ -351,6 +356,8 @@ class Conv2dModels:
         dilation: int = 1
         group_size: int = 1
         padding: PadArg = ''
+        bias: bool = False
+
         noskip: bool = False
         exp_ratio: float = 1.0
 
@@ -414,7 +421,7 @@ class Conv2dModels:
                 self.conv_dw_start_layer.stride = 1 if use_aa_start else dw_start_stride
                 self.conv_dw_start_layer.padding = self.padding
                 self.conv_dw_start_layer.groups = num_groups(self.group_size, self.in_channels)
-                self.conv_dw_start_layer.bias = False
+                self.conv_dw_start_layer.bias = self.bias
                 self.conv_dw_start_layer.dilation = self.dilation
             else:
                 self.conv_dw_start_layer = None
@@ -424,7 +431,7 @@ class Conv2dModels:
             self.conv_pw_exp_layer.kernel_size = 1
             self.conv_pw_exp_layer.stride = 1
             self.conv_pw_exp_layer.padding = self.padding
-            self.conv_pw_exp_layer.bias = False
+            self.conv_pw_exp_layer.bias = self.bias
 
             if self.dw_kernel_size_mid:
                 if self.conv_dw_mid_layer is None:
@@ -440,7 +447,7 @@ class Conv2dModels:
                 self.conv_dw_mid_layer.stride = 1 if use_aa_mid else self.stride
                 self.conv_dw_mid_layer.padding = self.padding
                 self.conv_dw_mid_layer.groups = num_groups(self.group_size, mid_chs)
-                self.conv_dw_mid_layer.bias = False
+                self.conv_dw_mid_layer.bias = self.bias
                 self.conv_dw_mid_layer.dilation = self.dilation
             else:
                 self.conv_dw_mid_layer = None
@@ -453,7 +460,7 @@ class Conv2dModels:
             self.conv_pw_proj_layer.kernel_size = 1
             self.conv_pw_proj_layer.stride = 1
             self.conv_pw_proj_layer.padding = self.padding
-            self.conv_pw_proj_layer.bias = False
+            self.conv_pw_proj_layer.bias = self.bias
 
             if self.dw_kernel_size_end:
                 if self.conv_dw_end_layer is None:
@@ -470,7 +477,7 @@ class Conv2dModels:
                 self.conv_dw_end_layer.stride = dw_end_stride
                 self.conv_dw_end_layer.padding = self.padding
                 self.conv_dw_end_layer.groups = num_groups(self.group_size, self.out_channels)
-                self.conv_dw_end_layer.bias = False
+                self.conv_dw_end_layer.bias = self.bias
                 self.conv_dw_end_layer.dilation = self.dilation
             else:
                 self.conv_dw_end_layer = None
@@ -545,6 +552,8 @@ class Conv2dModels:
         
         norm_layer: NormModels.BatchNorm2d = Field(
             default_factory=lambda:NormModels.BatchNorm2d(num_features=-1))
+        conv_layer: Conv2dModels.Conv2d = Field(
+            default_factory=lambda:Conv2dModels.Conv2d(in_channels=-1))
         
         einsum: bool = False
 
@@ -612,7 +621,7 @@ class Conv2dModules:
             if not self.weight_used:
                 self.conv = nn.Identity()
             if not self.bit:
-                print('to_ternary is no support!')       
+                print('to_ternary is off here!')
             if self.weight_used and self.bit:
                 self.conv = self.conv.to_ternary()                
             return self
@@ -678,7 +687,6 @@ class Conv2dModules:
             x_se = self.conv_expand(x_se)
             return x * x_se
         
-        @torch.no_grad()
         def to_ternary(self,mods=['conv_reduce','conv_reduce']):
             self.drop_path = nn.Identity()
             self.convert_to_ternary(self,mods)
@@ -722,7 +730,6 @@ class Conv2dModules:
                 x = self.drop_path(x) + shortcut
             return x
         
-        @torch.no_grad()
         def to_ternary(self,mods=['conv_s2d','conv_dw','se','aa','conv_pw']):
             self.drop_path = nn.Identity()
             self.convert_to_ternary(self,mods)
@@ -756,7 +763,6 @@ class Conv2dModules:
                 x = self.drop_path(x) + shortcut
             return x
         
-        @torch.no_grad()
         def to_ternary(self,mods=['conv_s2d','conv_pw','conv_dw','se','aa','conv_pwl']):
             self.convert_to_ternary(self,mods)
             self.drop_path = nn.Identity()
@@ -823,10 +829,10 @@ class Conv2dModules:
                 x = self.drop_path(x) + shortcut
             return x
 
-        @torch.no_grad()
         def to_ternary(self, mods=['dw_start', 'pw_exp', 'dw_mid', 'se', 'aa', 'pw_proj', 'dw_end']):
+            self.convert_to_ternary(self,mods)
             self.drop_path = nn.Identity()
-            return super().to_ternary(mods)
+            return self
 
     class CondConvResidual(InvertedResidual):
         """ Inverted residual block w/ CondConv routing"""
@@ -848,10 +854,10 @@ class Conv2dModules:
                 x = self.drop_path(x) + shortcut
             return x
         
-        @torch.no_grad()
-        def to_ternary(self, mods=['routing_fn']):
+        def to_ternary(self, mods=['conv_pw','conv_dw','se','conv_pwl','routing_fn']):
+            self.convert_to_ternary(self,mods)
             self.drop_path = nn.Identity()
-            return super().to_ternary(mods)
+            return self
         
     class MultiQueryAttention2d(Module):
         fused_attn: torch.jit.Final[bool]
@@ -870,30 +876,42 @@ class Conv2dModules:
             self.fused_attn = self.para.fused_attn
             self.einsum = self.para.einsum
 
-            def _build_norm():
+            def norm():
                 if self.para.norm_layer is None:
                     return nn.Identity()
                 return self.para.norm_layer.model_copy().build()
+            
+            def create_conv2d(in_channels: int, out_channels: int = -1, kernel_size: IntOrPair = 3,
+                              stride: IntOrPair = 1, padding: PadArg = 0, dilation: IntOrPair = 1,
+                              groups: int = 1, bias: bool = True, padding_mode: str = 'zeros',
+                              bit: bool = True, scale_op: str = "median"):                              
+                args = {**self.para.conv_layer.model_dump(),**locals()}
+                return self.para.conv_layer.__class__(**args).build()
+        # in_channels: int
+        # out_channels: int = -1 # just a place holder not valid
+        # kernel_size: IntOrPair = 3
+        # stride: IntOrPair = 1
+        # padding: PadArg = 0
+        # dilation: IntOrPair = 1
+        # groups: int = 1
+        # bias: bool = True
+        # padding_mode: str = 'zeros'
+        
+        # bit: bool = True
+        # scale_op: str = "median")
 
             self.query = nn.Sequential()
             if self.has_query_strides:
-                if self.para.padding == 'same':
-                    self.query.add_module(
-                        'down_pool',
-                        create_pool2d(
-                            'avg',
-                            kernel_size=self.query_strides,
-                            padding='same',
-                        ),
-                    )
-                else:
-                    self.query.add_module('down_pool', nn.AvgPool2d(kernel_size=self.query_strides))
-                self.query.add_module('norm', _build_norm())
+                self.query.add_module('down_pool', PoolModels.AvgPool2d(
+                                                    kernel_size=self.query_strides,
+                                                    padding=self.para.padding).build())
+                self.query.add_module('norm', norm())
+
             self.query.add_module('proj', create_conv2d(
                 self.para.in_channels,
                 self.num_heads * self.key_dim,
                 kernel_size=1,
-                bias=self.para.use_bias,
+                bias=self.para.bias,
             ))
 
             self.key = nn.Sequential()
@@ -907,13 +925,14 @@ class Conv2dModules:
                     padding=self.para.padding,
                     depthwise=True,
                 ))
-                self.key.add_module('norm', _build_norm())
+                self.key.add_module('norm', norm())
+
             self.key.add_module('proj', create_conv2d(
                 self.para.in_channels,
                 self.key_dim,
                 kernel_size=1,
                 padding=self.para.padding,
-                bias=self.para.use_bias,
+                bias=self.para.bias,
             ))
 
             self.value = nn.Sequential()
@@ -927,27 +946,28 @@ class Conv2dModules:
                     padding=self.para.padding,
                     depthwise=True,
                 ))
-                self.value.add_module('norm', _build_norm())
+                self.value.add_module('norm', norm())
+
             self.value.add_module('proj', create_conv2d(
                 self.para.in_channels,
                 self.value_dim,
                 kernel_size=1,
-                bias=self.para.use_bias,
+                bias=self.para.bias,
             ))
 
             self.attn_drop = nn.Dropout(self.para.attn_drop)
 
             self.output = nn.Sequential()
             if self.has_query_strides:
-                self.output.add_module(
-                    'upsample',
+                self.output.add_module('upsample',
                     nn.Upsample(scale_factor=self.query_strides, mode='bilinear', align_corners=False),
                 )
+
             self.output.add_module('proj', create_conv2d(
                 self.value_dim * self.num_heads,
                 self.para.out_channels,
                 kernel_size=1,
-                bias=self.para.use_bias,
+                bias=self.para.bias,
             ))
             self.output.add_module('drop', nn.Dropout(self.para.proj_drop))
 
@@ -1003,10 +1023,7 @@ class Conv2dModules:
             else:
                 if self.fused_attn:
                     o = F.scaled_dot_product_attention(
-                        q,
-                        k,
-                        v,
-                        attn_mask=attn_mask,
+                        q,k,v, attn_mask=attn_mask,
                         dropout_p=self.attn_drop.p if self.training else 0.,
                     )
                 else:
@@ -1022,21 +1039,9 @@ class Conv2dModules:
             x = self.output(o)
             return x
 
-        @torch.no_grad()
-        def to_ternary(self, mods=['query', 'key', 'value', 'output']):
+        def to_ternary(self):
             self.attn_drop = nn.Identity()
-            if hasattr(self.output, 'drop'):
-                self.output.drop = nn.Identity()
-            for name in mods:
-                mod = getattr(self, name, None)
-                if mod is None:
-                    continue
-                if hasattr(mod, 'to_ternary'):
-                    setattr(self, name, mod.to_ternary())
-                else:
-                    for child_name, child in mod.named_children():
-                        if hasattr(child, 'to_ternary'):
-                            mod._modules[child_name] = child.to_ternary()
+            self.convert_to_ternary(self)
             return self
         
     class Attention2d(Module):
@@ -1086,11 +1091,10 @@ class Conv2dModules:
             x = self.proj_drop(x)
             return x
 
-        @torch.no_grad()
-        def to_ternary(self, mods=['qkv', 'proj']):
+        def to_ternary(self):
             self.attn_drop = nn.Identity()
-            self.proj_drop = nn.Identity()
-            return super().to_ternary(mods)
+            self.convert_to_ternary(self,mods=['qkv', 'proj'])
+            return self
 
 
 
