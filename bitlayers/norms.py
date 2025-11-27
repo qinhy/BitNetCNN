@@ -5,6 +5,7 @@ from typing import Optional, Type, Union
 
 from pydantic import BaseModel
 from torch import nn
+import torch
 from torchvision.ops.misc import FrozenBatchNorm2d
 
 class NormdModules:
@@ -71,7 +72,7 @@ class NormModels:
             return NormdModules.Norm(self, type(self), nn.InstanceNorm3d)
 
     class GroupNorm(BaseModel):
-        num_channels: int
+        num_features: int
         num_groups: int = 32
         eps: float = 1e-5
         affine: bool = True
@@ -80,7 +81,7 @@ class NormModels:
             return NormdModules.Norm(self, type(self), nn.GroupNorm)
 
     # class GroupNorm1(BaseModel):
-    #     num_channels: int
+    #     num_features: int
     #     eps: float = 1e-5
     #     affine: bool = True
 
@@ -88,13 +89,61 @@ class NormModels:
     #         return NormdModules.Norm(self, type(self), nn.GroupNorm1)
 
     class LayerNorm(BaseModel):
-        num_channels: int
-        eps: float = 1e-6
-        affine: bool = True
+        num_features: int  # as same as normalized_shape
+        eps: float = 1e-5
+        elementwise_affine: bool = True
+        bias: bool = True
+        data_format="channels_last"
 
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.LayerNorm)
+            return NormdModules.Norm(self, type(self),
+                                     NormModels._LayerNormModule)
 
+    class _LayerNormModule(nn.Module):
+        """ LayerNorm that supports two data formats: channels_last (default) or channels_first. """
+        def __init__(self, num_features, eps=1e-6, data_format="channels_last", bias = True):
+            super().__init__()
+            normalized_shape = num_features
+            self.weight = nn.Parameter(torch.ones(normalized_shape))
+            self.bias = nn.Parameter(torch.zeros(normalized_shape)) if bias else None
+            self.eps = eps
+            self.data_format = data_format
+            if self.data_format not in ["channels_last", "channels_first"]:
+                raise NotImplementedError
+            self.normalized_shape = (normalized_shape, )
+
+        def forward(self, x:torch.Tensor):
+            if self.data_format == "channels_last":
+                return torch.nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+            elif self.data_format == "channels_first":
+                u = x.mean(1, keepdim=True)
+                s = (x - u).pow(2).mean(1, keepdim=True)
+                x = (x - u) / torch.sqrt(s + self.eps)
+                x = self.weight[:, None, None] * x
+                if self.bias is not None:
+                    x = x + self.bias[:, None, None]
+                return x
+
+    class GlobalResponseNorm(BaseModel):
+        num_features: int
+        
+        def build(self) -> nn.Module:
+            return NormdModules.Norm(self, type(self),
+                                     NormModels._GlobalResponseNormModule)
+
+    class _GlobalResponseNormModule(nn.Module):
+        """ GRN (Global Response Normalization) layer """
+        def __init__(self, num_features):
+            super().__init__()
+            dim = num_features
+            self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
+            self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim))
+
+        def forward(self, x):
+            Gx = torch.norm(x, p=2, dim=(1,2), keepdim=True)
+            Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
+            return self.gamma * (x * Nx) + self.beta + x
+        
     # class LayerNormFp32(LayerNorm):
     #     def build(self) -> nn.Module:
     #         return NormdModules.Norm(self, type(self), nn.LayerNormFp32)
@@ -112,7 +161,7 @@ class NormModels:
     #         return NormdModules.Norm(self, type(self), nn.LayerNormExp2d)
 
     class _RmsNormBase(BaseModel):
-        num_channels: int
+        num_features: int
         eps: float = 1e-6
         affine: bool = True
 
@@ -133,7 +182,7 @@ class NormModels:
     #         return NormdModules.Norm(self, type(self), nn.RMSNorm2dFp32)
 
     # class _SimpleNormBase(BaseModel):
-    #     num_channels: int
+    #     num_features: int
     #     eps: float = 1e-6
     #     affine: bool = True
 

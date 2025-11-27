@@ -1,42 +1,46 @@
 # mnist_bitnet_lightning.py
 import argparse
 import torch
+
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 from torchmetrics.classification import MulticlassAccuracy
 
 # Import from common_utils
 from common_utils import *
-
+from bitlayers import convs
+from bitlayers.acts import ActModels
+from bitlayers.norms import NormModels
 # ----------------------------
 # Simple BitNet block & model
 # ----------------------------
-class InvertedResidualBit(nn.Module):
-    def __init__(self, in_c, out_c, expand, stride, scale_op="median", conv2d=Bit.Conv2d):
-        super().__init__()
-        hid = in_c * expand
-        self.use_res = (stride == 1 and in_c == out_c)
+InvertedResidual = convs.Conv2dModels.InvertedResidual
+InvertedResidualModule = convs.Conv2dModules.InvertedResidual
+    # def __init__(self, in_c, out_c, expand, stride, scale_op="median", conv2d=Bit.Conv2d):
+    #     super().__init__()
+    #     hid = in_c * expand
+    #     self.use_res = (stride == 1 and in_c == out_c)
 
-        self.pw1 = nn.Sequential(
-            conv2d(in_c, hid, kernel_size=1, bias=True, scale_op=scale_op),
-            nn.BatchNorm2d(hid),
-            nn.SiLU(inplace=True),
-        )
-        self.dw = nn.Sequential(
-            conv2d(hid, hid, kernel_size=3, stride=stride, padding=1, groups=hid,
-                      bias=True, scale_op=scale_op),
-            nn.BatchNorm2d(hid),
-            nn.SiLU(inplace=True),
-        )
-        # no activation here
-        self.pw2 = nn.Sequential(
-            conv2d(hid, out_c, kernel_size=1, bias=True, scale_op=scale_op),
-            nn.BatchNorm2d(out_c),
-        )
+    #     self.pw1 = nn.Sequential(
+    #         conv2d(in_c, hid, kernel_size=1, bias=True, scale_op=scale_op),
+    #         nn.BatchNorm2d(hid),
+    #         nn.SiLU(inplace=True),
+    #     )
+    #     self.dw = nn.Sequential(
+    #         conv2d(hid, hid, kernel_size=3, stride=stride, padding=1, groups=hid,
+    #                   bias=True, scale_op=scale_op),
+    #         nn.BatchNorm2d(hid),
+    #         nn.SiLU(inplace=True),
+    #     )
+    #     # no activation here
+    #     self.pw2 = nn.Sequential(
+    #         conv2d(hid, out_c, kernel_size=1, bias=True, scale_op=scale_op),
+    #         nn.BatchNorm2d(out_c),
+    #     )
 
-    def forward(self, x):
-        y = self.pw2(self.dw(self.pw1(x)))
-        return x + y if self.use_res else y
+    # def forward(self, x):
+    #     y = self.pw2(self.dw(self.pw1(x)))
+    #     return x + y if self.use_res else y
 
 
 class NetCNN(nn.Module):
@@ -49,21 +53,22 @@ class NetCNN(nn.Module):
         self.drop2d_p = drop2d_p
         self.drop_p = drop_p
         self.scale_op = scale_op
+        self.stem:convs.Conv2dModules.Conv2dBnAct = convs.Conv2dModels.Conv2dBnAct(
+                            in_channels=in_channels,
+                            out_channels=2**expand_ratio,
+                            kernel_size=3, stride=1, padding=1,
+                            bias=True, scale_op=scale_op,
+                            bn = NormModels.BatchNorm2d(num_features=-1),
+                            act= ActModels.SiLU(inplace=True)).build()
 
-        self.stem = nn.Sequential(
-            Bit.Conv2d(in_channels, 2**expand_ratio, kernel_size=3, stride=1, padding=1,
-                      bias=True, scale_op=scale_op),
-            nn.BatchNorm2d(2**expand_ratio),
-            nn.SiLU(inplace=True),
-        )
-
-        self.stage1 = InvertedResidualBit(2**expand_ratio, 2**(expand_ratio+1), expand=2, stride=2, scale_op=scale_op)
-        self.sd1 = nn.Dropout2d(p=drop2d_p)
-
-        self.stage2 = InvertedResidualBit(2**(expand_ratio+1), 2**(expand_ratio+2), expand=2, stride=2, scale_op=scale_op)
-        self.sd2 = nn.Dropout2d(p=drop2d_p)
-
-        self.stage3 = InvertedResidualBit(2**(expand_ratio+2), 2**(expand_ratio+3), expand=2, stride=2, scale_op=scale_op)
+        self.stage1:InvertedResidualModule = InvertedResidual(in_channels=2**expand_ratio,out_channels=2**(expand_ratio+1),
+                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p).build()
+        
+        self.stage2:InvertedResidualModule = InvertedResidual(in_channels=2**(expand_ratio+1),out_channels=2**(expand_ratio+2),
+                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p).build()
+        
+        self.stage3:InvertedResidualModule = InvertedResidual(in_channels=2**(expand_ratio+2),out_channels=2**(expand_ratio+3),
+                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p).build()
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -74,15 +79,14 @@ class NetCNN(nn.Module):
 
     def forward(self, x):
         x = self.stem(x)
-        x = self.stage1(x); x = self.sd1(x)
-        x = self.stage2(x); x = self.sd2(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
         x = self.stage3(x)
         return self.head(x)
 
     def clone(self):
         return NetCNN(self.in_channels, self.num_classes, self.expand_ratio,
                      self.drop2d_p, self.drop_p, self.scale_op)
-
 
 # ----------------------------
 # LightningModule wrapper using LitBit
@@ -102,7 +106,8 @@ class LitNetCNNKD(LitBit):
             model_size='small',
             hint_points=[],
             student=student,
-            teacher=None
+            teacher=None,
+            num_classes=10,
         )
         # Override metrics for MNIST (10 classes instead of 100)
         self.acc_fp = MulticlassAccuracy(num_classes=10).eval()
@@ -120,7 +125,6 @@ class LitNetCNNKD(LitBit):
             "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
         }
 
-
 # ----------------------------
 # CLI / main
 # ----------------------------
@@ -131,7 +135,7 @@ def parse_args():
         data="./data",
         out="./ckpt_mnist",
         epochs=50,
-        batch_size=2048,
+        batch_size=512,
         lr=2e-3,
         wd=1e-4,
         label_smoothing=0.0
