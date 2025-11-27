@@ -93,7 +93,7 @@ class NormModels:
         eps: float = 1e-5
         elementwise_affine: bool = True
         bias: bool = True
-        data_format="channels_last"
+        data_format:str = "channels_last"
 
         def build(self) -> nn.Module:
             return NormdModules.Norm(self, type(self),
