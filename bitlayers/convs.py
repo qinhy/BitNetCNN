@@ -15,7 +15,6 @@ from .drop import DropPath
 from .acts import ActModels
 from .bit import Bit
 from .base import CommonModel, CommonModule
-from .padding import PadSame
 from .linear import LinearModels, LinearModules
 
 IntOrPair = Union[int, Tuple[int, int]]
