@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
-from typing import Optional, Type, Union
+import numbers
+from typing import List, Optional, Tuple, Type, Union
 
 from pydantic import BaseModel
 from torch import nn
 import torch
 from torchvision.ops.misc import FrozenBatchNorm2d
 
-class NormdModules:
+class NormModules:
     class Norm(nn.Module):
         def __init__(
             self,
@@ -26,6 +27,74 @@ class NormdModules:
         def forward(self, x):
             return self.norm(x)
 
+    class RmsNorm2d(nn.Module):
+        """ RmsNorm2D for NCHW tensors, w/ fast apex or cast norm if available
+
+        NOTE: It's currently (2025-05-10) faster to use an eager 2d kernel that does reduction
+        on dim=1 than to permute and use internal PyTorch F.rms_norm, this may change if something
+        like https://github.com/pytorch/pytorch/pull/150576 lands.
+        """
+        __constants__ = ['normalized_shape', 'eps', 'elementwise_affine', '_fast_norm']
+        normalized_shape: Tuple[int, ...]
+        eps: float
+        elementwise_affine: bool
+        _fast_norm: bool
+
+        def __init__(
+                self,
+                num_features: int,
+                eps: float = 1e-6,
+                affine: bool = True,
+                device=None,
+                dtype=None,
+        ) -> None:
+            factory_kwargs = {'device': device, 'dtype': dtype}
+            super().__init__()
+            normalized_shape = channels = num_features
+            if isinstance(normalized_shape, numbers.Integral):
+                # mypy error: incompatible types in assignment
+                normalized_shape = (normalized_shape,)  # type: ignore[assignment]
+            self.normalized_shape = tuple(normalized_shape)  # type: ignore[arg-type]
+            self.eps = eps
+            self.elementwise_affine = affine
+            self._fast_norm = False # is_fast_norm()  # can't script unless we have these flags here (no globals)
+
+            if self.elementwise_affine:
+                self.weight = nn.Parameter(torch.empty(self.normalized_shape, **factory_kwargs))
+            else:
+                self.register_parameter('weight', None)
+
+            self.reset_parameters()
+
+        def reset_parameters(self) -> None:
+            if self.elementwise_affine:
+                nn.init.ones_(self.weight)
+
+        @staticmethod
+        def rms_norm2d(
+            x: torch.Tensor,
+            normalized_shape: List[int],
+            weight: Optional[torch.Tensor] = None,
+            eps: float = 1e-5,
+        ):
+            assert len(normalized_shape) == 1
+            v = x.pow(2)
+            v = torch.mean(v, dim=1, keepdim=True)
+            x = x * torch.rsqrt(v + eps)
+            if weight is not None:
+                x = x * weight.reshape(1, -1, 1, 1)
+            return x
+        
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # NOTE fast norm fallback needs our rms norm impl, so both paths through here.
+            # Since there is no built-in PyTorch impl, always use APEX RmsNorm if is installed.
+            if self._fast_norm:
+                pass
+                # x = fast_rms_norm2d(x, self.normalized_shape, self.weight, self.eps)
+            else:
+                x = self.rms_norm2d(x, self.normalized_shape, self.weight, self.eps)
+            return x
+
 class NormModels:
     class _BatchNormBase(BaseModel):
         num_features: int
@@ -36,21 +105,21 @@ class NormModels:
 
     class BatchNorm1d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.BatchNorm1d)
+            return NormModules.Norm(self, type(self), nn.BatchNorm1d)
 
     class BatchNorm2d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.BatchNorm2d)
+            return NormModules.Norm(self, type(self), nn.BatchNorm2d)
 
     class BatchNorm3d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.BatchNorm3d)
+            return NormModules.Norm(self, type(self), nn.BatchNorm3d)
 
     class SyncBatchNorm(_BatchNormBase):
         process_group: Optional[object] = None
 
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.SyncBatchNorm)
+            return NormModules.Norm(self, type(self), nn.SyncBatchNorm)
 
     class _InstanceNormBase(BaseModel):
         num_features: int
@@ -61,15 +130,15 @@ class NormModels:
 
     class InstanceNorm1d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.InstanceNorm1d)
+            return NormModules.Norm(self, type(self), nn.InstanceNorm1d)
 
     class InstanceNorm2d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.InstanceNorm2d)
+            return NormModules.Norm(self, type(self), nn.InstanceNorm2d)
 
     class InstanceNorm3d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.InstanceNorm3d)
+            return NormModules.Norm(self, type(self), nn.InstanceNorm3d)
 
     class GroupNorm(BaseModel):
         num_features: int
@@ -78,7 +147,7 @@ class NormModels:
         affine: bool = True
 
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.GroupNorm)
+            return NormModules.Norm(self, type(self), nn.GroupNorm)
 
     # class GroupNorm1(BaseModel):
     #     num_features: int
@@ -96,7 +165,7 @@ class NormModels:
         data_format:str = "channels_last"
 
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self),
+            return NormModules.Norm(self, type(self),
                                      NormModels._LayerNormModule)
 
     class _LayerNormModule(nn.Module):
@@ -128,7 +197,7 @@ class NormModels:
         num_features: int
         
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self),
+            return NormModules.Norm(self, type(self),
                                      NormModels._GlobalResponseNormModule)
 
     class _GlobalResponseNormModule(nn.Module):
@@ -167,15 +236,15 @@ class NormModels:
 
     class RmsNorm(_RmsNormBase):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.RMSNorm)
+            return NormModules.Norm(self, type(self), nn.RMSNorm)
 
     # class RmsNormFp32(_RmsNormBase):
     #     def build(self) -> nn.Module:
     #         return NormdModules.Norm(self, type(self), nn.RMSNormFp32)
 
-    # class RmsNorm2d(_RmsNormBase):
-    #     def build(self) -> nn.Module:
-    #         return NormdModules.Norm(self, type(self), nn.RMSNorm2d)
+    class RmsNorm2d(_RmsNormBase):
+        def build(self) -> nn.Module:
+            return NormModules.Norm(self, type(self), NormModules.RmsNorm2d)
 
     # class RmsNorm2dFp32(_RmsNormBase):
     #     def build(self) -> nn.Module:
@@ -207,10 +276,12 @@ class NormModels:
         eps: float = 1e-5
 
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), FrozenBatchNorm2d)
+            return NormModules.Norm(self, type(self), FrozenBatchNorm2d)
 
     class Identity(BaseModel):
         def build(self) -> nn.Module:
-            return NormdModules.Norm(self, type(self), nn.Identity)
+            return NormModules.Norm(self, type(self), nn.Identity)
 
-    type = Union[BatchNorm1d,BatchNorm2d,BatchNorm3d,SyncBatchNorm,InstanceNorm1d,InstanceNorm2d,InstanceNorm3d,GroupNorm,LayerNorm,RmsNorm,FrozenBatchNorm2d,Identity]
+    type = Union[BatchNorm1d,BatchNorm2d,BatchNorm3d,SyncBatchNorm,
+                 InstanceNorm1d,InstanceNorm2d,InstanceNorm3d,GroupNorm,LayerNorm,
+                 RmsNorm,RmsNorm2d,FrozenBatchNorm2d,Identity]

@@ -107,7 +107,7 @@ class ConvBnAct(nn.Module):
             in_chs, out_chs, kernel_size,
             stride=1 if use_aa else stride,
             dilation=dilation, groups=groups, padding=pad_type)
-        self.bn1 = norm_act_layer(out_chs, inplace=True)
+        self.norm1 = norm_act_layer(out_chs, inplace=True)
         self.aa = create_aa(aa_layer, channels=out_chs, stride=stride, enable=use_aa)
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate else nn.Identity()
 
@@ -120,7 +120,7 @@ class ConvBnAct(nn.Module):
     def forward(self, x):
         shortcut = x
         x = self.conv(x)
-        x = self.bn1(x)
+        x = self.norm1(x)
         x = self.aa(x)
         if self.has_skip:
             x = self.drop_path(x) + shortcut
@@ -181,14 +181,14 @@ class DepthwiseSeparableConv(nn.Module):
                 padding=_convert_padding('same'),
                 bias=False,
             )
-            self.bn_s2d = norm_act_layer(sd_chs, sd_chs)
+            self.norm_s2d = norm_act_layer(sd_chs, sd_chs)
             dw_kernel_size = (dw_kernel_size + 1) // 2
             dw_pad_type = 'same' if dw_kernel_size == 2 else pad_type
             in_chs = sd_chs
             use_aa = False  # disable AA
         else:
             self.conv_s2d = None
-            self.bn_s2d = None
+            self.norm_s2d = None
             dw_pad_type = pad_type
 
         groups = num_groups(group_size, in_chs)
@@ -204,7 +204,7 @@ class DepthwiseSeparableConv(nn.Module):
             groups=groups,
             bias=False,
         )
-        self.bn1 = norm_act_layer(in_chs, inplace=True)
+        self.norm1 = norm_act_layer(in_chs, inplace=True)
 
         # anti-aliasing
         self.aa = create_aa(aa_layer, channels=out_chs, stride=stride, enable=use_aa)
@@ -221,7 +221,7 @@ class DepthwiseSeparableConv(nn.Module):
             padding=_convert_padding(pad_type),
             bias=False,
         )
-        self.bn2 = norm_act_layer(out_chs, inplace=True, apply_act=self.has_pw_act)
+        self.norm2 = norm_act_layer(out_chs, inplace=True, apply_act=self.has_pw_act)
 
         # stochastic depth / drop path
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate else nn.Identity()
@@ -236,13 +236,13 @@ class DepthwiseSeparableConv(nn.Module):
         shortcut = x
         if self.conv_s2d is not None:
             x = self.conv_s2d(x)
-            x = self.bn_s2d(x)
+            x = self.norm_s2d(x)
         x = self.conv_dw(x)
-        x = self.bn1(x)
+        x = self.norm1(x)
         x = self.aa(x)
         x = self.se(x)
         x = self.conv_pw(x)
-        x = self.bn2(x)
+        x = self.norm2(x)
         if self.has_skip:
             x = self.drop_path(x) + shortcut
         return x
@@ -289,14 +289,14 @@ class InvertedResidual(nn.Module):
         if s2d == 1:
             sd_chs = int(in_chs * 4)
             self.conv_s2d = create_conv2d(in_chs, sd_chs, kernel_size=2, stride=2, padding='same')
-            self.bn_s2d = norm_act_layer(sd_chs, sd_chs)
+            self.norm_s2d = norm_act_layer(sd_chs, sd_chs)
             dw_kernel_size = (dw_kernel_size + 1) // 2
             dw_pad_type = 'same' if dw_kernel_size == 2 else pad_type
             in_chs = sd_chs
             use_aa = False  # disable AA
         else:
             self.conv_s2d = None
-            self.bn_s2d = None
+            self.norm_s2d = None
             dw_pad_type = pad_type
 
         mid_chs = make_divisible(in_chs * exp_ratio)
@@ -304,14 +304,14 @@ class InvertedResidual(nn.Module):
 
         # Point-wise expansion
         self.conv_pw = create_conv2d(in_chs, mid_chs, exp_kernel_size, padding=pad_type, **conv_kwargs)
-        self.bn1 = norm_act_layer(mid_chs, inplace=True)
+        self.norm1 = norm_act_layer(mid_chs, inplace=True)
 
         # Depth-wise convolution
         self.conv_dw = create_conv2d(
             mid_chs, mid_chs, dw_kernel_size,
             stride=1 if use_aa else stride,
             dilation=dilation, groups=groups, padding=dw_pad_type, **conv_kwargs)
-        self.bn2 = norm_act_layer(mid_chs, inplace=True)
+        self.norm2 = norm_act_layer(mid_chs, inplace=True)
         self.aa = create_aa(aa_layer, channels=mid_chs, stride=stride, enable=use_aa)
 
         # Squeeze-and-excitation
@@ -319,7 +319,7 @@ class InvertedResidual(nn.Module):
 
         # Point-wise linear projection
         self.conv_pwl = create_conv2d(mid_chs, out_chs, pw_kernel_size, padding=pad_type, **conv_kwargs)
-        self.bn3 = norm_act_layer(out_chs, apply_act=False)
+        self.norm3 = norm_act_layer(out_chs, apply_act=False)
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate else nn.Identity()
 
     def feature_info(self, location):
@@ -332,15 +332,15 @@ class InvertedResidual(nn.Module):
         shortcut = x
         if self.conv_s2d is not None:
             x = self.conv_s2d(x)
-            x = self.bn_s2d(x)
+            x = self.norm_s2d(x)
         x = self.conv_pw(x)
-        x = self.bn1(x)
+        x = self.norm1(x)
         x = self.conv_dw(x)
-        x = self.bn2(x)
+        x = self.norm2(x)
         x = self.aa(x)
         x = self.se(x)
         x = self.conv_pwl(x)
-        x = self.bn3(x)
+        x = self.norm3(x)
         if self.has_skip:
             x = self.drop_path(x) + shortcut
         return x
@@ -665,12 +665,12 @@ class CondConvResidual(InvertedResidual):
         pooled_inputs = F.adaptive_avg_pool2d(x, 1).flatten(1)  # CondConv routing
         routing_weights = torch.sigmoid(self.routing_fn(pooled_inputs))
         x = self.conv_pw(x, routing_weights)
-        x = self.bn1(x)
+        x = self.norm1(x)
         x = self.conv_dw(x, routing_weights)
-        x = self.bn2(x)
+        x = self.norm2(x)
         x = self.se(x)
         x = self.conv_pwl(x, routing_weights)
-        x = self.bn3(x)
+        x = self.norm3(x)
         if self.has_skip:
             x = self.drop_path(x) + shortcut
         return x
@@ -722,7 +722,7 @@ class EdgeResidual(nn.Module):
             in_chs, mid_chs, exp_kernel_size,
             stride=1 if use_aa else stride,
             dilation=dilation, groups=groups, padding=pad_type)
-        self.bn1 = norm_act_layer(mid_chs, inplace=True)
+        self.norm1 = norm_act_layer(mid_chs, inplace=True)
 
         self.aa = create_aa(aa_layer, channels=mid_chs, stride=stride, enable=use_aa)
 
@@ -731,7 +731,7 @@ class EdgeResidual(nn.Module):
 
         # Point-wise linear projection
         self.conv_pwl = create_conv2d(mid_chs, out_chs, pw_kernel_size, padding=pad_type)
-        self.bn2 = norm_act_layer(out_chs, apply_act=False)
+        self.norm2 = norm_act_layer(out_chs, apply_act=False)
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate else nn.Identity()
 
     def feature_info(self, location):
@@ -743,11 +743,11 @@ class EdgeResidual(nn.Module):
     def forward(self, x):
         shortcut = x
         x = self.conv_exp(x)
-        x = self.bn1(x)
+        x = self.norm1(x)
         x = self.aa(x)
         x = self.se(x)
         x = self.conv_pwl(x)
-        x = self.bn2(x)
+        x = self.norm2(x)
         if self.has_skip:
             x = self.drop_path(x) + shortcut
         return x

@@ -53,12 +53,12 @@ class NetCNN(nn.Module):
         self.drop2d_p = drop2d_p
         self.drop_p = drop_p
         self.scale_op = scale_op
-        self.stem:convs.Conv2dModules.Conv2dBnAct = convs.Conv2dModels.Conv2dBnAct(
+        self.stem:convs.Conv2dModules.Conv2dNormAct = convs.Conv2dModels.Conv2dNormAct(
                             in_channels=in_channels,
                             out_channels=2**expand_ratio,
                             kernel_size=3, stride=1, padding=1,
                             bias=bias, scale_op=scale_op,
-                            bn = NormModels.BatchNorm2d(num_features=-1),
+                            norm = NormModels.BatchNorm2d(num_features=-1),
                             act= ActModels.SiLU(inplace=True)).build()
 
         self.stage1:InvertedResidualModule = InvertedResidual(in_channels=2**expand_ratio,out_channels=2**(expand_ratio+1),

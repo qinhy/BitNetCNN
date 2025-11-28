@@ -94,9 +94,9 @@ def get_padding_value(padding, kernel_size, **kwargs) -> Tuple[Tuple, bool]:
 
 
 class PadSame(nn.Module):
-    def __init__(self, shape, stride, dilation):
+    def __init__(self, kernel_size, stride, dilation):
         super().__init__()
-        self.shape, self.stride, self.dilation = shape, stride, dilation
+        self.kernel_size, self.stride, self.dilation = kernel_size, stride, dilation
 
     def forward(self, x):
-        return pad_same(x, self.shape[-2:], self.stride, self.dilation)
+        return pad_same(x, self.kernel_size[-2:], self.stride, self.dilation)

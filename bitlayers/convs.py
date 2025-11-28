@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type, Union, Unpack
 
 from pydantic import BaseModel, Field, model_validator
 from torch import nn
@@ -14,10 +14,9 @@ from .norms import NormModels
 from .drop import DropPath
 from .acts import ActModels
 from .bit import Bit
+from .base import CommonModel, CommonModule
 from .padding import PadSame
 from .linear import LinearModels, LinearModules
-
-from timmlayers import use_fused_attn
 
 IntOrPair = Union[int, Tuple[int, int]]
 KernelSizeArg = Union[int, Tuple[int, int], Sequence[int]]
@@ -62,24 +61,16 @@ def parse_shortcut_kwargs(cmd: str, prefix: str, json_schema:Dict,
 
 class Conv2dModels:
     """Lightweight Pydantic wrappers for key convolutional primitives."""
-    class BasicModel(BaseModel):
-        bit: bool = True
-        scale_op: str = "median"
+    class BasicModel(CommonModel):
+        def build(self): return self._build(self,Conv2dModules)
 
-        @model_validator(mode='after')
-        def valid_model(self): return self
-
-        def build(self):
-            model = self.valid_model()
-            mod = Conv2dModules
-            return mod.__dict__[f'{model.__class__.__name__}'](model)
         
     class Conv2d(BasicModel):
         in_channels: int
         out_channels: int = -1 # just a place holder not valid
         kernel_size: IntOrPair = 3
         stride: IntOrPair = 1
-        padding: PadArg = 0
+        padding: PadArg = 'same'
         dilation: IntOrPair = 1
         groups: int = 1
         bias: bool = True
@@ -87,7 +78,7 @@ class Conv2dModels:
         
         bit: bool = True
         scale_op: str = "median"
-
+        
         @classmethod
         def specifics(cls):
             return {
@@ -141,23 +132,23 @@ class Conv2dModels:
             self.groups = 1
             return self
 
-    class Conv2dBn(Conv2d):
-        bn: NormModels.type
+    class Conv2dNorm(Conv2d):
+        norm: NormModels.type
 
     class Conv2dAct(Conv2d):
         act: ActModels.type
 
-    class Conv2dBnAct(Conv2d):
-        bn: NormModels.type
+    class Conv2dNormAct(Conv2d):
+        norm: NormModels.type
         act: ActModels.type
 
-    class Conv2dDepthwiseBn(Conv2dDepthwise,Conv2dBn):pass
+    class Conv2dDepthwiseNorm(Conv2dDepthwise,Conv2dNorm):pass
     class Conv2dDepthwiseAct(Conv2dDepthwise,Conv2dAct):pass
-    class Conv2dDepthwiseBnAct(Conv2dDepthwise,Conv2dBnAct):pass
+    class Conv2dDepthwiseNormAct(Conv2dDepthwise,Conv2dNormAct):pass
 
-    class Conv2dPointwiseBn(Conv2dPointwise,Conv2dBn):pass
+    class Conv2dPointwiseNorm(Conv2dPointwise,Conv2dNorm):pass
     class Conv2dPointwiseAct(Conv2dPointwise,Conv2dAct):pass
-    class Conv2dPointwiseBnAct(Conv2dPointwise,Conv2dBnAct):pass
+    class Conv2dPointwiseNormAct(Conv2dPointwise,Conv2dNormAct):pass
 
 
     class SqueezeExcite(BasicModel):
@@ -178,11 +169,15 @@ class Conv2dModels:
             if self.rd_channels is None:
                 self.rd_channels = round(self.in_channels * self.rd_ratio)
             
-            self.conv_reduce_layer.in_channels  = self.in_channels
-            self.conv_reduce_layer.out_channels = self.rd_channels
+            self.conv_reduce_layer.update(
+                    in_channels  = self.in_channels,
+                    out_channels = self.rd_channels
+            )
 
-            self.conv_expand_layer.in_channels  = self.rd_channels
-            self.conv_expand_layer.out_channels = self.in_channels
+            self.conv_expand_layer.update(
+                    in_channels  = self.rd_channels,
+                    out_channels = self.in_channels
+            )
             return self
         
     class DepthwiseSeparableConv(Conv2d):
@@ -202,12 +197,12 @@ class Conv2dModels:
         noskip: bool = False
         drop_path_rate: float = 0.0
 
-        conv_s2d_layer: Optional[Union['Conv2dModels.Conv2dBnAct']] = Field(default=None)
+        conv_s2d_layer: Optional[Union['Conv2dModels.Conv2dNormAct']] = Field(default=None)
 
-        conv_dw_layer: Union['Conv2dModels.Conv2dDepthwiseBnAct'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dDepthwiseBnAct(
+        conv_dw_layer: Union['Conv2dModels.Conv2dDepthwiseNormAct'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dDepthwiseNormAct(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(num_features=-1),
+                norm=NormModels.BatchNorm2d(num_features=-1),
                 act=ActModels.ReLU(),
             )
         )
@@ -215,10 +210,10 @@ class Conv2dModels:
         se_layer: Optional['Conv2dModels.SqueezeExcite'] = None
         aa_layer: Optional[PoolModels.type] = None
 
-        conv_pw_layer: Union['Conv2dModels.Conv2dPointwiseBnAct'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dPointwiseBnAct(
+        conv_pw_layer: Union['Conv2dModels.Conv2dPointwiseNormAct'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dPointwiseNormAct(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(num_features=-1),
+                norm=NormModels.BatchNorm2d(num_features=-1),
                 act=ActModels.ReLU(),
             )
         )
@@ -288,10 +283,10 @@ class Conv2dModels:
         exp_ratio: float = 1.0
         exp_kernel_size: int = 1
 
-        conv_pwl_layer: Union['Conv2dModels.Conv2dPointwiseBn'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dPointwiseBn(
+        conv_pwl_layer: Union['Conv2dModels.Conv2dPointwiseNorm'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dPointwiseNorm(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(num_features=-1),
+                norm=NormModels.BatchNorm2d(num_features=-1),
             )
         )
 
@@ -370,7 +365,7 @@ class Conv2dModels:
         stride: int = 1
         dilation: int = 1
         group_size: int = 0
-        padding: PadArg = ''
+        padding: PadArg = 'same'
         force_in_channels: int = 0
 
         noskip: bool = False
@@ -381,17 +376,18 @@ class Conv2dModels:
         se_layer: Optional['Conv2dModels.SqueezeExcite'] = None
         drop_path_rate: float = 0.0
 
-        conv_exp_layer: Union['Conv2dModels.Conv2dBnAct'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dBnAct(
+        conv_exp_layer: Union['Conv2dModels.Conv2dNormAct','Conv2dModels.Conv2dNorm'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dNormAct(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(num_features=-1),
+                norm=NormModels.BatchNorm2d(num_features=-1),
                 act=ActModels.ReLU(),
             )
         )
-        conv_pwl_layer: Union['Conv2dModels.Conv2dBn'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dBn(
+        conv_pwl_layer: Union['Conv2dModels.Conv2dPointwiseNormAct','Conv2dModels.Conv2dPointwiseNorm'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dPointwiseNormAct(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(num_features=-1),
+                norm=NormModels.BatchNorm2d(num_features=-1),
+                act=ActModels.ReLU(),
             )
         )
 
@@ -441,7 +437,7 @@ class Conv2dModels:
                     self.aa_layer = None
 
             return self
-        
+    
     class UniversalInvertedResidual(BasicModel):
         """Universal Inverted Bottleneck with configurable depthwise stages."""
 
@@ -455,7 +451,7 @@ class Conv2dModels:
         stride: int = 1
         dilation: int = 1
         group_size: int = 1
-        padding: PadArg = ''
+        padding: PadArg = 'same'
         bias: bool = False
 
         noskip: bool = False
@@ -464,28 +460,39 @@ class Conv2dModels:
         aa_layer: Optional[PoolModels.type] = None
         se_layer: Optional['Conv2dModels.SqueezeExcite'] = None
 
-        conv_dw_start_layer: Optional[Union['Conv2dModels.Conv2dDepthwiseBn']] = Field(default=None)
-        conv_pw_exp_layer: Union['Conv2dModels.Conv2dPointwiseBnAct'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dPointwiseBnAct(
+        conv_dw_start_layer: Optional[Union['Conv2dModels.Conv2dDepthwiseNorm']] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dDepthwiseNorm(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(),
+                norm=NormModels.BatchNorm2d(num_features=-1),
+            )
+        )
+        conv_pw_exp_layer: Union['Conv2dModels.Conv2dPointwiseNormAct'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dPointwiseNormAct(
+                in_channels=-1,
+                norm=NormModels.BatchNorm2d(num_features=-1),
                 act=ActModels.ReLU(),
             )
         )
-        conv_dw_mid_layer: Optional[Union['Conv2dModels.Conv2dDepthwiseBnAct']] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dDepthwiseBnAct(
+        conv_dw_mid_layer: Optional[Union['Conv2dModels.Conv2dDepthwiseNormAct']] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dDepthwiseNormAct(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(),
+                norm=NormModels.BatchNorm2d(num_features=-1),
                 act=ActModels.ReLU(),
             )
         )
-        conv_pw_proj_layer: Union['Conv2dModels.Conv2dPointwiseBn'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dPointwiseBn(
+        conv_pw_proj_layer: Union['Conv2dModels.Conv2dPointwiseNorm'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dPointwiseNorm(
                 in_channels=-1,
-                bn=NormModels.BatchNorm2d(),
+                norm=NormModels.BatchNorm2d(num_features=-1),
             )
         )
-        conv_dw_end_layer: Optional[Union['Conv2dModels.Conv2dBn']] = Field(default=None)
+        
+        conv_dw_end_layer: Optional[Union['Conv2dModels.Conv2dNorm']] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dDepthwiseNorm(
+                in_channels=-1,
+                norm=NormModels.BatchNorm2d(num_features=-1),
+            )
+        )
 
         drop_path_rate: float = 0.0
         layer_scale_init_value: Optional[float] = 1e-5
@@ -508,11 +515,6 @@ class Conv2dModels:
             mid_chs = make_divisible(self.in_channels * self.exp_ratio)
 
             if self.dw_kernel_size_start:
-                if self.conv_dw_start_layer is None:
-                    self.conv_dw_start_layer = Conv2dModels.Conv2dDepthwiseBn(
-                        in_channels=-1,
-                        bn=NormModels.BatchNorm2d(),
-                    )
                 dw_start_stride = self.stride if not self.dw_kernel_size_mid else 1
                 use_aa_start = self.aa_layer is not None and dw_start_stride > 1
                 self.conv_dw_start_layer.in_channels = self.in_channels
@@ -534,12 +536,6 @@ class Conv2dModels:
             self.conv_pw_exp_layer.bias = self.bias
 
             if self.dw_kernel_size_mid:
-                if self.conv_dw_mid_layer is None:
-                    self.conv_dw_mid_layer = Conv2dModels.Conv2dDepthwiseBnAct(
-                        in_channels=-1,
-                        bn=NormModels.BatchNorm2d(),
-                        act=ActModels.ReLU(),
-                    )
                 use_aa_mid = self.aa_layer is not None and self.stride > 1
                 self.conv_dw_mid_layer.in_channels = mid_chs
                 self.conv_dw_mid_layer.out_channels = mid_chs
@@ -563,11 +559,6 @@ class Conv2dModels:
             self.conv_pw_proj_layer.bias = self.bias
 
             if self.dw_kernel_size_end:
-                if self.conv_dw_end_layer is None:
-                    self.conv_dw_end_layer = Conv2dModels.Conv2dDepthwiseBn(
-                        in_channels=-1,
-                        bn=NormModels.BatchNorm2d(),
-                    )
                 dw_end_stride = self.stride if not (self.dw_kernel_size_start or self.dw_kernel_size_mid) else 1
                 if self.aa_layer is not None and dw_end_stride > 1:
                     raise ValueError("Anti-aliasing on the ending depthwise stage with stride > 1 is not supported.")
@@ -694,13 +685,13 @@ class Conv2dModels:
         layer_scale_init_value: Optional[float] = 1e-5
         bias: bool = Field(default=False, validation_alias='use_bias')
         use_cpe: bool = False
-        fused_attn: bool = Field(default_factory=lambda: use_fused_attn())
+        fused_attn: bool = Field(default_factory=lambda: False) #use_fused_attn()) TODO
 
         norm_layer: Optional[NormModels.type] = Field(
             default_factory=lambda: NormModels.BatchNorm2d(num_features=-1)
         )
         attn_layer: Optional[Union['Conv2dModels.MultiQueryAttention2d', 'Conv2dModels.Attention2d']] = Field(
-            default_factory=lambda:Conv2dModels.Attention2d(in_channels=-1)
+            default_factory=lambda:Conv2dModels.Attention2d(in_channels=0)
         )
         conv_cpe_layer: Optional['Conv2dModels.Conv2dDepthwise'] = Field(
                         default_factory=lambda:Conv2dModels.Conv2dDepthwise(in_channels=-1))        
@@ -738,6 +729,7 @@ class Conv2dModels:
 
             fused_attn = bool(self.fused_attn)
             if self.use_multi_query:
+                self.attn_layer=Conv2dModels.MultiQueryAttention2d(in_channels=-1)
                 if isinstance(self.attn_layer, Conv2dModels.MultiQueryAttention2d):
                     attn = self.attn_layer
                     attn.in_channels = self.in_channels
@@ -784,40 +776,21 @@ class Conv2dModels:
 
 
 class Conv2dModules:
-    class Module(nn.Module):
-        def __init__(self,para:BaseModel,para_cls=None):
-            if para_cls is None:
-                mod = Conv2dModels
-                para_cls = mod.__dict__[f'{self.__class__.__name__}']
-            if type(para) is dict: para = para_cls(**para)
-            self.para = para.model_copy(deep=True)
-            super().__init__()
-        
-        @staticmethod
-        @torch.no_grad()            
-        def convert_to_ternary(module: nn.Module,mods=None) -> nn.Module:
-            """
-            Recursively replace Bit.Conv2d/Bit.Linear with Ternary*Infer modules.
-            Returns a new nn.Module (original left untouched if you deepcopy before).
-            """
-            for name, child in list(module.named_children()):
-                if mods is not None:
-                    if name not in mods:continue
-                if hasattr(child, 'to_ternary'):
-                    setattr(module, name, child.to_ternary())
-                else:
-                    Conv2dModules.Module.convert_to_ternary(child)
+    class Module(CommonModule):
+        def __init__(self, para, para_cls=None):
+            super().__init__(para, Conv2dModels, para_cls)
 
     class Conv2d(Module):
-        def __init__(self,para:Conv2dModels.Conv2d):
+        def __init__(self,para):
             super().__init__(para)
-            self.bit = para.bit
+            self.para:Conv2dModels.Conv2d = self.para
+            self.bit = self.para.bit
 
-            if para.bit:
-                self.conv_para = para.model_dump(exclude=['bit','bn','act'])
+            if self.para.bit:
+                self.conv_para = self.para.model_dump(exclude=['bit','norm','act'])
                 self.conv = Bit.Conv2d(**self.conv_para)
             else:
-                self.conv_para = para.model_dump(exclude=['bit','bn','act','scale_op'])
+                self.conv_para = self.para.model_dump(exclude=['bit','norm','act','scale_op'])
                 self.conv = nn.Conv2d(**self.conv_para)
             self.weight_used = True
 
@@ -843,26 +816,26 @@ class Conv2dModules:
     class Conv2dDepthwise(Conv2d):pass
     class Conv2dPointwise(Conv2d):pass
 
-    class Conv2dBn(Conv2d):
+    class Conv2dNorm(Conv2d):
         def __init__(self,para):
             super().__init__(para)
-            self.para:Conv2dModels.Conv2dBn = self.para
-            self.para.bn.num_features = self.para.out_channels
-            self.bn = self.para.bn.build()
+            self.para:Conv2dModels.Conv2dNorm = self.para
+            self.para.norm.num_features = self.para.out_channels
+            self.norm = self.para.norm.build()
 
         def forward_weight(self, x, weight = None):
-            return self.bn(super().forward_weight(x, weight))
+            return self.norm(super().forward_weight(x, weight))
 
         def forward(self, x):
-            return self.bn(super().forward(x))
+            return self.norm(super().forward(x))
         
-    class Conv2dDepthwiseBn(Conv2dBn):pass
-    class Conv2dPointwiseBn(Conv2dBn):pass
+    class Conv2dDepthwiseNorm(Conv2dNorm):pass
+    class Conv2dPointwiseNorm(Conv2dNorm):pass
 
-    class Conv2dBnAct(Conv2dBn):
+    class Conv2dNormAct(Conv2dNorm):
         def __init__(self,para):
             super().__init__(para)
-            self.para:Conv2dModels.Conv2dBnAct = self.para
+            self.para:Conv2dModels.Conv2dNormAct = self.para
             self.act = self.para.act.build()
 
         def forward_weight(self, x, weight = None):
@@ -871,8 +844,8 @@ class Conv2dModules:
         def forward(self, x):
             return self.act(super().forward(x))
         
-    class Conv2dDepthwiseBnAct(Conv2dBnAct):pass
-    class Conv2dPointwiseBnAct(Conv2dBnAct):pass
+    class Conv2dDepthwiseNormAct(Conv2dNormAct):pass
+    class Conv2dPointwiseNormAct(Conv2dNormAct):pass
 
     class Conv2dAct(Conv2d):
         def __init__(self,para):
@@ -929,9 +902,9 @@ class Conv2dModules:
         def forward(self, x):
             shortcut = x
             if self.para.conv_s2d_layer is not None:
-                x = self.conv_s2d(x) # with bn and act
+                x = self.conv_s2d(x) # with norm and act
 
-            x = self.conv_dw(x) # with bn and act
+            x = self.conv_dw(x) # with norm and act
 
             if self.para.aa_layer is not None:
                 x = self.aa(x)
@@ -939,7 +912,7 @@ class Conv2dModules:
             if self.para.se_layer is not None:
                 x = self.se(x)
                 
-            x = self.conv_pw(x) # with bn and act            
+            x = self.conv_pw(x) # with norm and act            
             if (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (not self.para.noskip):                
                 x = self.drop_path(x) + shortcut
             return x
@@ -961,17 +934,17 @@ class Conv2dModules:
         def forward(self, x):
             shortcut = x
             if self.conv_s2d is not None:
-                x = self.conv_s2d(x) # with bn and act
+                x = self.conv_s2d(x) # with norm and act
 
-            x = self.conv_pw(x) # with bn and act
-            x = self.conv_dw(x) # with bn and act
+            x = self.conv_pw(x) # with norm and act
+            x = self.conv_dw(x) # with norm and act
 
             if self.para.aa_layer is not None:
                 x = self.aa(x)
             if self.para.se_layer is not None:
                 x = self.se(x)
 
-            x = self.conv_pwl(x) # with bn and no act
+            x = self.conv_pwl(x) # with norm and no act
 
             if self.has_skip:
                 x = self.drop_path(x) + shortcut
@@ -1064,17 +1037,25 @@ class Conv2dModules:
 
         def forward(self, x):
             shortcut = x
+            print('UniversalInvertedResidual forward',x.shape)
             x = self.dw_start(x)
+            print('UniversalInvertedResidual dw_start',x.shape)
             if self._aa_after == "start" and self.aa is not None:
                 x = self.aa(x)
             x = self.pw_exp(x)
+            print('UniversalInvertedResidual pw_exp',x.shape)
             x = self.dw_mid(x)
+            print('UniversalInvertedResidual dw_mid',x.shape)
             if self._aa_after == "mid" and self.aa is not None:
                 x = self.aa(x)
             x = self.se(x)
+            print('UniversalInvertedResidual se',x.shape)
             x = self.pw_proj(x)
+            print('UniversalInvertedResidual pw_proj',x.shape)
             x = self.dw_end(x)
+            print('UniversalInvertedResidual dw_end',x.shape)
             x = self.layer_scale(x)
+            print('UniversalInvertedResidual layer_scale',x.shape)
             if self.has_skip:
                 x = self.drop_path(x) + shortcut
             return x

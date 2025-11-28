@@ -48,7 +48,7 @@ class BasicBlockBit(nn.Module):
             bias=True,
             scale_op=scale_op,
         )
-        self.bn1 = nn.BatchNorm2d(planes)
+        self.norm1 = nn.BatchNorm2d(planes)
         self.act = nn.SiLU(inplace=True)
         self.conv2 = Bit.Conv2d(
             planes,
@@ -59,13 +59,13 @@ class BasicBlockBit(nn.Module):
             bias=True,
             scale_op=scale_op,
         )
-        self.bn2 = nn.BatchNorm2d(planes)
+        self.norm2 = nn.BatchNorm2d(planes)
         self.downsample = downsample
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
-        out = self.act(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.act(self.norm1(self.conv1(x)))
+        out = self.norm2(self.conv2(out))
         if self.downsample is not None:
             identity = self.downsample(x)
         return self.act(out + identity)
@@ -93,7 +93,7 @@ class BottleneckBit(nn.Module):
             bias=True,
             scale_op=scale_op,
         )
-        self.bn1 = nn.BatchNorm2d(width)
+        self.norm1 = nn.BatchNorm2d(width)
         self.conv2 = Bit.Conv2d(
             width,
             width,
@@ -103,7 +103,7 @@ class BottleneckBit(nn.Module):
             bias=True,
             scale_op=scale_op,
         )
-        self.bn2 = nn.BatchNorm2d(width)
+        self.norm2 = nn.BatchNorm2d(width)
         self.conv3 = Bit.Conv2d(
             width,
             planes * self.expansion,
@@ -113,15 +113,15 @@ class BottleneckBit(nn.Module):
             bias=True,
             scale_op=scale_op,
         )
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+        self.norm3 = nn.BatchNorm2d(planes * self.expansion)
         self.act = nn.SiLU(inplace=True)
         self.downsample = downsample
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
-        out = self.act(self.bn1(self.conv1(x)))
-        out = self.act(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
+        out = self.act(self.norm1(self.conv1(x)))
+        out = self.act(self.norm2(self.conv2(out)))
+        out = self.norm3(self.conv3(out))
         if self.downsample is not None:
             identity = self.downsample(x)
         return self.act(out + identity)
