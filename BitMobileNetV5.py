@@ -1,28 +1,284 @@
-from __future__ import annotations
-import argparse
-from functools import partial
-import json
-import re
-from typing import List, Sequence, Union, Optional
+MNv5_TINY_ARCH_DEF = [
+    [
+        "er_r1_k3_s2_e4_c128",
+    ],
+    [
+        "uir_r1_a3_k5_s2_e6_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+    ],
+    [
+        "uir_r1_a5_k5_s2_e6_c512",
+        "uir_r1_a0_k0_s1_e1_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+    ],
+    [
+        "uir_r1_a5_k5_s2_e6_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+    ],
+]
 
-import timm
+MNv5_SMALL_ARCH_DEF = [
+    [
+        "er_r1_k3_s2_e4_c128",
+        "er_r1_k3_s1_e4_c128",
+    ],
+    [
+        "uir_r1_a3_k5_s2_e6_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+        "uir_r1_a3_k0_s1_e4_c256",
+    ],
+    [
+        "uir_r1_a5_k5_s2_e6_c512",
+        "uir_r1_a5_k0_s1_e4_c512",
+        "uir_r1_a0_k0_s1_e1_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+    ],
+    [
+        "uir_r1_a5_k5_s2_e6_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+    ],
+]
+
+MNv5_BASE_ARCH_DEF = [
+    # Stage 0: 128x128 in
+    [
+        "er_r1_k3_s2_e4_c128",
+        "er_r1_k3_s1_e4_c128",
+        "er_r1_k3_s1_e4_c128",
+    ],
+    # Stage 1: 256x256 in
+    [
+        "uir_r1_a3_k5_s2_e6_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+        "uir_r1_a3_k0_s1_e4_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+        "uir_r1_a3_k0_s1_e4_c256",
+    ],
+    # Stage 2: 640x640 in
+    [
+        "uir_r1_a5_k5_s2_e6_c512",
+        "uir_r1_a5_k0_s1_e4_c512",
+        "uir_r1_a5_k0_s1_e4_c512",
+        "uir_r1_a0_k0_s1_e1_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+        "mqa_r1_k3_h8_s2_d64_c512",
+        "uir_r1_a0_k0_s1_e2_c512",
+    ],
+    # Stage 3: 1280x1280 in
+    [
+        "uir_r1_a5_k5_s2_e6_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+        "mqa_r1_k3_h16_s1_d64_c1024",
+        "uir_r1_a0_k0_s1_e2_c1024",
+    ],
+]
+
+MNv5_LARGE_ARCH_DEF = [
+    # Stage 0: 128x128 in
+    [
+        "er_r1_k3_s2_e4_c128",
+        "er_r1_k3_s1_e4_c128",
+        "er_r1_k3_s1_e4_c128",
+    ],
+    # Stage 1: 256x256 in
+    [
+        "uir_r1_a3_k5_s2_e6_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+        "uir_r1_a3_k0_s1_e4_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+        "uir_r1_a3_k0_s1_e4_c256",
+    ],
+    # Stage 2: 640x640 in (reduced)
+    [
+        "uir_r1_a5_k5_s2_e6_c640",  # downsample, keep
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",  # 3 conv blocks instead of 7
+        "uir_r1_a0_k0_s1_e1_c640",  # keep transition block
+        # 6x (MQA + UIR) pairs instead of 13
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+    ],
+    # Stage 3: 1280x1280 in (reduced)
+    [
+        "uir_r1_a5_k5_s2_e6_c1280",  # downsample, keep
+        # 8x (MQA + UIR) pairs instead of 19
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+    ],
+]
+
+MNv5_300M_ARCH_DEF = [
+    # Stage 0: 128x128 in
+    [
+        "er_r1_k3_s2_e4_c128",
+        "er_r1_k3_s1_e4_c128",
+        "er_r1_k3_s1_e4_c128",
+    ],
+    # Stage 1: 256x256 in
+    [
+        "uir_r1_a3_k5_s2_e6_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+        "uir_r1_a3_k0_s1_e4_c256",
+        "uir_r1_a5_k0_s1_e4_c256",
+        "uir_r1_a3_k0_s1_e4_c256",
+    ],
+    # Stage 2: 640x640 in
+    [
+        "uir_r1_a5_k5_s2_e6_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a5_k0_s1_e4_c640",
+        "uir_r1_a0_k0_s1_e1_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+        "mqa_r1_k3_h12_v2_s1_d64_c640",
+        "uir_r1_a0_k0_s1_e2_c640",
+    ],
+    # Stage 3: 1280x1280 in
+    [
+        "uir_r1_a5_k5_s2_e6_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+        "mqa_r1_k3_h16_s1_d96_c1280",
+        "uir_r1_a0_k0_s1_e2_c1280",
+    ],
+]
+
+import argparse
+import re
+from functools import partial
+from typing import List, Optional, Sequence, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Dict, Any, List
-
+from bitlayers.acts import ActModels
+from bitlayers.bit import Bit
 from bitlayers.convs import Conv2dModels
 from bitlayers.norms import NormModels
-from bitlayers.acts import ActModels
-from common_utils import CIFAR100DataModule, ImageNetDataModule, LitBit, TinyImageNetDataModule, add_common_args, convert_to_ternary, setup_trainer, summ
-from timmlayers import ConvNormAct, RmsNorm2d
-from timmlayers.bit import Bit
-from timmlayers.efficientnet_blocks import SqueezeExcite, UniversalInvertedResidual
-from timmlayers.efficientnet_builder import EfficientNetBuilder, decode_arch_def, round_channels
-
-
-_GELU = partial(nn.GELU, approximate="tanh")
+from common_utils import *
 
 
 # --- small helper: simplified version of timm's feature_take_indices ----------------
@@ -55,6 +311,7 @@ def _take_indices(num: int, indices: Optional[Union[int, Sequence[int]]]):
         out.append(idx)
     return out
 
+
 class MobileNetV5MultiScaleFusionAdapter(nn.Module):
     def __init__(
         self,
@@ -65,8 +322,6 @@ class MobileNetV5MultiScaleFusionAdapter(nn.Module):
         interpolation_mode: str = "nearest",
         layer_scale_init_value: Optional[float] = None,
         noskip: bool = True,
-        act_layer: Optional[nn.Module] = None,
-        norm_layer: Optional[nn.Module] = None,
         device=None,
         dtype=None,
     ):
@@ -81,21 +336,48 @@ class MobileNetV5MultiScaleFusionAdapter(nn.Module):
         self.layer_scale_init_value = layer_scale_init_value
         self.noskip = noskip
 
-        act_layer = act_layer or _GELU
-        norm_layer = norm_layer or RmsNorm2d
+        def act():
+            return ActModels.GELU()
 
-        self.ffn = UniversalInvertedResidual(
-            in_chs=self.in_channels,
-            out_chs=self.out_channels,
-            dw_kernel_size_mid=0,
-            exp_ratio=self.expansion_ratio,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
-            noskip=self.noskip,
-            layer_scale_init_value=self.layer_scale_init_value,
-        ).to(**dd)
+        def norm(num_features=-1):
+            return NormModels.RmsNorm2d(num_features=num_features)
 
-        self.norm = norm_layer(self.out_channels, **dd)
+        self.ffn = (
+            Conv2dModels.UniversalInvertedResidual(
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                dw_kernel_size_mid=0,
+                exp_ratio=self.expansion_ratio,
+                noskip=self.noskip,
+                layer_scale_init_value=self.layer_scale_init_value,
+                conv_dw_start_layer=Conv2dModels.Conv2dDepthwiseNorm(
+                    in_channels=-1,
+                    norm=norm(),
+                ),
+                conv_pw_exp_layer=Conv2dModels.Conv2dPointwiseNormAct(
+                    in_channels=-1,
+                    norm=norm(),
+                    act=act(),
+                ),
+                conv_dw_mid_layer=Conv2dModels.Conv2dDepthwiseNormAct(
+                    in_channels=-1,
+                    norm=norm(),
+                    act=act(),
+                ),
+                conv_pw_proj_layer=Conv2dModels.Conv2dPointwiseNorm(
+                    in_channels=-1,
+                    norm=norm(),
+                ),
+                conv_dw_end_layer=Conv2dModels.Conv2dDepthwiseNorm(
+                    in_channels=-1,
+                    norm=norm(),
+                ),
+            )
+            .build()
+            .to(**dd)
+        )
+
+        self.norm = norm(num_features=self.out_channels).build()
 
     def forward(self, inputs: List[torch.Tensor]) -> torch.Tensor:
         assert len(inputs) > 0, "Need at least one feature map"
@@ -107,7 +389,9 @@ class MobileNetV5MultiScaleFusionAdapter(nn.Module):
             h, w = img.shape[-2:]
             if h < high_resolution[0] or w < high_resolution[1]:
                 img = F.interpolate(
-                    img, size=high_resolution, mode=self.interpolation_mode
+                    img,
+                    size=high_resolution,
+                    mode=self.interpolation_mode,
                 )
             resized.append(img)
 
@@ -121,7 +405,11 @@ class MobileNetV5MultiScaleFusionAdapter(nn.Module):
                 high_resolution[0] % self.output_resolution[0] != 0
                 or high_resolution[1] % self.output_resolution[1] != 0
             ):
-                x = F.interpolate(x, size=self.output_resolution, mode="bilinear")
+                x = F.interpolate(
+                    x,
+                    size=self.output_resolution,
+                    mode="bilinear",
+                )
             else:
                 h_stride = high_resolution[0] // self.output_resolution[0]
                 w_stride = high_resolution[1] // self.output_resolution[1]
@@ -133,6 +421,7 @@ class MobileNetV5MultiScaleFusionAdapter(nn.Module):
 
         x = self.norm(x)
         return x
+
 
 class MobileNetV5Backbone(nn.Module):
     """
@@ -155,27 +444,37 @@ class MobileNetV5Backbone(nn.Module):
     ):
         super().__init__()
         dd = {}
-        act_layer = _GELU
-        norm_layer = RmsNorm2d
-        se_layer = SqueezeExcite
 
         # ---- stem ----
+        def round_channels(
+            channels,
+            multiplier=1.0,
+            divisor=8,
+            channel_min=None,
+            round_limit=0.9,
+        ):
+            """Round number of filters based on depth multiplier."""
+            if not multiplier:
+                return channels
+            return make_divisible(
+                channels * multiplier,
+                divisor,
+                channel_min,
+                round_limit=round_limit,
+            )
+
+        def make_divisible(v, divisor=8, min_value=None, round_limit=0.9):
+            min_value = min_value or divisor
+            new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+            # Make sure that round down does not go down by more than 10%.
+            if new_v < round_limit * v:
+                new_v += divisor
+            return new_v
+
         round_chs_fn = partial(round_channels, multiplier=channel_multiplier)
         if channel_multiplier < 1.0:
             stem_size = round_chs_fn(stem_size)
 
-        # self.conv_stem = ConvNormAct(
-        #     in_chans,
-        #     stem_size,
-        #     kernel_size=3,
-        #     stride=2,
-        #     padding=pad_type,
-        #     bias=True,
-        #     norm_layer=norm_layer,
-        #     act_layer=act_layer,
-        #     **dd,
-        # )
-        
         self.conv_stem = Conv2dModels.Conv2dNormAct(
             in_channels=in_chans,
             out_channels=stem_size,
@@ -187,30 +486,9 @@ class MobileNetV5Backbone(nn.Module):
             act=ActModels.GELU(),
         ).build()
 
-        
-        parsed_arch,info = parse_arch_def(arch_def)
-
-        # ---- blocks via EfficientNetBuilder ----
-        block_args = decode_arch_def(arch_def)
-
-        builder = EfficientNetBuilder(
-            output_stride=32,
-            pad_type=pad_type,
-            round_chs_fn=round_chs_fn,
-            se_from_exp=True,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
-            aa_layer=None,
-            se_layer=se_layer,
-            drop_path_rate=drop_path_rate,
-            layer_scale_init_value=layer_scale_init_value,
-            **dd,
-        )
-
-        # builder(...) returns a list of stage-sequentials; wrap in nn.Sequential
-        self.blocks = parsed_arch#
-        # self.blocks = nn.Sequential(*builder(stem_size, block_args))
-        self.feature_info = info # builder.features  # list of dicts with 'stage', 'num_chs', ...
+        self.blocks, info = parse_arch_def(arch_def)
+        # builder.features  # list of dicts with 'stage', 'num_chs', ...
+        self.feature_info = info
 
         # 1) choose which entries in feature_info we want to fuse
         if msfa_indices is None:
@@ -231,8 +509,6 @@ class MobileNetV5Backbone(nn.Module):
             in_chs=msfa_in_chs,
             out_chs=self.num_features,
             output_resolution=self.msfa_output_resolution,
-            norm_layer=norm_layer,
-            act_layer=act_layer,
             layer_scale_init_value=layer_scale_init_value,
             **dd,
         )
@@ -247,18 +523,14 @@ class MobileNetV5Backbone(nn.Module):
 
         # stage_id 0 = stem output
         stage_id = 0
-        print('################x',0,x.shape)
         x = self.conv_stem(x)
-        print(f'################conv_stem,{self.conv_stem.conv.padding}',0,x.shape)
         if stage_id in self.msfa_stage_ids:
             intermediates.append(x)
 
         # each child of self.blocks is a *stage* (nn.Sequential of blocks)
         for blk in self.blocks:
             stage_id += 1
-            print('################s',stage_id,x.shape)
             x = blk(x)
-            print('################e',stage_id,x.shape)
             if stage_id in self.msfa_stage_ids:
                 intermediates.append(x)
 
@@ -266,12 +538,12 @@ class MobileNetV5Backbone(nn.Module):
         # print(len(intermediates), "features for MSFA")
         # assert len(intermediates) == len(self.msfa_stage_ids)
 
-        print('########msfa########')
         x = self.msfa(intermediates)
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_features(x)
+
 
 class MobileNetV5Classifier(nn.Module):
     """
@@ -294,16 +566,15 @@ class MobileNetV5Classifier(nn.Module):
     ):
         super().__init__()
 
-        
-        self.num_classes=num_classes
-        self.arch_def=arch_def
-        self.in_chans=in_chans
-        self.stem_size=stem_size
-        self.channel_multiplier=channel_multiplier
-        self.msfa_indices=msfa_indices
-        self.msfa_output_resolution=msfa_output_resolution
-        self.out_channels=out_channels
-        self.drop_rate=drop_rate
+        self.num_classes = num_classes
+        self.arch_def = arch_def
+        self.in_chans = in_chans
+        self.stem_size = stem_size
+        self.channel_multiplier = channel_multiplier
+        self.msfa_indices = msfa_indices
+        self.msfa_output_resolution = msfa_output_resolution
+        self.out_channels = out_channels
+        self.drop_rate = drop_rate
 
         self.backbone = MobileNetV5Backbone(
             arch_def=arch_def,
@@ -319,15 +590,14 @@ class MobileNetV5Classifier(nn.Module):
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(1),
             nn.Dropout(drop_rate) if drop_rate > 0 else nn.Identity(),
-            Bit.Linear(out_channels, num_classes)
+            Bit.Linear(out_channels, num_classes),
         )
-    
+
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone.forward_features(x)  # [B, C, H, W]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.head(self.encode(x))
-
 
     def clone(self) -> "MobileNetV5Classifier":
         return self.__class__(
@@ -342,305 +612,8 @@ class MobileNetV5Classifier(nn.Module):
             drop_rate=self.drop_rate,
         )
 
-MNv5_TINY_ARCH_DEF: list[list[str]] = [
-
-    [
-        'er_r1_k3_s2_e4_c128',
-    ],
-
-
-    [
-        'uir_r1_a3_k5_s2_e6_c256',
-        'uir_r1_a5_k0_s1_e4_c256',
-    ],
-
-
-    [
-        "uir_r1_a5_k5_s2_e6_c512",   
-        "uir_r1_a0_k0_s1_e1_c512",   
-
-        'mqa_r1_k3_h8_s2_d64_c512',  
-        "uir_r1_a0_k0_s1_e2_c512",   
-        "uir_r1_a0_k0_s1_e2_c512",   
-    ],
-
-
-    [
-        "uir_r1_a5_k5_s2_e6_c1024",
-
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",  
-        "uir_r1_a0_k0_s1_e2_c1024",  
-    ],
-]
-
-MNv5_SMALL_ARCH_DEF: list[list[str]] = [
-
-
-    [
-        'er_r1_k3_s2_e4_c128',
-        'er_r1_k3_s1_e4_c128',
-    ],
-
-
-
-    [
-        'uir_r1_a3_k5_s2_e6_c256',
-        'uir_r1_a5_k0_s1_e4_c256',
-        'uir_r1_a3_k0_s1_e4_c256',
-    ],
-
-
-
-    [
-        "uir_r1_a5_k5_s2_e6_c512",
-        "uir_r1_a5_k0_s1_e4_c512",
-        "uir_r1_a0_k0_s1_e1_c512",
-
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-    ],
-
-
-
-    [
-        "uir_r1_a5_k5_s2_e6_c1024",
-
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-    ],
-]
-
-MNv5_BASE_ARCH_DEF: list[list[str]] = [
-    # Stage 0: 128x128 in
-    [
-        'er_r1_k3_s2_e4_c128',
-        'er_r1_k3_s1_e4_c128',
-        'er_r1_k3_s1_e4_c128',
-    ],
-    # Stage 1: 256x256 in
-    [
-        'uir_r1_a3_k5_s2_e6_c256',
-        'uir_r1_a5_k0_s1_e4_c256',
-        'uir_r1_a3_k0_s1_e4_c256',
-        'uir_r1_a5_k0_s1_e4_c256',
-        'uir_r1_a3_k0_s1_e4_c256',
-    ],
-    # Stage 2: 640x640 in
-    [
-        "uir_r1_a5_k5_s2_e6_c512",
-        "uir_r1_a5_k0_s1_e4_c512",
-        "uir_r1_a5_k0_s1_e4_c512",
-        "uir_r1_a0_k0_s1_e1_c512",
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-        'mqa_r1_k3_h8_s2_d64_c512',
-        "uir_r1_a0_k0_s1_e2_c512",
-    ],
-    # Stage 3: 1280x1280 in
-    [
-        "uir_r1_a5_k5_s2_e6_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-        'mqa_r1_k3_h16_s1_d64_c1024',
-        "uir_r1_a0_k0_s1_e2_c1024",
-    ],
-]
-
-MNv5_LARGE_ARCH_DEF: list[list[str]] = [
-    # Stage 0: 128x128 in
-    [
-        'er_r1_k3_s2_e4_c128',
-        'er_r1_k3_s1_e4_c128',
-        'er_r1_k3_s1_e4_c128',
-    ],
-    # Stage 1: 256x256 in
-    [
-        'uir_r1_a3_k5_s2_e6_c256',
-        'uir_r1_a5_k0_s1_e4_c256',
-        'uir_r1_a3_k0_s1_e4_c256',
-        'uir_r1_a5_k0_s1_e4_c256',
-        'uir_r1_a3_k0_s1_e4_c256',
-    ],
-    # Stage 2: 640x640 in (reduced)
-    [
-        "uir_r1_a5_k5_s2_e6_c640",       # downsample, keep
-        "uir_r1_a5_k0_s1_e4_c640",
-        "uir_r1_a5_k0_s1_e4_c640",
-        "uir_r1_a5_k0_s1_e4_c640",       # 3 conv blocks instead of 7
-
-        "uir_r1_a0_k0_s1_e1_c640",       # keep transition block
-
-        # 6x (MQA + UIR) pairs instead of 13
-        "mqa_r1_k3_h12_v2_s1_d64_c640",
-        "uir_r1_a0_k0_s1_e2_c640",
-        "mqa_r1_k3_h12_v2_s1_d64_c640",
-        "uir_r1_a0_k0_s1_e2_c640",
-        "mqa_r1_k3_h12_v2_s1_d64_c640",
-        "uir_r1_a0_k0_s1_e2_c640",
-        "mqa_r1_k3_h12_v2_s1_d64_c640",
-        "uir_r1_a0_k0_s1_e2_c640",
-        "mqa_r1_k3_h12_v2_s1_d64_c640",
-        "uir_r1_a0_k0_s1_e2_c640",
-        "mqa_r1_k3_h12_v2_s1_d64_c640",
-        "uir_r1_a0_k0_s1_e2_c640",
-    ],
-    # Stage 3: 1280x1280 in (reduced)
-    [
-        "uir_r1_a5_k5_s2_e6_c1280",      # downsample, keep
-
-        # 8x (MQA + UIR) pairs instead of 19
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-        "mqa_r1_k3_h16_s1_d96_c1280",
-        "uir_r1_a0_k0_s1_e2_c1280",
-    ],
-]
-
-MNv5_300M_ARCH_DEF: list[list[str]] = [
-            # Stage 0: 128x128 in
-            [
-                'er_r1_k3_s2_e4_c128',
-                'er_r1_k3_s1_e4_c128',
-                'er_r1_k3_s1_e4_c128',
-            ],
-            # Stage 1: 256x256 in
-            [
-                'uir_r1_a3_k5_s2_e6_c256',
-                'uir_r1_a5_k0_s1_e4_c256',
-                'uir_r1_a3_k0_s1_e4_c256',
-                'uir_r1_a5_k0_s1_e4_c256',
-                'uir_r1_a3_k0_s1_e4_c256',
-            ],
-            # Stage 2: 640x640 in
-            [
-                "uir_r1_a5_k5_s2_e6_c640",
-                "uir_r1_a5_k0_s1_e4_c640",
-                "uir_r1_a5_k0_s1_e4_c640",
-                "uir_r1_a5_k0_s1_e4_c640",
-                "uir_r1_a5_k0_s1_e4_c640",
-                "uir_r1_a5_k0_s1_e4_c640",
-                "uir_r1_a5_k0_s1_e4_c640",
-                "uir_r1_a5_k0_s1_e4_c640",
-                "uir_r1_a0_k0_s1_e1_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-                "mqa_r1_k3_h12_v2_s1_d64_c640",
-                "uir_r1_a0_k0_s1_e2_c640",
-            ],
-            # Stage 3: 1280x1280 in
-            [
-                "uir_r1_a5_k5_s2_e6_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-                "mqa_r1_k3_h16_s1_d96_c1280",
-                "uir_r1_a0_k0_s1_e2_c1280",
-            ],
-        ]
-
-
 def parse_block_def(block_str):
-    """ Decode block definition string
+    """Decode block definition string.
 
     Gets a list of block arg (dicts) through a string notation of arguments.
     E.g. ir_r2_k3_s2_e1_i32_o16_se0.25_noskip
@@ -665,199 +638,258 @@ def parse_block_def(block_str):
         ValueError: if the string def not properly specified (TODO)
     """
     assert isinstance(block_str, str)
-    
+
     def _parse_ksize(ss):
         if ss.isdigit():
             return int(ss)
         else:
-            return [int(k) for k in ss.split('.')]
+            return [int(k) for k in ss.split(".")]
 
-    ops = block_str.split('_')
+    ops = block_str.split("_")
     block_type = ops[0]  # take the block type off the front
     ops = ops[1:]
     options = {}
     skip = None
     for op in ops:
         # string options being checked on individual basis, combine if they grow
-        if op == 'noskip':
+        if op == "noskip":
             skip = False  # force no skip connection
-        elif op == 'skip':
+        elif op == "skip":
             skip = True  # force a skip connection
-        elif op.startswith('n'):
+        elif op.startswith("n"):
             # activation fn
             key = op[0]
             v = op[1:]
-            if v == 're':
-                value = 'relu'
-            elif v == 'r6':
-                value = 'relu6'
-            elif v == 'hs':
-                value = 'hard_swish'
-            elif v == 'sw':
-                value = 'swish'
-            elif v == 'mi':
-                value = 'mish'
+            if v == "re":
+                value = "relu"
+            elif v == "r6":
+                value = "relu6"
+            elif v == "hs":
+                value = "hard_swish"
+            elif v == "sw":
+                value = "swish"
+            elif v == "mi":
+                value = "mish"
             else:
                 continue
             options[key] = value
         else:
             # all numeric options
-            splits = re.split(r'(\d.*)', op)
+            splits = re.split(r"(\d.*)", op)
             if len(splits) >= 2:
                 key, value = splits[:2]
                 options[key] = value
 
     # if act_layer is None, the model default (passed to model init) will be used
-    act_layer = options['n'] if 'n' in options else None
-    start_kernel_size = _parse_ksize(options['a']) if 'a' in options else 1
-    end_kernel_size = _parse_ksize(options['p']) if 'p' in options else 1
-    force_in_chs = int(options['fc']) if 'fc' in options else 0  # FIXME hack to deal with in_chs issue in TPU def
-    num_repeat = int(options['r'])
+    act_layer = options["n"] if "n" in options else None
+    start_kernel_size = _parse_ksize(options["a"]) if "a" in options else 1
+    end_kernel_size = _parse_ksize(options["p"]) if "p" in options else 1
+    # FIXME hack to deal with in_chs issue in TPU def
+    force_in_chs = int(options["fc"]) if "fc" in options else 0
+    num_repeat = int(options["r"])
 
     # each type of block has different valid arguments, fill accordingly
     block_args = dict(
         block_type=block_type,
-        out_channels=int(options['c']),
-        stride=int(options['s']),
+        out_channels=int(options["c"]),
+        stride=int(options["s"]),
         act_layer=act_layer,
     )
-    if block_type == 'ir':
-        block_args.update(dict(
-            dw_kernel_size=_parse_ksize(options['k']),
-            exp_kernel_size=start_kernel_size,
-            pw_kernel_size=end_kernel_size,
-            exp_ratio=float(options['e']),
-            se_ratio=float(options.get('se', 0.)),
-            noskip=skip is False,
-            s2d=int(options.get('d', 0)) > 0,
-        ))
-        if 'cc' in options:
-            block_args['num_experts'] = int(options['cc'])
-    elif block_type == 'ds' or block_type == 'dsa':
-        block_args.update(dict(
-            dw_kernel_size=_parse_ksize(options['k']),
-            pw_kernel_size=end_kernel_size,
-            se_ratio=float(options.get('se', 0.)),
-            pw_act=block_type == 'dsa',
-            noskip=block_type == 'dsa' or skip is False,
-            s2d=int(options.get('d', 0)) > 0,
-        ))
-    elif block_type == 'er':
-        block_args.update(dict(
-            exp_kernel_size=_parse_ksize(options['k']),
-            pw_kernel_size=end_kernel_size,
-            exp_ratio=float(options['e']),
-            force_in_chs=force_in_chs,
-            se_ratio=float(options.get('se', 0.)),
-            noskip=skip is False,
-        ))
-    elif block_type == 'cn':
-        block_args.update(dict(
-            kernel_size=int(options['k']),
-            skip=skip is True,
-        ))
-    elif block_type == 'uir':
+    if block_type == "ir":
+        block_args.update(
+            dict(
+                dw_kernel_size=_parse_ksize(options["k"]),
+                exp_kernel_size=start_kernel_size,
+                pw_kernel_size=end_kernel_size,
+                exp_ratio=float(options["e"]),
+                se_ratio=float(options.get("se", 0.0)),
+                noskip=skip is False,
+                s2d=int(options.get("d", 0)) > 0,
+            )
+        )
+        if "cc" in options:
+            block_args["num_experts"] = int(options["cc"])
+    elif block_type == "ds" or block_type == "dsa":
+        block_args.update(
+            dict(
+                dw_kernel_size=_parse_ksize(options["k"]),
+                pw_kernel_size=end_kernel_size,
+                se_ratio=float(options.get("se", 0.0)),
+                pw_act=block_type == "dsa",
+                noskip=block_type == "dsa" or skip is False,
+                s2d=int(options.get("d", 0)) > 0,
+            )
+        )
+    elif block_type == "er":
+        block_args.update(
+            dict(
+                exp_kernel_size=_parse_ksize(options["k"]),
+                pw_kernel_size=end_kernel_size,
+                exp_ratio=float(options["e"]),
+                force_in_chs=force_in_chs,
+                se_ratio=float(options.get("se", 0.0)),
+                noskip=skip is False,
+            )
+        )
+    elif block_type == "cn":
+        block_args.update(
+            dict(
+                kernel_size=int(options["k"]),
+                skip=skip is True,
+            )
+        )
+    elif block_type == "uir":
         # override exp / proj kernels for start/end in uir block
-        start_kernel_size = _parse_ksize(options['a']) if 'a' in options else 0
-        end_kernel_size = _parse_ksize(options['p']) if 'p' in options else 0
-        block_args.update(dict(
-            dw_kernel_size_start=start_kernel_size,  # overload exp ks arg for dw start
-            dw_kernel_size_mid=_parse_ksize(options['k']),
-            dw_kernel_size_end=end_kernel_size,  # overload pw ks arg for dw end
-            exp_ratio=float(options['e']),
-            se_ratio=float(options.get('se', 0.)),
-            noskip=skip is False,
-        ))
-    elif block_type == 'mha':
-        kv_dim = int(options['d'])
-        block_args.update(dict(
-            dw_kernel_size=_parse_ksize(options['k']),
-            num_heads=int(options['h']),
-            key_dim=kv_dim,
-            value_dim=kv_dim,
-            kv_stride=int(options.get('v', 1)),
-            noskip=skip is False,
-        ))
-    elif block_type == 'mqa':
-        kv_dim = int(options['d'])
-        block_args.update(dict(
-            dw_kernel_size=_parse_ksize(options['k']),
-            num_heads=int(options['h']),
-            key_dim=kv_dim,
-            value_dim=kv_dim,
-            kv_stride=int(options.get('v', 1)),
-            noskip=skip is False,
-        ))
+        start_kernel_size = _parse_ksize(options["a"]) if "a" in options else 0
+        end_kernel_size = _parse_ksize(options["p"]) if "p" in options else 0
+        block_args.update(
+            dict(
+                dw_kernel_size_start=start_kernel_size,  # overload exp ks arg for dw start
+                dw_kernel_size_mid=_parse_ksize(options["k"]),
+                dw_kernel_size_end=end_kernel_size,  # overload pw ks arg for dw end
+                exp_ratio=float(options["e"]),
+                se_ratio=float(options.get("se", 0.0)),
+                noskip=skip is False,
+            )
+        )
+    elif block_type == "mha":
+        kv_dim = int(options["d"])
+        block_args.update(
+            dict(
+                dw_kernel_size=_parse_ksize(options["k"]),
+                num_heads=int(options["h"]),
+                key_dim=kv_dim,
+                value_dim=kv_dim,
+                kv_stride=int(options.get("v", 1)),
+                noskip=skip is False,
+            )
+        )
+    elif block_type == "mqa":
+        kv_dim = int(options["d"])
+        block_args.update(
+            dict(
+                dw_kernel_size=_parse_ksize(options["k"]),
+                num_heads=int(options["h"]),
+                key_dim=kv_dim,
+                value_dim=kv_dim,
+                kv_stride=int(options.get("v", 1)),
+                noskip=skip is False,
+            )
+        )
     else:
-        assert False, 'Unknown block type (%s)' % block_type
+        assert False, "Unknown block type (%s)" % block_type
 
-    if 'gs' in options:
-        block_args['group_size'] = int(options['gs'])
+    if "gs" in options:
+        block_args["group_size"] = int(options["gs"])
 
     if block_args["act_layer"] is not None:
-        raise ValueError('not support act_layer config')
+        raise ValueError("not support act_layer config")
     else:
         del block_args["act_layer"]
 
     if "force_in_chs" in block_args:
-        if block_args["force_in_chs"] >0:
-            raise ValueError('not support force_in_chs config')
+        if block_args["force_in_chs"] > 0:
+            raise ValueError("not support force_in_chs config")
         else:
             del block_args["force_in_chs"]
 
     if "se_ratio" in block_args:
-        if block_args["se_ratio"] >0:
-            raise ValueError('not support se_ratio config')
+        if block_args["se_ratio"] > 0:
+            raise ValueError("not support se_ratio config")
         else:
             del block_args["se_ratio"]
 
     return [block_args for _ in range(num_repeat)]
 
-def parse_arch_def(arch_def: List[List[str]],in_channels=3, stem_size=64):
+
+def parse_arch_def(
+    arch_def: List[List[str]],
+    in_channels=3,
+    stem_size=64,
+):
     """
     Parse the full MNv5_BASE_ARCH_DEF into a nested list
     of block configs per stage.
     """
-    def act():return ActModels.GELU()
-    def norm():return NormModels.RmsNorm2d(num_features=-1)
 
-    def to_model(parsed,in_channels):
+    def act():
+        return ActModels.GELU()
+
+    def norm():
+        return NormModels.RmsNorm2d(num_features=-1)
+
+    def to_model(parsed, in_channels_):
         res = []
+        in_chs = in_channels_
         for block in parsed:
-            block_type = block['block_type']
-            del block['block_type']
-            block['in_channels']=in_channels
-            if block_type=='er':
-                b = Conv2dModels.EdgeResidual(**block,                                              
-                        conv_exp_layer = Conv2dModels.Conv2dNormAct(in_channels=-1,norm=norm(),act=act()),
-                        conv_pwl_layer = Conv2dModels.Conv2dPointwiseNormAct(in_channels=-1,norm=norm(),act=act()),)
-            elif block_type=='uir':
-                b = Conv2dModels.UniversalInvertedResidual(**block,
-                        conv_dw_start_layer = Conv2dModels.Conv2dDepthwiseNorm(in_channels=-1,norm=norm(),),
-                        conv_pw_exp_layer = Conv2dModels.Conv2dPointwiseNormAct(in_channels=-1,norm=norm(),act=act()),
-                        conv_dw_mid_layer = Conv2dModels.Conv2dDepthwiseNormAct(in_channels=-1,norm=norm(),act=act()),
-                        conv_pw_proj_layer = Conv2dModels.Conv2dPointwiseNorm(in_channels=-1,norm=norm(),),                                        
-                        conv_dw_end_layer = Conv2dModels.Conv2dDepthwiseNorm(in_channels=-1,norm=norm(),),)
-            elif block_type=='mqa':
-                b = Conv2dModels.MobileAttention(**block,use_multi_query=True,
-                                                 norm_layer=norm(),
-                                                 conv_cpe_layer=Conv2dModels.Conv2dDepthwise(in_channels=-1))
-            in_channels = b.out_channels
+            block_type = block["block_type"]
+            del block["block_type"]
+            block["in_channels"] = in_chs
+            if block_type == "er":
+                b = Conv2dModels.EdgeResidual(
+                    **block,
+                    conv_exp_layer=Conv2dModels.Conv2dNormAct(
+                        in_channels=-1,
+                        norm=norm(),
+                        act=act(),
+                    ),
+                    conv_pwl_layer=Conv2dModels.Conv2dPointwiseNormAct(
+                        in_channels=-1,
+                        norm=norm(),
+                        act=act(),
+                    ),
+                )
+            elif block_type == "uir":
+                b = Conv2dModels.UniversalInvertedResidual(
+                    **block,
+                    conv_dw_start_layer=Conv2dModels.Conv2dDepthwiseNorm(
+                        in_channels=-1,
+                        norm=norm(),
+                    ),
+                    conv_pw_exp_layer=Conv2dModels.Conv2dPointwiseNormAct(
+                        in_channels=-1,
+                        norm=norm(),
+                        act=act(),
+                    ),
+                    conv_dw_mid_layer=Conv2dModels.Conv2dDepthwiseNormAct(
+                        in_channels=-1,
+                        norm=norm(),
+                        act=act(),
+                    ),
+                    conv_pw_proj_layer=Conv2dModels.Conv2dPointwiseNorm(
+                        in_channels=-1,
+                        norm=norm(),
+                    ),
+                    conv_dw_end_layer=Conv2dModels.Conv2dDepthwiseNorm(
+                        in_channels=-1,
+                        norm=norm(),
+                    ),
+                )
+            elif block_type == "mqa":
+                b = Conv2dModels.MobileAttention(
+                    **block,
+                    use_multi_query=True,
+                    norm_layer=norm(),
+                    conv_cpe_layer=Conv2dModels.Conv2dDepthwise(in_channels=-1),
+                )
+            else:
+                raise ValueError(f"Unsupported block_type: {block_type}")
+            in_chs = b.out_channels
             res.append(b.build())
-        return res,in_channels
-    
+        return res, in_chs
+
     model = nn.Sequential()
     info = []
     in_channels = stem_size
-    for i,stage in enumerate(arch_def):        
-        info.append(dict(stage=i,num_chs=in_channels))
+    for i, stage in enumerate(arch_def):
+        info.append(dict(stage=i, num_chs=in_channels))
         parsed_stage = []
         for block in [parse_block_def(b) for b in stage]:
             parsed_stage += block
-        m,in_channels = to_model(parsed_stage,in_channels)
+        m, in_channels = to_model(parsed_stage, in_channels)
         blocks = nn.Sequential(*m)
-        model.add_module(f'blocks_{i}',blocks)
-    return model,info
+        model.add_module(f"{i}", blocks)
+    return model, info
 
 
 # Example usage:
@@ -886,6 +918,7 @@ model = MobileNetV5Backbone(
 
 
 def make_mobilenetv5_teacher(size="300m",dataset=None,num_classes=None,device="cpu",pretrained=True):
+    import timm
     model = timm.create_model('mobilenetv5_300m.gemma3n', pretrained=True)
     model = model.eval().to(device=device)
     return model
@@ -953,9 +986,9 @@ class LitMobileNetV5KD(LitBit):
         # print(teacher(x).shape)
 
         # pick robust hint tap points via timm feature_info
-        hint_points = [("backbone.blocks.0","blocks.0"), ("backbone.blocks.1","blocks.1"),
-                       ("backbone.blocks.2","blocks.2"), ("backbone.blocks.3","blocks.3"),
-                       ("backbone.msfa","msfa")]
+        hint_points = [("blocks.0","blocks.0"), ("blocks.1","blocks.1"),
+                       ("blocks.2","blocks.2"), ("blocks.3","blocks.3"),
+                       ("msfa","msfa")]
 
         super().__init__(
             lr, wd, epochs, label_smoothing,

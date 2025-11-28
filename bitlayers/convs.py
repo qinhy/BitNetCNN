@@ -1037,25 +1037,17 @@ class Conv2dModules:
 
         def forward(self, x):
             shortcut = x
-            print('UniversalInvertedResidual forward',x.shape)
             x = self.dw_start(x)
-            print('UniversalInvertedResidual dw_start',x.shape)
             if self._aa_after == "start" and self.aa is not None:
                 x = self.aa(x)
             x = self.pw_exp(x)
-            print('UniversalInvertedResidual pw_exp',x.shape)
             x = self.dw_mid(x)
-            print('UniversalInvertedResidual dw_mid',x.shape)
             if self._aa_after == "mid" and self.aa is not None:
                 x = self.aa(x)
             x = self.se(x)
-            print('UniversalInvertedResidual se',x.shape)
             x = self.pw_proj(x)
-            print('UniversalInvertedResidual pw_proj',x.shape)
             x = self.dw_end(x)
-            print('UniversalInvertedResidual dw_end',x.shape)
             x = self.layer_scale(x)
-            print('UniversalInvertedResidual layer_scale',x.shape)
             if self.has_skip:
                 x = self.drop_path(x) + shortcut
             return x
