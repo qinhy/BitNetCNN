@@ -2,10 +2,30 @@
 Common utilities for BitNetCNN implementations.
 This module contains shared components used across different BitNet model implementations.
 """
+import collections
+from itertools import repeat
 import math
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from bitlayers.padding import PadSame, get_padding_value, pad_same
+def _ntuple(n, name="parse"):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable):
+            return tuple(x)
+        return tuple(repeat(x, n))
+
+    parse.__name__ = name
+    return parse
+
+
+_single = _ntuple(1, "_single")
+to_2tuple = _pair = _ntuple(2, "_pair")
+_triple = _ntuple(3, "_triple")
+_quadruple = _ntuple(4, "_quadruple")
+
 # Constants
 EPS = 1e-12
 
@@ -129,6 +149,72 @@ class Bit:
             weight = Bit.functional.bit1p58_weight(weight, dim, scale_op)
             return F.linear(input, weight, bias)
 
+    class CommonConv2d(nn.Module):        
+        def __init__(
+            self,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=1,
+            padding=0,          # can be int, tuple, 'same', 'valid'
+            padding_mode="zeros",
+            dilation=1,
+            groups=1,
+            bias=True,
+            scale_op="median",
+        ):
+            super().__init__()
+            kh, kw = to_2tuple(kernel_size)
+            self.in_channels = in_channels
+            self.out_channels = out_channels
+            self.kernel_size = (kh, kw)
+            self.stride = to_2tuple(stride)
+            self.dilation = to_2tuple(dilation)
+            self.padding = padding
+            self.padding_mode = padding_mode
+            self.scale_op = scale_op
+
+            # resolve padding (static vs dynamic 'same')
+            self.padding_value, self.dynamic_pad = get_padding_value(
+                padding,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                dilation=self.dilation,
+            )
+
+            # Optional: set up PadSame if needed
+            if self.dynamic_pad:
+                self.pad_layer = PadSame(self.kernel_size, self.stride, self.dilation)
+            else:
+                self.pad_layer = None
+
+            self.groups = groups
+
+            self.init_weights(bias)
+
+        def get_weights(self)->torch.Tensor:
+            pass
+        def init_weights(self,bias):
+            self.bias = bias
+            pass
+            # # weights
+            # self.weight = nn.Parameter(torch.empty(out_channels, in_channels // groups, kh, kw))
+            # nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
+            # self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
+            # self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
+
+        def forward(self, x:torch.Tensor, w=None):
+            if w is None:
+                w = self.get_weights()
+
+            # dynamic SAME padding_value if required
+            if self.dynamic_pad:
+                x = self.pad_layer(x)
+                padding_value = 0
+            else:
+                padding_value = self.padding_value
+                
+            return F.conv2d(x, w, self.bias, self.stride, padding_value, self.dilation, self.groups)
     # ----------------------------
     # Fake-quant building blocks (QAT) — activation quantization removed
     # ----------------------------
@@ -159,12 +245,20 @@ class Bit:
             w_q: torch.Tensor,
             s: torch.Tensor,
             bias,
+            kernel_size,
             stride=1,
             padding=0,
             dilation=1,
             groups=1,
+            padding_mode: str = "zeros",
         ):
             super().__init__()
+            self.kernel_size = kernel_size
+            self.stride = to_2tuple(stride)
+            self.dilation = to_2tuple(dilation)
+            self.padding = padding
+            self.padding_mode = padding_mode
+
             # Make them Parameters so param counters include them (but keep frozen)
             self.w_q = nn.Parameter(w_q.to(torch.int8), requires_grad=False)  # [out,in,kh,kw]
             self.s = nn.Parameter(s, requires_grad=False)  # [out,1,1]
@@ -173,23 +267,42 @@ class Bit:
             else:
                 self.bias = nn.Parameter(bias, requires_grad=False)
 
-            self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
             # Optional cache for the float view (not in state_dict, not counted as param)
             self.register_buffer("_w_q_float", None, persistent=False)
+
+            # resolve padding (static vs dynamic 'same')
+            self.padding_value, self.dynamic_pad = get_padding_value(
+                padding,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                dilation=self.dilation,
+            )
+            
+            # Optional: set up PadSame if needed
+            if self.dynamic_pad:
+                self.pad_layer = PadSame(self.kernel_size, self.stride, self.dilation)
+            else:
+                self.pad_layer = None
+
+            self.groups = groups
 
         def _weight(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
             if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
                 self._w_q_float = self.w_q.to(device=device, dtype=dtype)
             return self._w_q_float
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            w = self._weight(x.dtype, x.device)
-            y = F.conv2d(x, w, None, self.stride, self.padding, self.dilation, self.groups)
-            y = y * self.s.to(dtype=y.dtype, device=y.device)
-            if self.bias is not None:
-                y = y + self.bias.to(dtype=y.dtype, device=y.device).view(1, -1, 1, 1)
-            return y
+        def forward(self, x:torch.Tensor):
+            wq = self._weight(x.dtype, x.device)
 
+            # dynamic SAME padding_value if required
+            if self.dynamic_pad:
+                x = self.pad_layer(x)
+                padding_value = 0
+            else:
+                padding_value = self.padding_value
+                
+            return F.conv2d(x, wq, self.bias, self.stride, padding_value, self.dilation, self.groups,)
+        
     class LinearInfer(nn.Module):
         """Frozen ternary linear: y = (x @ Wq^T) * s + b"""
         def __init__(self, w_q: torch.Tensor, s: torch.Tensor, bias):
@@ -219,59 +332,20 @@ class Bit:
     # ----------------------------
     # Train-time modules (no BatchNorm), activation quantization removed
     # ----------------------------
-    class Conv2d(nn.Module):
-        """
-        Conv2d with ternary weights (fake-quant for training).
-        No BatchNorm inside. Add your own nonlinearity outside if desired.
-        """
-        def __init__(
-            self,
-            in_channels: int,
-            out_channels: int,
-            kernel_size,
-            stride=1,
-            padding=0,
-            padding_mode: str = "zeros",
-            dilation=1,
-            groups=1,
-            bias: bool = True,
-            scale_op: str = "median",
-        ):
-            super().__init__()
-            if not isinstance(padding_mode, str):
-                raise TypeError("padding_mode must be string, e.g. 'zeros', 'reflect', 'replicate', or 'circular'")
-            if isinstance(kernel_size, int):
-                kh = kw = kernel_size
-            else:
-                kh, kw = kernel_size
-            self.weight = nn.Parameter(torch.empty(out_channels, in_channels // groups, kh, kw))
+    class Conv2d(CommonConv2d):
+
+        def get_weights(self)->torch.Tensor:
+            wq = self.w_q(self.weight)
+            return wq
+        
+        def init_weights(self,bias):
+            # weights
+            kh, kw = self.kernel_size
+            self.weight = nn.Parameter(torch.empty(self.out_channels, self.in_channels // self.groups, kh, kw))
             nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
-            self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
-            self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
-            self.in_channels, self.out_channels, self.kernel_size = in_channels, out_channels, kernel_size
-            self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
-            self.padding_mode, self.scale_op = padding_mode, scale_op
-
-        def forward(self, x: torch.Tensor, weight=None) -> torch.Tensor:
-            weight = self.weight if weight is None else weight
-            wq = self.w_q(weight)
-
-            # Handle padding_mode like nn.Conv2d
-            if self.padding_mode != "zeros" and self.padding != 0:
-                if isinstance(self.padding, int):
-                    pad = (self.padding, self.padding, self.padding, self.padding)
-                elif isinstance(self.padding, tuple) and len(self.padding) == 2:
-                    pad_h, pad_w = self.padding
-                    pad = (pad_w, pad_w, pad_h, pad_h)
-                else:
-                    raise ValueError(f"Unsupported padding={self.padding} for padding_mode='{self.padding_mode}'")
-                x = F.pad(x, pad, mode=self.padding_mode)
-                padding_eff = 0
-            else:
-                padding_eff = self.padding
-
-            return F.conv2d(x, wq, self.bias, self.stride, padding_eff, self.dilation, self.groups)
-
+            self.bias = nn.Parameter(torch.zeros(self.out_channels)) if bias else None
+            self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=self.scale_op)
+        
         @torch.no_grad()
         def to_ternary(self):
             """
@@ -292,8 +366,10 @@ class Bit:
                 padding=self.padding,
                 dilation=self.dilation,
                 groups=self.groups,
+                kernel_size=self.kernel_size,
+                padding_mode=self.padding_mode,
             )
-
+            
     class Linear(nn.Module):
         def __init__(self, in_f: int, out_f: int, bias: bool = True, scale_op: str = "median"):
             super().__init__()

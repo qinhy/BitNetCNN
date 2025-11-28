@@ -3,23 +3,19 @@ from __future__ import annotations
 import json
 from typing import Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from torch import nn
 import torch
 
+from .base import CommonModel, CommonModule
 from .acts import ActModels
 from .bit import Bit
 from .norms import NormModels
 
 
 class LinearModels:
-    class BasicModel(BaseModel):
-        bit: bool = True
-        scale_op: str = "median"
-
-        def build(self):
-            mod = LinearModules
-            return mod.__dict__[f'{self.__class__.__name__}'](self)
+    class BasicModel(CommonModel):
+        def build(self): return self._build(self,LinearModules)
 
     class Linear(BasicModel):
         in_features: int
@@ -30,13 +26,13 @@ class LinearModels:
         scale_op: str = "median"
 
     class LinearBn(Linear):
-        bn: NormModels.type
+        norm: NormModels.type
 
     class LinearAct(Linear):
         act: ActModels.type
 
     class LinearBnAct(Linear):
-        bn: NormModels.type
+        norm: NormModels.type
         act: ActModels.type
 
     class LayerScale2d(BaseModel):
@@ -52,19 +48,9 @@ class LinearModels:
 
 
 class LinearModules:
-    class Module(nn.Module):
-        def __init__(self, para: BaseModel, para_cls):
-            if isinstance(para, dict):
-                para = para_cls(**para)
-            self.para = json.loads(para.model_dump_json())
-            super().__init__()
-
-        @torch.no_grad()
-        def to_ternary(self,mods=[]):
-            for m in mods:
-                if self.__dict__[m] and hasattr(self.__dict__[m],'to_ternary'):
-                    setattr(self,m,self.__dict__[m].to_ternary())
-            return self
+    class Module(CommonModule):
+        def __init__(self, para, para_cls=None):
+            super().__init__(para, LinearModels, para_cls)
 
     class Linear(Module):
         def __init__(self, para: LinearModels.Linear, para_cls=LinearModels.Linear):
@@ -93,14 +79,14 @@ class LinearModules:
     class LinearBn(Linear):
         def __init__(self, para: LinearModels.LinearBn, para_cls=LinearModels.LinearBn):
             super().__init__(para, para_cls)
-            self.bn = para.bn.build()
+            self.norm = para.norm.build()
 
         def forward(self, x):
-            return self.bn(super().forward(x))
+            return self.norm(super().forward(x))
 
         @torch.no_grad()
         def to_ternary(self):
-            return nn.Sequential(super().to_ternary(),self.bn)
+            return nn.Sequential(super().to_ternary(),self.norm)
 
     class LinearAct(Linear):
         def __init__(self, para: LinearModels.LinearAct, para_cls=LinearModels.LinearAct):
@@ -117,15 +103,15 @@ class LinearModules:
     class LinearBnAct(Linear):
         def __init__(self, para: LinearModels.LinearBnAct, para_cls=LinearModels.LinearBnAct):
             super().__init__(para, para_cls)
-            self.bn = para.bn.build()
+            self.norm = para.norm.build()
             self.act = para.act.build()
 
         def forward(self, x):
-            return self.act(self.bn(super().forward(x)))
+            return self.act(self.norm(super().forward(x)))
 
         @torch.no_grad()
         def to_ternary(self):
-            return nn.Sequential(super().to_ternary(),self.bn,self.act)
+            return nn.Sequential(super().to_ternary(),self.norm,self.act)
 
     class LayerScale2d(Module):
         def __init__(self, para: LinearModels.LayerScale2d, para_cls=LinearModels.LayerScale2d):

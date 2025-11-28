@@ -17,13 +17,13 @@ def _make_divisible(v, divisor=8, min_value=None):
         new_v += divisor
     return new_v
 
-ConvBNActBit = convs.Conv2dModels.Conv2dBnAct
+ConvBNActBit = convs.Conv2dModels.Conv2dNormAct
 # class ConvBNActBit(nn.Module):
 #     def __init__(self, in_ch, out_ch, k, s, p, groups=1, scale_op="median", act="silu"):
 #         super().__init__()
 #         self.conv = Bit.Conv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
 #                               groups=groups, scale_op=scale_op)
-#         self.bn   = nn.BatchNorm2d(out_ch)
+#         self.norm   = nn.BatchNorm2d(out_ch)
 #         if act == "relu6":
 #             self.act = nn.ReLU6(inplace=True)
 #         elif act == "silu":
@@ -31,7 +31,7 @@ ConvBNActBit = convs.Conv2dModels.Conv2dBnAct
 #         else:
 #             self.act = nn.Identity()
 #     def forward(self, x):
-#         return self.act(self.bn(self.conv(x)))
+#         return self.act(self.norm(self.conv(x)))
 
 InvertedResidualBit = convs.Conv2dModels.InvertedResidual
 # class InvertedResidualBit(nn.Module):
@@ -84,7 +84,7 @@ class BitMobileNetV2(nn.Module):
 
         self.stem = ConvBNActBit(in_channels=in_ch,out_channels=input_channel,
                                  kernel_size=3,stride=1,padding=1,scale_op=scale_op,
-                                 bn=NormModels.BatchNorm2d(num_features=-1),
+                                 norm=NormModels.BatchNorm2d(num_features=-1),
                                  act=act).build()
 
         features = []
@@ -103,7 +103,7 @@ class BitMobileNetV2(nn.Module):
 
         self.head_conv = ConvBNActBit(in_channels=input_channel,out_channels=last_channel,
                                  kernel_size=1,stride=1,padding=0,scale_op=scale_op,
-                                 bn=NormModels.BatchNorm2d(num_features=-1),
+                                 norm=NormModels.BatchNorm2d(num_features=-1),
                                  act=act).build()
         
         self.pool       = nn.AdaptiveAvgPool2d(1)

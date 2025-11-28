@@ -56,11 +56,11 @@ class BitConv(nn.Module):
         if p is None:
             p = k // 2
         self.conv = Bit.Conv2d(c1, c2, k, stride=s, padding=p, groups=g, bias=False, scale_op=scale_op)
-        self.bn = nn.BatchNorm2d(c2)
+        self.norm = nn.BatchNorm2d(c2)
         self.act = nn.SiLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.act(self.bn(self.conv(x)))
+        return self.act(self.norm(self.conv(x)))
 
 
 class BitBottleneck(nn.Module):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 import argparse
 from functools import partial
+import json
+import re
 from typing import List, Sequence, Union, Optional
 
 import timm
@@ -8,7 +10,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from common_utils import CIFAR100DataModule, ImageNetDataModule, LitBit, TinyImageNetDataModule, add_common_args, setup_trainer, summ
+from typing import Dict, Any, List
+
+from bitlayers.convs import Conv2dModels
+from bitlayers.norms import NormModels
+from bitlayers.acts import ActModels
+from common_utils import CIFAR100DataModule, ImageNetDataModule, LitBit, TinyImageNetDataModule, add_common_args, convert_to_ternary, setup_trainer, summ
 from timmlayers import ConvNormAct, RmsNorm2d
 from timmlayers.bit import Bit
 from timmlayers.efficientnet_blocks import SqueezeExcite, UniversalInvertedResidual
@@ -47,7 +54,6 @@ def _take_indices(num: int, indices: Optional[Union[int, Sequence[int]]]):
             raise IndexError(f"index {idx} out of range for length {num}")
         out.append(idx)
     return out
-
 
 class MobileNetV5MultiScaleFusionAdapter(nn.Module):
     def __init__(
@@ -128,7 +134,6 @@ class MobileNetV5MultiScaleFusionAdapter(nn.Module):
         x = self.norm(x)
         return x
 
-
 class MobileNetV5Backbone(nn.Module):
     """
     MobileNetV5-style encoder built on top of EfficientNetBuilder
@@ -159,17 +164,31 @@ class MobileNetV5Backbone(nn.Module):
         if channel_multiplier < 1.0:
             stem_size = round_chs_fn(stem_size)
 
-        self.conv_stem = ConvNormAct(
-            in_chans,
-            stem_size,
+        # self.conv_stem = ConvNormAct(
+        #     in_chans,
+        #     stem_size,
+        #     kernel_size=3,
+        #     stride=2,
+        #     padding=pad_type,
+        #     bias=True,
+        #     norm_layer=norm_layer,
+        #     act_layer=act_layer,
+        #     **dd,
+        # )
+        
+        self.conv_stem = Conv2dModels.Conv2dNormAct(
+            in_channels=in_chans,
+            out_channels=stem_size,
             kernel_size=3,
             stride=2,
             padding=pad_type,
             bias=True,
-            norm_layer=norm_layer,
-            act_layer=act_layer,
-            **dd,
-        )
+            norm=NormModels.RmsNorm2d(num_features=-1),
+            act=ActModels.GELU(),
+        ).build()
+
+        
+        parsed_arch,info = parse_arch_def(arch_def)
 
         # ---- blocks via EfficientNetBuilder ----
         block_args = decode_arch_def(arch_def)
@@ -189,8 +208,9 @@ class MobileNetV5Backbone(nn.Module):
         )
 
         # builder(...) returns a list of stage-sequentials; wrap in nn.Sequential
-        self.blocks = nn.Sequential(*builder(stem_size, block_args))
-        self.feature_info = builder.features  # list of dicts with 'stage', 'num_chs', ...
+        self.blocks = parsed_arch#
+        # self.blocks = nn.Sequential(*builder(stem_size, block_args))
+        self.feature_info = info # builder.features  # list of dicts with 'stage', 'num_chs', ...
 
         # 1) choose which entries in feature_info we want to fuse
         if msfa_indices is None:
@@ -227,14 +247,18 @@ class MobileNetV5Backbone(nn.Module):
 
         # stage_id 0 = stem output
         stage_id = 0
+        print('################x',0,x.shape)
         x = self.conv_stem(x)
+        print(f'################conv_stem,{self.conv_stem.conv.padding}',0,x.shape)
         if stage_id in self.msfa_stage_ids:
             intermediates.append(x)
 
         # each child of self.blocks is a *stage* (nn.Sequential of blocks)
         for blk in self.blocks:
             stage_id += 1
+            print('################s',stage_id,x.shape)
             x = blk(x)
+            print('################e',stage_id,x.shape)
             if stage_id in self.msfa_stage_ids:
                 intermediates.append(x)
 
@@ -242,12 +266,12 @@ class MobileNetV5Backbone(nn.Module):
         # print(len(intermediates), "features for MSFA")
         # assert len(intermediates) == len(self.msfa_stage_ids)
 
+        print('########msfa########')
         x = self.msfa(intermediates)
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_features(x)
-
 
 class MobileNetV5Classifier(nn.Module):
     """
@@ -319,59 +343,55 @@ class MobileNetV5Classifier(nn.Module):
         )
 
 MNv5_TINY_ARCH_DEF: list[list[str]] = [
-    # Stage 0: 128x128 in
-    # Keep only the initial downsampling block
+
     [
         'er_r1_k3_s2_e4_c128',
     ],
 
-    # Stage 1: 256x256 in
-    # Keep downsample + 1 follow-up block
+
     [
         'uir_r1_a3_k5_s2_e6_c256',
         'uir_r1_a5_k0_s1_e4_c256',
     ],
 
-    # Stage 2: 640x640 in
-    # Keep first conv, a light conv, and a single (MQA + UIR) pair
-    [
-        "uir_r1_a5_k5_s2_e6_c512",   # main downsample
-        "uir_r1_a0_k0_s1_e1_c512",   # lightweight conv
 
-        'mqa_r1_k3_h8_s2_d64_c512',  # one attention block
-        "uir_r1_a0_k0_s1_e2_c512",   # follow-up conv
-        "uir_r1_a0_k0_s1_e2_c512",   # extra conv depth (still cheap)
+    [
+        "uir_r1_a5_k5_s2_e6_c512",   
+        "uir_r1_a0_k0_s1_e1_c512",   
+
+        'mqa_r1_k3_h8_s2_d64_c512',  
+        "uir_r1_a0_k0_s1_e2_c512",   
+        "uir_r1_a0_k0_s1_e2_c512",   
     ],
 
-    # Stage 3: 1280x1280 in
-    # Keep downsample + 1 MQA + 2 light convs
-    [
-        "uir_r1_a5_k5_s2_e6_c1024",      # downsample
 
-        'mqa_r1_k3_h16_s1_d64_c1024',    # single MQA at top
-        "uir_r1_a0_k0_s1_e2_c1024",      # conv
-        "uir_r1_a0_k0_s1_e2_c1024",      # one more conv for a bit of depth
+    [
+        "uir_r1_a5_k5_s2_e6_c1024",
+
+        'mqa_r1_k3_h16_s1_d64_c1024',
+        "uir_r1_a0_k0_s1_e2_c1024",  
+        "uir_r1_a0_k0_s1_e2_c1024",  
     ],
 ]
 
 MNv5_SMALL_ARCH_DEF: list[list[str]] = [
-    # Stage 0: 128x128 in
-    # Keep first s2 block + 1 repeat
+
+
     [
         'er_r1_k3_s2_e4_c128',
         'er_r1_k3_s1_e4_c128',
     ],
 
-    # Stage 1: 256x256 in
-    # Keep downsample + two follow-up blocks (drop 2 repeats)
+
+
     [
         'uir_r1_a3_k5_s2_e6_c256',
         'uir_r1_a5_k0_s1_e4_c256',
         'uir_r1_a3_k0_s1_e4_c256',
     ],
 
-    # Stage 2: 640x640 in
-    # Keep first conv sequence and only 3 (MQA + UIR) pairs instead of 6
+
+
     [
         "uir_r1_a5_k5_s2_e6_c512",
         "uir_r1_a5_k0_s1_e4_c512",
@@ -387,8 +407,8 @@ MNv5_SMALL_ARCH_DEF: list[list[str]] = [
         "uir_r1_a0_k0_s1_e2_c512",
     ],
 
-    # Stage 3: 1280x1280 in
-    # Keep the first downsample + 3 (MQA + UIR) pairs instead of 7
+
+
     [
         "uir_r1_a5_k5_s2_e6_c1024",
 
@@ -618,18 +638,251 @@ MNv5_300M_ARCH_DEF: list[list[str]] = [
             ],
         ]
 
-# model = MobileNetV5Backbone(
-#     arch_def=MNv5_BASE_ARCH_DEF,
-#     in_chans=3,
-#     stem_size=64,
-#     channel_multiplier=1.0,
-#     msfa_output_resolution=16,    # final H=W=16
-# )
 
-# x = torch.randn(1, 3, 256, 256)
+def parse_block_def(block_str):
+    """ Decode block definition string
+
+    Gets a list of block arg (dicts) through a string notation of arguments.
+    E.g. ir_r2_k3_s2_e1_i32_o16_se0.25_noskip
+
+    All args can exist in any order with the exception of the leading string which
+    is assumed to indicate the block type.
+
+    leading string - block type (
+      ir = InvertedResidual, ds = DepthwiseSep, dsa = DeptwhiseSep with pw act, cn = ConvBnAct)
+    r - number of repeat blocks,
+    k - kernel size,
+    s - strides (1-9),
+    e - expansion ratio,
+    c - output channels,
+    se - squeeze/excitation ratio
+    n - activation fn ('re', 'r6', 'hs', or 'sw')
+    Args:
+        block_str: a string representation of block arguments.
+    Returns:
+        A list of block args (dicts)
+    Raises:
+        ValueError: if the string def not properly specified (TODO)
+    """
+    assert isinstance(block_str, str)
+    
+    def _parse_ksize(ss):
+        if ss.isdigit():
+            return int(ss)
+        else:
+            return [int(k) for k in ss.split('.')]
+
+    ops = block_str.split('_')
+    block_type = ops[0]  # take the block type off the front
+    ops = ops[1:]
+    options = {}
+    skip = None
+    for op in ops:
+        # string options being checked on individual basis, combine if they grow
+        if op == 'noskip':
+            skip = False  # force no skip connection
+        elif op == 'skip':
+            skip = True  # force a skip connection
+        elif op.startswith('n'):
+            # activation fn
+            key = op[0]
+            v = op[1:]
+            if v == 're':
+                value = 'relu'
+            elif v == 'r6':
+                value = 'relu6'
+            elif v == 'hs':
+                value = 'hard_swish'
+            elif v == 'sw':
+                value = 'swish'
+            elif v == 'mi':
+                value = 'mish'
+            else:
+                continue
+            options[key] = value
+        else:
+            # all numeric options
+            splits = re.split(r'(\d.*)', op)
+            if len(splits) >= 2:
+                key, value = splits[:2]
+                options[key] = value
+
+    # if act_layer is None, the model default (passed to model init) will be used
+    act_layer = options['n'] if 'n' in options else None
+    start_kernel_size = _parse_ksize(options['a']) if 'a' in options else 1
+    end_kernel_size = _parse_ksize(options['p']) if 'p' in options else 1
+    force_in_chs = int(options['fc']) if 'fc' in options else 0  # FIXME hack to deal with in_chs issue in TPU def
+    num_repeat = int(options['r'])
+
+    # each type of block has different valid arguments, fill accordingly
+    block_args = dict(
+        block_type=block_type,
+        out_channels=int(options['c']),
+        stride=int(options['s']),
+        act_layer=act_layer,
+    )
+    if block_type == 'ir':
+        block_args.update(dict(
+            dw_kernel_size=_parse_ksize(options['k']),
+            exp_kernel_size=start_kernel_size,
+            pw_kernel_size=end_kernel_size,
+            exp_ratio=float(options['e']),
+            se_ratio=float(options.get('se', 0.)),
+            noskip=skip is False,
+            s2d=int(options.get('d', 0)) > 0,
+        ))
+        if 'cc' in options:
+            block_args['num_experts'] = int(options['cc'])
+    elif block_type == 'ds' or block_type == 'dsa':
+        block_args.update(dict(
+            dw_kernel_size=_parse_ksize(options['k']),
+            pw_kernel_size=end_kernel_size,
+            se_ratio=float(options.get('se', 0.)),
+            pw_act=block_type == 'dsa',
+            noskip=block_type == 'dsa' or skip is False,
+            s2d=int(options.get('d', 0)) > 0,
+        ))
+    elif block_type == 'er':
+        block_args.update(dict(
+            exp_kernel_size=_parse_ksize(options['k']),
+            pw_kernel_size=end_kernel_size,
+            exp_ratio=float(options['e']),
+            force_in_chs=force_in_chs,
+            se_ratio=float(options.get('se', 0.)),
+            noskip=skip is False,
+        ))
+    elif block_type == 'cn':
+        block_args.update(dict(
+            kernel_size=int(options['k']),
+            skip=skip is True,
+        ))
+    elif block_type == 'uir':
+        # override exp / proj kernels for start/end in uir block
+        start_kernel_size = _parse_ksize(options['a']) if 'a' in options else 0
+        end_kernel_size = _parse_ksize(options['p']) if 'p' in options else 0
+        block_args.update(dict(
+            dw_kernel_size_start=start_kernel_size,  # overload exp ks arg for dw start
+            dw_kernel_size_mid=_parse_ksize(options['k']),
+            dw_kernel_size_end=end_kernel_size,  # overload pw ks arg for dw end
+            exp_ratio=float(options['e']),
+            se_ratio=float(options.get('se', 0.)),
+            noskip=skip is False,
+        ))
+    elif block_type == 'mha':
+        kv_dim = int(options['d'])
+        block_args.update(dict(
+            dw_kernel_size=_parse_ksize(options['k']),
+            num_heads=int(options['h']),
+            key_dim=kv_dim,
+            value_dim=kv_dim,
+            kv_stride=int(options.get('v', 1)),
+            noskip=skip is False,
+        ))
+    elif block_type == 'mqa':
+        kv_dim = int(options['d'])
+        block_args.update(dict(
+            dw_kernel_size=_parse_ksize(options['k']),
+            num_heads=int(options['h']),
+            key_dim=kv_dim,
+            value_dim=kv_dim,
+            kv_stride=int(options.get('v', 1)),
+            noskip=skip is False,
+        ))
+    else:
+        assert False, 'Unknown block type (%s)' % block_type
+
+    if 'gs' in options:
+        block_args['group_size'] = int(options['gs'])
+
+    if block_args["act_layer"] is not None:
+        raise ValueError('not support act_layer config')
+    else:
+        del block_args["act_layer"]
+
+    if "force_in_chs" in block_args:
+        if block_args["force_in_chs"] >0:
+            raise ValueError('not support force_in_chs config')
+        else:
+            del block_args["force_in_chs"]
+
+    if "se_ratio" in block_args:
+        if block_args["se_ratio"] >0:
+            raise ValueError('not support se_ratio config')
+        else:
+            del block_args["se_ratio"]
+
+    return [block_args for _ in range(num_repeat)]
+
+def parse_arch_def(arch_def: List[List[str]],in_channels=3, stem_size=64):
+    """
+    Parse the full MNv5_BASE_ARCH_DEF into a nested list
+    of block configs per stage.
+    """
+    def act():return ActModels.GELU()
+    def norm():return NormModels.RmsNorm2d(num_features=-1)
+
+    def to_model(parsed,in_channels):
+        res = []
+        for block in parsed:
+            block_type = block['block_type']
+            del block['block_type']
+            block['in_channels']=in_channels
+            if block_type=='er':
+                b = Conv2dModels.EdgeResidual(**block,                                              
+                        conv_exp_layer = Conv2dModels.Conv2dNormAct(in_channels=-1,norm=norm(),act=act()),
+                        conv_pwl_layer = Conv2dModels.Conv2dPointwiseNormAct(in_channels=-1,norm=norm(),act=act()),)
+            elif block_type=='uir':
+                b = Conv2dModels.UniversalInvertedResidual(**block,
+                        conv_dw_start_layer = Conv2dModels.Conv2dDepthwiseNorm(in_channels=-1,norm=norm(),),
+                        conv_pw_exp_layer = Conv2dModels.Conv2dPointwiseNormAct(in_channels=-1,norm=norm(),act=act()),
+                        conv_dw_mid_layer = Conv2dModels.Conv2dDepthwiseNormAct(in_channels=-1,norm=norm(),act=act()),
+                        conv_pw_proj_layer = Conv2dModels.Conv2dPointwiseNorm(in_channels=-1,norm=norm(),),                                        
+                        conv_dw_end_layer = Conv2dModels.Conv2dDepthwiseNorm(in_channels=-1,norm=norm(),),)
+            elif block_type=='mqa':
+                b = Conv2dModels.MobileAttention(**block,use_multi_query=True,
+                                                 norm_layer=norm(),
+                                                 conv_cpe_layer=Conv2dModels.Conv2dDepthwise(in_channels=-1))
+            in_channels = b.out_channels
+            res.append(b.build())
+        return res,in_channels
+    
+    model = nn.Sequential()
+    info = []
+    in_channels = stem_size
+    for i,stage in enumerate(arch_def):        
+        info.append(dict(stage=i,num_chs=in_channels))
+        parsed_stage = []
+        for block in [parse_block_def(b) for b in stage]:
+            parsed_stage += block
+        m,in_channels = to_model(parsed_stage,in_channels)
+        blocks = nn.Sequential(*m)
+        model.add_module(f'blocks_{i}',blocks)
+    return model,info
+
+
+# Example usage:
+# parsed_arch = parse_arch_def(MNv5_300M_ARCH_DEF)
+# print(parsed_arch)
+
+# Now `parsed_arch` is a list[stage][block_cfg_dict]
+
+model = MobileNetV5Backbone(
+    arch_def=MNv5_TINY_ARCH_DEF,
+    in_chans=3,
+    stem_size=64,
+    channel_multiplier=1.0,
+    msfa_output_resolution=16,    # final H=W=16
+)
+
+# summ(model)
+# summ(parse_arch_def(MNv5_TINY_ARCH_DEF)[0])
+# x = torch.randn(1, 3, 64, 64)
 # feat = model(x)
-# print(feat.shape)  # -> [1, 256, 16, 16]
-# info = summ(model,False)
+# print(feat.shape)
+# feat = convert_to_ternary(model)(x)
+# print(feat.shape)
+# # info = summ(model,False)
+# exit()
 
 
 def make_mobilenetv5_teacher(size="300m",dataset=None,num_classes=None,device="cpu",pretrained=True):
@@ -646,7 +899,7 @@ class LitMobileNetV5KD(LitBit):
         self,
         lr, wd, epochs,
         dataset_name='c100',
-        model_size="small",            # 'small'|'medium'|'large' or 'hybrid_medium'|'hybrid_large' (alias: hybrid_medium)
+        model_size="tiny",            # 'small'|'medium'|'large' or 'hybrid_medium'|'hybrid_large' (alias: hybrid_medium)
         label_smoothing=0.1, alpha_kd=0.0, alpha_hint=0.0, T=4.0,
         amp=True, export_dir="./ckpt_mnv5",
         drop_path_rate=0.0,
@@ -693,8 +946,11 @@ class LitMobileNetV5KD(LitBit):
             pretrained=teacher_pretrained
         )
 
-        summ(student)
+        # summ(student)
         # summ(teacher)
+        # x = torch.randn(1, 3, 64, 64)
+        # print(student(x).shape)
+        # print(teacher(x).shape)
 
         # pick robust hint tap points via timm feature_info
         hint_points = [("backbone.blocks.0","blocks.0"), ("backbone.blocks.1","blocks.1"),
@@ -736,7 +992,7 @@ def parse_args_mnv5():
     p.add_argument("--teacher-pretrained", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=True,
                    help="Use ImageNet-pretrained teacher backbone when classes != 1000 (head is replaced).")
 
-    p.set_defaults(out=None,batch_size=16,lr=0.2,alpha_kd=0.0,alpha_hint=0.05)
+    p.set_defaults(out=None,batch_size=4,lr=0.2,alpha_kd=0.0,alpha_hint=0.05)
 
     args = p.parse_args()
     if args.out is None:
