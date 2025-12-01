@@ -828,12 +828,12 @@ def parse_arch_def(
             if block_type == "er":
                 b = Conv2dModels.EdgeResidual(
                     **block,
-                    conv_exp_layer=Conv2dModels.Conv2dNormAct(
+                    conv_pw_exp_layer=Conv2dModels.Conv2dNormAct(
                         in_channels=-1,
                         norm=norm(),
                         act=act(),
                     ),
-                    conv_pwl_layer=Conv2dModels.Conv2dPointwiseNormAct(
+                    conv_pw_layer=Conv2dModels.Conv2dPointwiseNormAct(
                         in_channels=-1,
                         norm=norm(),
                         act=act(),
