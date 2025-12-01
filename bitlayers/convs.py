@@ -232,48 +232,41 @@ class Conv2dModels:
         def valid_model(self):
             self.kernel_size = None
             self.padding = self.__class__._convert_padding(self.padding)
-
-            in_chs_local = self.in_channels
             dw_kernel_local = self.dw_kernel_size
-            pad_type_local = self.padding
-
+            dw_pad_type = self.padding
 
             if self.conv_s2d_layer is not None:
-                sd_chs = int(in_chs_local * 4)
-                self.conv_s2d_layer.in_channels = in_chs_local
-                self.conv_s2d_layer.out_channels = sd_chs
+                self.conv_s2d_layer.in_channels = self.in_channels
+                self.conv_s2d_layer.out_channels = int(self.in_channels * 4)
                 self.conv_s2d_layer.kernel_size = 2
                 self.conv_s2d_layer.stride = 2
                 self.conv_s2d_layer.padding = 'same'
                 self.conv_s2d_layer.bias = self.bias
-
-                dw_kernel_local = (dw_kernel_local + 1) // 2
-                dw_pad_type = 'same' if dw_kernel_local == 2 else pad_type_local
-                in_chs_local = sd_chs
-                use_aa = False  # we already downsampled
+                if dw_kernel_local in (3,4):
+                    dw_pad_type = 'same'
+                # we already downsampled
                 self.aa_layer = None
-            else:
-                dw_pad_type = pad_type_local
 
             use_aa = (self.aa_layer is None)
-                
-            mid_chs = in_chs_local
 
-            self.conv_dw_layer.in_channels = mid_chs
-            self.conv_dw_layer.out_channels = mid_chs
+            in_channels = self.conv_s2d_layer.in_channels if self.conv_s2d_layer else self.in_channels
+
+            # Depthwise conv
+            self.conv_dw_layer.in_channels = in_channels
+            self.conv_dw_layer.out_channels = in_channels
             self.conv_dw_layer.kernel_size = dw_kernel_local
             self.conv_dw_layer.stride = 1 if use_aa else self.stride
-            self.conv_dw_layer.padding = dw_pad_type
+            self.conv_dw_layer.padding = 1 if dw_kernel_local==3 else dw_pad_type
             self.conv_dw_layer.group_size = self.group_size
             self.conv_dw_layer.bias = self.bias
 
             # Pointwise conv
-            self.conv_pw_layer.in_channels = mid_chs
+            self.conv_pw_layer.in_channels = in_channels
             self.conv_pw_layer.out_channels = self.out_channels
             self.conv_pw_layer.kernel_size = self.pw_kernel_size # always 1
             self.conv_pw_layer.stride = 1
             self.conv_pw_layer.padding = self.padding
-            self.conv_dw_layer.groups = 1
+            self.conv_pw_layer.groups = 1
             self.conv_pw_layer.bias = self.bias
             return self
         
@@ -282,7 +275,15 @@ class Conv2dModels:
         exp_ratio: float = 1.0
         exp_kernel_size: int = 1
 
-        conv_pwl_layer: Union['Conv2dModels.Conv2dPointwiseNorm'] = Field(
+        conv_pw_exp_layer: Union['Conv2dModels.Conv2dPointwiseNormAct'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dPointwiseNormAct(
+                in_channels=-1,
+                norm=NormModels.BatchNorm2d(num_features=-1),
+                act=ActModels.ReLU(),
+            )
+        )
+
+        conv_pw_layer: Union['Conv2dModels.Conv2dPointwiseNorm'] = Field(
             default_factory=lambda: Conv2dModels.Conv2dPointwiseNorm(
                 in_channels=-1,
                 norm=NormModels.BatchNorm2d(num_features=-1),
@@ -291,56 +292,25 @@ class Conv2dModels:
 
         @model_validator(mode='after')
         def valid_model(self):
-            self.kernel_size = None
-            self.padding = self.__class__._convert_padding(self.padding)
+            super().valid_model()
 
-            in_chs_local = self.in_channels
-            dw_kernel_local = self.dw_kernel_size
-            pad_type_local = self.padding
-
-            if self.conv_s2d_layer is not None:
-                sd_chs = int(in_chs_local * 4)
-                self.conv_s2d_layer.in_channels = in_chs_local
-                self.conv_s2d_layer.out_channels = sd_chs
-                self.conv_s2d_layer.kernel_size = 2
-                self.conv_s2d_layer.stride = 2
-                self.conv_s2d_layer.padding = 'same'
-                self.conv_s2d_layer.bias = self.bias
-
-                dw_kernel_local = (dw_kernel_local + 1) // 2
-                dw_pad_type = 'same' if dw_kernel_local == 2 else pad_type_local
-                in_chs_local = sd_chs
-                use_aa = False  # we already downsampled
-                self.aa_layer = None
-            else:
-                dw_pad_type = pad_type_local
-
-            use_aa = (self.aa_layer is None)
-
-            mid_chs = make_divisible(in_chs_local * self.exp_ratio)
+            in_channels = self.conv_s2d_layer.in_channels if self.conv_s2d_layer else self.in_channels
+            mid_chs = make_divisible(in_channels * self.exp_ratio)
 
             # Point-wise expansion
-            self.conv_pw_layer.in_channels = in_chs_local
-            self.conv_pw_layer.out_channels = mid_chs
-            self.conv_pw_layer.kernel_size = self.exp_kernel_size  # always 1
-            self.conv_pw_layer.padding = self.padding
-            self.conv_pw_layer.bias = self.bias
+            self.conv_pw_exp_layer.in_channels = in_channels
+            self.conv_pw_exp_layer.out_channels = mid_chs
+            self.conv_pw_exp_layer.padding = self.padding
+            self.conv_pw_exp_layer.bias = self.bias
 
             # Depth-wise convolution
             self.conv_dw_layer.in_channels = mid_chs
             self.conv_dw_layer.out_channels = mid_chs
-            self.conv_dw_layer.kernel_size = dw_kernel_local
-            self.conv_dw_layer.stride = 1 if use_aa else self.stride
-            self.conv_dw_layer.padding = dw_pad_type
-            self.conv_dw_layer.bias = self.bias
-            self.conv_dw_layer.group_size = self.group_size
             
             # Point-wise linear projection
-            self.conv_pwl_layer.in_channels = mid_chs
-            self.conv_pwl_layer.out_channels = self.out_channels
-            self.conv_pwl_layer.kernel_size = self.pw_kernel_size
-            self.conv_pwl_layer.padding = self.padding
-            self.conv_pwl_layer.bias = self.bias
+            self.conv_pw_layer.in_channels = mid_chs
+            self.conv_pw_layer.padding = self.padding
+            self.conv_pw_layer.bias = self.bias
             return self
 
     class CondConvResidual(InvertedResidual):
@@ -354,41 +324,10 @@ class Conv2dModels:
             self.routing_layer.in_features = self.in_channels
             self.routing_layer.out_features = self.num_experts
         
-    class EdgeResidual(BasicModel):
+    class EdgeResidual(InvertedResidual):
         """Fused MBConv / EdgeResidual block configured via Pydantic model."""
-
-        in_channels: int
-        out_channels: int
-
-        exp_kernel_size: int = 3
-        stride: int = 1
-        dilation: int = 1
-        group_size: int = 0
-        padding: PadArg = 'same'
         force_in_channels: int = 0
-
-        noskip: bool = False
-        exp_ratio: float = 1.0
-        pw_kernel_size: int = 1
-
-        aa_layer: Optional[PoolModels.type] = None
-        se_layer: Optional['Conv2dModels.SqueezeExcite'] = None
-        drop_path_rate: float = 0.0
-
-        conv_exp_layer: Union['Conv2dModels.Conv2dNormAct','Conv2dModels.Conv2dNorm'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dNormAct(
-                in_channels=-1,
-                norm=NormModels.BatchNorm2d(num_features=-1),
-                act=ActModels.ReLU(),
-            )
-        )
-        conv_pwl_layer: Union['Conv2dModels.Conv2dPointwiseNormAct','Conv2dModels.Conv2dPointwiseNorm'] = Field(
-            default_factory=lambda: Conv2dModels.Conv2dPointwiseNormAct(
-                in_channels=-1,
-                norm=NormModels.BatchNorm2d(num_features=-1),
-                act=ActModels.ReLU(),
-            )
-        )
+        bias: bool = False
 
         @staticmethod
         def _num_groups(group_size: int, channels: int) -> int:
@@ -400,41 +339,23 @@ class Conv2dModels:
 
         @model_validator(mode='after')
         def valid_model(self):
-            self.padding = Conv2dModels.DepthwiseSeparableConv._convert_padding(self.padding)
+            super().valid_model()
 
             mid_base = self.force_in_channels if self.force_in_channels > 0 else self.in_channels
             mid_chs = make_divisible(mid_base * self.exp_ratio)
             groups = self._num_groups(self.group_size, mid_chs)
             use_aa = self.aa_layer is not None and self.stride > 1
+            
+            self.conv_pw_exp_layer.in_channels = self.in_channels
+            self.conv_pw_exp_layer.out_channels = mid_chs
+            self.conv_pw_exp_layer.kernel_size = self.exp_kernel_size
+            self.conv_pw_exp_layer.stride = 1 if use_aa else self.stride
+            self.conv_pw_exp_layer.dilation = self.dilation
+            self.conv_pw_exp_layer.padding = self.padding
+            self.conv_pw_exp_layer.groups = groups
 
-            self.conv_exp_layer.in_channels = self.in_channels
-            self.conv_exp_layer.out_channels = mid_chs
-            self.conv_exp_layer.kernel_size = self.exp_kernel_size
-            self.conv_exp_layer.stride = 1 if use_aa else self.stride
-            self.conv_exp_layer.dilation = self.dilation
-            self.conv_exp_layer.padding = self.padding
-            self.conv_exp_layer.groups = groups
-            self.conv_exp_layer.bias = False
-
-            self.conv_pwl_layer.in_channels = mid_chs
-            self.conv_pwl_layer.out_channels = self.out_channels
-            self.conv_pwl_layer.kernel_size = self.pw_kernel_size
-            self.conv_pwl_layer.stride = 1
-            self.conv_pwl_layer.padding = self.padding
-            self.conv_pwl_layer.groups = 1
-            self.conv_pwl_layer.bias = False
-
-            if self.se_layer is not None:
-                self.se_layer.in_channels = mid_chs
-
-            if self.aa_layer is not None:
-                if hasattr(self.aa_layer, "in_channels"):
-                    self.aa_layer.in_channels = mid_chs
-                if hasattr(self.aa_layer, "stride"):
-                    self.aa_layer.stride = self.stride
-                if not use_aa:
-                    self.aa_layer = None
-
+            self.conv_pw_layer.in_channels = mid_chs
+            self.conv_pw_layer.out_channels = self.out_channels
             return self
     
     class UniversalInvertedResidual(BasicModel):
@@ -891,29 +812,32 @@ class Conv2dModules:
             self.conv_pw = self.para.conv_pw_layer.build()
             # ---- DropPath / stochastic depth ----
             self.drop_path = DropPath(self.para.drop_path_rate) if self.para.drop_path_rate > 0 else nn.Identity()
+            self.has_skip = (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (
+                not self.para.noskip
+            )
 
-        def feature_info(self, location):
-            if location == 'expansion':  # after SE, before PW
-                return dict(module='conv_pw', hook_type='forward_pre', num_chs=self.para.in_channels)
-            else:  # 'bottleneck'
-                return dict(module='', num_chs=self.para.out_channels)
+        def pre_conv(self,x):
+            x = self.conv_s2d(x) # with norm and act OR Identity
+            return x
+        
+        def mid_conv(self,x):
+            x = self.aa(x)
+            x = self.se(x)
+            return x
+
+        def end_conv(self,x,shortcut):
+            x = self.drop_path(x)           
+            if self.has_skip:
+                x = x + shortcut
+            return x
 
         def forward(self, x):
             shortcut = x
-            if self.para.conv_s2d_layer is not None:
-                x = self.conv_s2d(x) # with norm and act
-
+            x = self.pre_conv(x)
             x = self.conv_dw(x) # with norm and act
-
-            if self.para.aa_layer is not None:
-                x = self.aa(x)
-                
-            if self.para.se_layer is not None:
-                x = self.se(x)
-                
-            x = self.conv_pw(x) # with norm and act            
-            if (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (not self.para.noskip):                
-                x = self.drop_path(x) + shortcut
+            x = self.mid_conv(x)           
+            x = self.conv_pw(x) # with norm and act
+            x = self.end_conv(x,shortcut)
             return x
         
         def to_ternary(self,mods=['conv_s2d','conv_dw','se','aa','conv_pw']):
@@ -925,67 +849,48 @@ class Conv2dModules:
         def __init__(self, para):
             super().__init__(para)
             self.para:Conv2dModels.InvertedResidual=self.para
-            self.conv_pwl = self.para.conv_pwl_layer.build()
-            self.has_skip = (self.para.in_channels == self.para.out_channels and self.para.stride == 1) and (
-                not self.para.noskip
-            )
+            self.conv_pw_exp = self.para.conv_pw_exp_layer.build()
         
-        def forward(self, x):
-            shortcut = x
-            if self.conv_s2d is not None:
+        def pre_conv(self,x):
+            if self.para.conv_s2d_layer is not None:
                 x = self.conv_s2d(x) # with norm and act
-
-            x = self.conv_pw(x) # with norm and act
-            x = self.conv_dw(x) # with norm and act
-
-            if self.para.aa_layer is not None:
-                x = self.aa(x)
-            if self.para.se_layer is not None:
-                x = self.se(x)
-
-            x = self.conv_pwl(x) # with norm and no act
-
-            if self.has_skip:
-                x = self.drop_path(x) + shortcut
+            x = self.conv_pw_exp(x) # with norm and act
             return x
         
-        def to_ternary(self,mods=['conv_s2d','conv_pw','conv_dw','se','aa','conv_pwl']):
-            self.convert_to_ternary(self,mods)
+        def to_ternary(self,mods=['conv_s2d','conv_pw','conv_dw','se','aa','conv_pw_exp']):
             self.drop_path = nn.Identity()
+            self.convert_to_ternary(self,mods)
             return self
 
-    class EdgeResidual(Module):
+    class EdgeResidual(InvertedResidual):
         """Fused MBConv / EdgeResidual block using Pydantic config."""
         def __init__(self, para):
             super().__init__(para)
             self.para: Conv2dModels.EdgeResidual = self.para
 
-            self.conv_exp = self.para.conv_exp_layer.build()
+            self.conv_s2d = nn.Identity()
+            self.conv_dw = nn.Identity()
+            self.conv_exp = self.para.conv_pw_exp_layer.build()
             self.aa = self.para.aa_layer.build() if self.para.aa_layer else nn.Identity()
             self.se = self.para.se_layer.build() if self.para.se_layer else nn.Identity()
-            self.conv_pwl = self.para.conv_pwl_layer.build()
+            self.conv_pw = self.para.conv_pw_layer.build()
             self.drop_path = DropPath(self.para.drop_path_rate) if self.para.drop_path_rate else nn.Identity()
             self.has_skip = (
                 self.para.in_channels == self.para.out_channels and self.para.stride == 1 and not self.para.noskip
             )
 
-        def feature_info(self, location):
-            if location == 'expansion':  # after SE, before PWL
-                return dict(module='conv_pwl', hook_type='forward_pre', num_chs=self.para.conv_pwl_layer.in_channels)
-            else:  # location == 'bottleneck', block output
-                return dict(module='', num_chs=self.para.conv_pwl_layer.out_channels)
+        # def forward(self, x):
+        #     shortcut = x
+        #     x = self.conv_exp(x)
+        #     # no conv_dw
+        #     x = self.aa(x)
+        #     x = self.se(x)
+        #     x = self.conv_pw(x)
+        #     if self.has_skip:
+        #         x = self.drop_path(x) + shortcut
+        #     return x
 
-        def forward(self, x):
-            shortcut = x
-            x = self.conv_exp(x)
-            x = self.aa(x)
-            x = self.se(x)
-            x = self.conv_pwl(x)
-            if self.has_skip:
-                x = self.drop_path(x) + shortcut
-            return x
-
-        def to_ternary(self, mods=['conv_exp', 'aa', 'se', 'conv_pwl']):
+        def to_ternary(self, mods=['conv_exp', 'aa', 'se', 'conv_pw']):
             self.drop_path = nn.Identity()
             self.convert_to_ternary(self, mods)
             return self
@@ -1001,7 +906,11 @@ class Conv2dModules:
             self.se = self.para.se_layer.build() if self.para.se_layer else nn.Identity()
             self.pw_proj = self.para.conv_pw_proj_layer.build()
             self.dw_end = self.para.conv_dw_end_layer.build() if self.para.conv_dw_end_layer else nn.Identity()
-            self.aa = self.para.aa_layer.build() if self.para.aa_layer else None
+            self.aa = self.para.aa_layer.build() if self.para.aa_layer else nn.Identity()            
+            if self._aa_after == "start":
+                self.aa_start = self.aa
+            if self._aa_after == "mid":
+                self.aa_mid = self.aa
 
             if self.para.layer_scale_init_value is not None:
                 self.layer_scale = LinearModules.LayerScale2d(
@@ -1028,27 +937,22 @@ class Conv2dModules:
                 return "start"
             return None
 
-        def feature_info(self, location):
-            if location == 'expansion':  # after SE, input to PWL
-                return dict(module='pw_proj.conv', hook_type='forward_pre', num_chs=self.para.conv_pw_proj_layer.in_channels)
-            else:  # location == 'bottleneck', block output
-                return dict(module='', num_chs=self.para.conv_pw_proj_layer.out_channels)
-
         def forward(self, x):
             shortcut = x
             x = self.dw_start(x)
-            if self._aa_after == "start" and self.aa is not None:
-                x = self.aa(x)
+            x = self.aa_start(x)
+
             x = self.pw_exp(x)
             x = self.dw_mid(x)
-            if self._aa_after == "mid" and self.aa is not None:
-                x = self.aa(x)
+            x = self.aa_mid(x)
             x = self.se(x)
             x = self.pw_proj(x)
+
             x = self.dw_end(x)
             x = self.layer_scale(x)
+            x = self.drop_path(x)
             if self.has_skip:
-                x = self.drop_path(x) + shortcut
+                x = x + shortcut
             return x
 
         def to_ternary(self, mods=['dw_start', 'pw_exp', 'dw_mid', 'se', 'aa', 'pw_proj', 'dw_end']):
@@ -1068,17 +972,17 @@ class Conv2dModules:
             # CondConv routing
             pooled_inputs = torch.nn.functional.adaptive_avg_pool2d(x, 1).flatten(1)
             routing_weights = torch.sigmoid(self.routing_fn(pooled_inputs))
-            x = self.conv_pw(x, routing_weights)
+            x = self.conv_pw_exp(x, routing_weights)
             x = self.conv_dw(x, routing_weights)
             x = self.se(x)
-            x = self.conv_pwl(x, routing_weights)
+            x = self.conv_pw(x, routing_weights)
             if self.has_skip:
                 x = self.drop_path(x) + shortcut
             return x
         
         def to_ternary(self, mods=['conv_pw','conv_dw','se','conv_pwl','routing_fn']):
-            self.convert_to_ternary(self,mods)
             self.drop_path = nn.Identity()
+            self.convert_to_ternary(self,mods)
             return self
         
     class MultiQueryAttention2d(Module):

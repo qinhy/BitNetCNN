@@ -16,31 +16,36 @@ from bitlayers.norms import NormModels
 # ----------------------------
 InvertedResidual = convs.Conv2dModels.InvertedResidual
 InvertedResidualModule = convs.Conv2dModules.InvertedResidual
-    # def __init__(self, in_c, out_c, expand, stride, scale_op="median", conv2d=Bit.Conv2d):
-    #     super().__init__()
-    #     hid = in_c * expand
-    #     self.use_res = (stride == 1 and in_c == out_c)
+# class InvertedResidual(nn.Module):
+#     def __init__(self, in_channels, out_channels, exp_ratio, 
+#                  stride, bias=True, scale_op="median", conv2d=Bit.Conv2d,
+#                  drop_path_rate=0.0):
+#         super().__init__()
+#         hid = int(in_channels * exp_ratio)
+#         self.use_res = (stride == 1 and in_channels == out_channels)
 
-    #     self.pw1 = nn.Sequential(
-    #         conv2d(in_c, hid, kernel_size=1, bias=True, scale_op=scale_op),
-    #         nn.BatchNorm2d(hid),
-    #         nn.SiLU(inplace=True),
-    #     )
-    #     self.dw = nn.Sequential(
-    #         conv2d(hid, hid, kernel_size=3, stride=stride, padding=1, groups=hid,
-    #                   bias=True, scale_op=scale_op),
-    #         nn.BatchNorm2d(hid),
-    #         nn.SiLU(inplace=True),
-    #     )
-    #     # no activation here
-    #     self.pw2 = nn.Sequential(
-    #         conv2d(hid, out_c, kernel_size=1, bias=True, scale_op=scale_op),
-    #         nn.BatchNorm2d(out_c),
-    #     )
-
-    # def forward(self, x):
-    #     y = self.pw2(self.dw(self.pw1(x)))
-    #     return x + y if self.use_res else y
+#         self.pw1 = nn.Sequential(
+#             conv2d(in_channels, hid, kernel_size=1, bias=bias, scale_op=scale_op),
+#             nn.BatchNorm2d(hid),
+#             nn.SiLU(inplace=True),
+#         )
+#         self.dw = nn.Sequential(
+#             conv2d(hid, hid, kernel_size=3, stride=stride, padding=1, groups=hid,
+#                       bias=bias, scale_op=scale_op),
+#             nn.BatchNorm2d(hid),
+#             nn.SiLU(inplace=True),
+#         )
+#         # no activation here
+#         self.pw2 = nn.Sequential(
+#             conv2d(hid, out_channels, kernel_size=1, bias=bias, scale_op=scale_op),
+#             nn.BatchNorm2d(out_channels),
+#         )
+#     def build(self):
+#         return self
+    
+#     def forward(self, x):
+#         y = self.pw2(self.dw(self.pw1(x)))
+#         return x + y if self.use_res else y
 
 
 class NetCNN(nn.Module):
@@ -53,22 +58,34 @@ class NetCNN(nn.Module):
         self.drop2d_p = drop2d_p
         self.drop_p = drop_p
         self.scale_op = scale_op
+        def act(): return ActModels.SiLU(inplace=True)
+        def norm(): return NormModels.BatchNorm2d(num_features=-1)
+        
         self.stem:convs.Conv2dModules.Conv2dNormAct = convs.Conv2dModels.Conv2dNormAct(
                             in_channels=in_channels,
                             out_channels=2**expand_ratio,
                             kernel_size=3, stride=1, padding=1,
-                            bias=bias, scale_op=scale_op,
-                            norm = NormModels.BatchNorm2d(num_features=-1),
-                            act= ActModels.SiLU(inplace=True)).build()
-
-        self.stage1:InvertedResidualModule = InvertedResidual(in_channels=2**expand_ratio,out_channels=2**(expand_ratio+1),
-                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p,bias=bias).build()
+                            bias=bias, scale_op=scale_op,norm=norm(),act=act()).build()        
         
-        self.stage2:InvertedResidualModule = InvertedResidual(in_channels=2**(expand_ratio+1),out_channels=2**(expand_ratio+2),
-                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p,bias=bias).build()
+        def cconvs():
+            return dict(conv_pw_exp_layer=convs.Conv2dModels.Conv2dPointwiseNormAct(
+                            in_channels=-1,norm=norm(),act=act()),
+                        conv_dw_layer=convs.Conv2dModels.Conv2dDepthwiseNormAct(
+                            in_channels=-1,norm=norm(),act=act()),
+                        conv_pw_layer=convs.Conv2dModels.Conv2dPointwiseNorm(
+                            in_channels=-1,norm=norm()),)
         
-        self.stage3:InvertedResidualModule = InvertedResidual(in_channels=2**(expand_ratio+2),out_channels=2**(expand_ratio+3),
-                                          exp_ratio=2.0,stride=2,scale_op=scale_op,drop_path_rate=drop2d_p,bias=bias).build()
+        self.stage1 = InvertedResidual(in_channels=2**expand_ratio,out_channels=2**(expand_ratio+1),
+                                        **cconvs(),
+                                        padding=0,exp_ratio=2.0,stride=2,scale_op=scale_op,bias=bias).build()
+        
+        self.stage2 = InvertedResidual(in_channels=2**(expand_ratio+1),out_channels=2**(expand_ratio+2),
+                                        **cconvs(),
+                                          padding=0,exp_ratio=2.0,stride=2,scale_op=scale_op,bias=bias).build()
+        
+        self.stage3 = InvertedResidual(in_channels=2**(expand_ratio+2),out_channels=2**(expand_ratio+3),
+                                        **cconvs(),
+                                          padding=0,exp_ratio=2.0,stride=2,scale_op=scale_op,bias=bias).build()
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
