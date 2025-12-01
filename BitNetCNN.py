@@ -8,7 +8,7 @@ from torchmetrics.classification import MulticlassAccuracy
 
 # Import from common_utils
 from common_utils import *
-from bitlayers import convs
+from bitlayers import bit, convs
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels
 # ----------------------------
@@ -50,22 +50,23 @@ InvertedResidualModule = convs.Conv2dModules.InvertedResidual
 
 class NetCNN(nn.Module):
     def __init__(self, in_channels=1, num_classes=10, expand_ratio=5,
-                 drop2d_p=0.05, drop_p=0.1, scale_op="median", bias=True):
+                 drop_p=0.1, scale_op="median", bias=True):
         super().__init__()
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.expand_ratio = expand_ratio
-        self.drop2d_p = drop2d_p
+        self.drop2d_p = drop_p/2
         self.drop_p = drop_p
         self.scale_op = scale_op
         def act(): return ActModels.SiLU(inplace=True)
         def norm(): return NormModels.BatchNorm2d(num_features=-1)
-        
+
         self.stem:convs.Conv2dModules.Conv2dNormAct = convs.Conv2dModels.Conv2dNormAct(
                             in_channels=in_channels,
                             out_channels=2**expand_ratio,
                             kernel_size=3, stride=1, padding=1,
-                            bias=bias, scale_op=scale_op,norm=norm(),act=act()).build()        
+                            bias=bias, scale_op=scale_op,
+                            norm=norm(),act=act()).build()
         
         def cconvs():
             return dict(conv_pw_exp_layer=convs.Conv2dModels.Conv2dPointwiseNormAct(
@@ -73,25 +74,24 @@ class NetCNN(nn.Module):
                         conv_dw_layer=convs.Conv2dModels.Conv2dDepthwiseNormAct(
                             in_channels=-1,norm=norm(),act=act()),
                         conv_pw_layer=convs.Conv2dModels.Conv2dPointwiseNorm(
-                            in_channels=-1,norm=norm()),)
+                            in_channels=-1,norm=norm()),
+                        drop_path_rate=self.drop2d_p,
+                        padding=0,exp_ratio=2.0,stride=2,scale_op=scale_op,bias=bias)
         
         self.stage1 = InvertedResidual(in_channels=2**expand_ratio,out_channels=2**(expand_ratio+1),
-                                        **cconvs(),
-                                        padding=0,exp_ratio=2.0,stride=2,scale_op=scale_op,bias=bias).build()
+                                        **cconvs()).build()
         
         self.stage2 = InvertedResidual(in_channels=2**(expand_ratio+1),out_channels=2**(expand_ratio+2),
-                                        **cconvs(),
-                                          padding=0,exp_ratio=2.0,stride=2,scale_op=scale_op,bias=bias).build()
+                                        **cconvs()).build()
         
         self.stage3 = InvertedResidual(in_channels=2**(expand_ratio+2),out_channels=2**(expand_ratio+3),
-                                        **cconvs(),
-                                          padding=0,exp_ratio=2.0,stride=2,scale_op=scale_op,bias=bias).build()
+                                        **cconvs()).build()
 
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Dropout(p=drop_p),
-            Bit.Linear(2**(expand_ratio+3), num_classes, bias=bias, scale_op=scale_op),
+            bit.Bit.Linear(2**(expand_ratio+3), num_classes, bias=bias, scale_op=scale_op),
         )
 
     def forward(self, x):
@@ -103,7 +103,8 @@ class NetCNN(nn.Module):
 
     def clone(self):
         return NetCNN(self.in_channels, self.num_classes, self.expand_ratio,
-                     self.drop2d_p, self.drop_p, self.scale_op)
+                      self.drop_p, self.scale_op)
+    
 # summ(convert_to_ternary(NetCNN()))
 # ----------------------------
 # LightningModule wrapper using LitBit

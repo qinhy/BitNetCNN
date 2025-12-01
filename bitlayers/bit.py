@@ -472,14 +472,16 @@ class Bit:
                 or self._w_q_float.device != device
             ):
                 self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+                self.s = self.s.to(dtype=dtype, device=device)
+                self.bias = self.bias.to(dtype=dtype, device=device)
             return self._w_q_float
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             w = self._weight(x.dtype, x.device)
             y = F.linear(x, w, bias=None)
-            y = y * self.s.to(dtype=y.dtype, device=y.device)
+            y = y * self.s
             if self.bias is not None:
-                y = y + self.bias.to(dtype=y.dtype, device=y.device)
+                y = y + self.bias
             return y
 
     # For debugging you can switch back to full-precision:

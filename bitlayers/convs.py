@@ -300,7 +300,10 @@ class Conv2dModels:
             # Point-wise expansion
             self.conv_pw_exp_layer.in_channels = in_channels
             self.conv_pw_exp_layer.out_channels = mid_chs
+            self.conv_pw_exp_layer.kernel_size = self.exp_kernel_size
+            self.conv_pw_exp_layer.stride = 1 if self.aa_layer else self.stride
             self.conv_pw_exp_layer.padding = self.padding
+            self.conv_pw_exp_layer.dilation = self.dilation
             self.conv_pw_exp_layer.bias = self.bias
 
             # Depth-wise convolution
@@ -336,7 +339,7 @@ class Conv2dModels:
             if channels % group_size != 0:
                 raise ValueError("channels must be divisible by group_size.")
             return channels // group_size
-
+        
         @model_validator(mode='after')
         def valid_model(self):
             super().valid_model()
@@ -344,14 +347,9 @@ class Conv2dModels:
             mid_base = self.force_in_channels if self.force_in_channels > 0 else self.in_channels
             mid_chs = make_divisible(mid_base * self.exp_ratio)
             groups = self._num_groups(self.group_size, mid_chs)
-            use_aa = self.aa_layer is not None and self.stride > 1
-            
+
             self.conv_pw_exp_layer.in_channels = self.in_channels
             self.conv_pw_exp_layer.out_channels = mid_chs
-            self.conv_pw_exp_layer.kernel_size = self.exp_kernel_size
-            self.conv_pw_exp_layer.stride = 1 if use_aa else self.stride
-            self.conv_pw_exp_layer.dilation = self.dilation
-            self.conv_pw_exp_layer.padding = self.padding
             self.conv_pw_exp_layer.groups = groups
 
             self.conv_pw_layer.in_channels = mid_chs
@@ -426,10 +424,11 @@ class Conv2dModels:
 
             self.padding = Conv2dModels.DepthwiseSeparableConv._convert_padding(self.padding)
 
-            def num_groups(group_size: Optional[int], channels: int):
+            def num_groups(group_size: Optional[int], channels: int) -> int:
                 if not group_size:
                     return 1
-                assert channels % group_size == 0
+                if channels % group_size != 0:
+                    raise ValueError("channels must be divisible by group_size.")
                 return channels // group_size
 
             mid_chs = make_divisible(self.in_channels * self.exp_ratio)

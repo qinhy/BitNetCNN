@@ -1,5 +1,5 @@
 import argparse
-from typing import Callable, Dict, Iterable, Optional
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -417,7 +417,7 @@ def _canonical_dataset(dataset_name: str) -> str:
     return mapping[key]
 
 
-def _num_classes_and_stem(dataset_key: str) -> (int, bool):
+def _num_classes_and_stem(dataset_key: str) -> Tuple[int, bool]:
     if dataset_key == "c100":
         return 100, True
     if dataset_key == "imnet":
