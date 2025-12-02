@@ -4,7 +4,7 @@ import torch
 
 
 class CommonModule(nn.Module):
-    def __init__(self,para:BaseModel,namespace,para_cls=None):
+    def __init__(self,para:BaseModel,namespace=None,para_cls=None):
         if para_cls is None:
             para_cls = namespace.__dict__[f'{self.__class__.__name__}']
         if type(para) is dict: para = para_cls(**para)

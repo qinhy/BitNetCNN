@@ -22,6 +22,16 @@ to_4tuple = _ntuple(4)
 to_ntuple = _ntuple
 
 
+def convert_padding(p):
+    """Map timm-style pad_type to something Conv2d understands."""
+    if p in ('same', 'SAME'):
+        return 'same'
+    if p in ('valid', 'VALID'):
+        return 'valid'
+    if p in ('', None):
+        return 0
+    return p  # assume int / tuple / already valid
+
 def make_divisible(v, divisor=8, min_value=None, round_limit=.9):
     min_value = min_value or divisor
     new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)

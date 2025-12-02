@@ -12,8 +12,8 @@ from torchvision.models import (
 )
 from huggingface_hub import hf_hub_download
 
+from bitlayers.bit import Bit
 from common_utils import (  # noqa: F401 (re-exported for backwards compat)
-    Bit,
     LitBit,
     TinyImageNetDataModule,
     CIFAR100DataModule,

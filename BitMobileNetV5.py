@@ -275,9 +275,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from bitlayers.acts import ActModels
+from bitlayers.attn2d import Attention2dModels
 from bitlayers.bit import Bit
 from bitlayers.convs import Conv2dModels
 from bitlayers.norms import NormModels
+from bitlayers.uir import UniversalInvertedResidual
 from common_utils import *
 
 
@@ -343,7 +345,7 @@ class MobileNetV5MultiScaleFusionAdapter(nn.Module):
             return NormModels.RmsNorm2d(num_features=num_features)
 
         self.ffn = (
-            Conv2dModels.UniversalInvertedResidual(
+            UniversalInvertedResidual(
                 in_channels=self.in_channels,
                 out_channels=self.out_channels,
                 dw_kernel_size_mid=0,
@@ -828,7 +830,7 @@ def parse_arch_def(
             if block_type == "er":
                 b = Conv2dModels.EdgeResidual(
                     **block,
-                    conv_pw_exp_layer=Conv2dModels.Conv2dNormAct(
+                    conv_pw_exp_layer=Conv2dModels.Conv2dPointwiseNormAct(
                         in_channels=-1,
                         norm=norm(),
                         act=act(),
@@ -840,7 +842,7 @@ def parse_arch_def(
                     ),
                 )
             elif block_type == "uir":
-                b = Conv2dModels.UniversalInvertedResidual(
+                b = UniversalInvertedResidual(
                     **block,
                     conv_dw_start_layer=Conv2dModels.Conv2dDepthwiseNorm(
                         in_channels=-1,
@@ -866,7 +868,7 @@ def parse_arch_def(
                     ),
                 )
             elif block_type == "mqa":
-                b = Conv2dModels.MobileAttention(
+                b = Attention2dModels.MobileAttention(
                     **block,
                     use_multi_query=True,
                     norm_layer=norm(),
