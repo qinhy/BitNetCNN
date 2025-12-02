@@ -5,6 +5,7 @@ This module contains shared components used across different BitNet model implem
 import collections
 from itertools import repeat
 import math
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -224,7 +225,7 @@ class Bit:
             """
             Return (weight, scale_or_None).
             - For training Conv2d: (w_q, None)
-            - For inference Conv2dInfer: (w_q_float, scale)
+            - For inference Conv2dInfer: (weight_float, scale)
             """
             raise NotImplementedError
 
@@ -232,10 +233,12 @@ class Bit:
             raise NotImplementedError
 
         # --- shared forward ---
-        def forward(self, x: torch.Tensor, w: torch.Tensor | None = None):
-            s = None
-            if w is None:
-                w, s = self.get_weights(x.dtype, x.device)
+        def forward(self, x: torch.Tensor,
+                    weight: Optional[torch.Tensor]=None,
+                    bias: Optional[torch.Tensor]=None):
+            scale = None
+            if weight is None:
+                weight, scale = self.get_weights(x.dtype, x.device)
 
             if self.dynamic_pad:
                 x = self.pad_layer(x)
@@ -243,11 +246,11 @@ class Bit:
             else:
                 padding_value = self.padding_value
 
-            bias = self.bias if s is None else None
+            bias = self.bias if scale is None else None
 
             y = F.conv2d(
                 x,
-                w,
+                weight,
                 bias=bias,
                 stride=self.stride,
                 padding=padding_value,
@@ -255,8 +258,8 @@ class Bit:
                 groups=self.groups,
             )
 
-            if s is not None:
-                y = y * s
+            if scale is not None:
+                y = y * scale
                 if self.bias is not None:
                     y = y + self.bias.view(1, -1, 1, 1)
 
@@ -348,8 +351,8 @@ class Bit:
             w_q = torch.round(w_bar).clamp_(-1, 1).to(w.dtype)
 
             return Bit.Conv2dInfer(
-                w_q=w_q,
-                s=s,
+                weight=w_q,
+                scale=s,
                 bias=(None if self.bias is None else self.bias.data.clone()),
                 in_channels=self.in_channels,
                 out_channels=self.out_channels,
@@ -360,7 +363,7 @@ class Bit:
                 dilation=self.dilation,
                 groups=self.groups,
                 scale_op=self.scale_op,
-            )
+            ).to(device=self.weight.device,dtype=self.weight.dtype)
 
     # ------------------------------------------------------------------
     # Inference Conv2d (frozen ternary)
@@ -377,9 +380,9 @@ class Bit:
 
         def __init__(
             self,
-            w_q: torch.Tensor,
-            s: torch.Tensor,
-            bias,
+            weight: torch.Tensor,
+            scale: torch.Tensor,
+            bias: torch.Tensor,
             in_channels: int,
             out_channels: int,
             kernel_size,
@@ -402,27 +405,26 @@ class Bit:
                 bias=True if bias is not None else False,
                 scale_op=scale_op,
             )
-            self.init_weights(bias, w_q, s)
+            self.save_dtype = torch.int8
+            self.init_weights(bias, weight, scale)
 
-        def init_weights(self, bias, w_q: torch.Tensor, s: torch.Tensor):
+        # ---- custom save / load hooks ----
+        def _save_to_state_dict(self, destination, prefix, keep_vars):
+            if self.save_dtype==torch.int8 and (
+                (self.weight.data>127).sum() + (self.weight.data<-128).sum()>0):
+                raise ValueError("weight.data is not in (-128, 127)")
+            self.weight.data = self.weight.data.to(self.save_dtype)
+            # let nn.Module save everything as usual
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+
+        def init_weights(self, bias, weight: torch.Tensor, scale: torch.Tensor):
             # Make them Parameters so param counters include them (but keep frozen)
-            self.w_q = nn.Parameter(w_q.to(torch.int8), requires_grad=False)  # [out,in,kh,kw]
-            self.scale = nn.Parameter(s, requires_grad=False)                 # [out,1,1]
-            if bias is None:
-                self.bias = None
-            else:
-                self.bias = nn.Parameter(bias, requires_grad=False)           # [out]
-            # Optional cache for the float view (not in state_dict, not counted as a param)
-            self.register_buffer("_w_q_float", None, persistent=False)
+            self.weight = nn.Parameter(weight, requires_grad=False) # [out,in,kh,kw]
+            self.scale  = nn.Parameter(scale, requires_grad=False)  # [out,1,1]
+            self.bias = bias if bias is None else nn.Parameter(bias, requires_grad=False) # [out]
 
         def get_weights(self, dtype: torch.dtype, device: torch.device):
-            if (
-                self._w_q_float is None
-                or self._w_q_float.dtype != dtype
-                or self._w_q_float.device != device
-            ):
-                self._w_q_float = self.w_q.to(dtype=dtype, device=device)
-            return self._w_q_float, self.scale
+            return self.weight, self.scale
 
     # ------------------------------------------------------------------
     # Train-time Linear & Inference Linear (unchanged from old working code)
@@ -445,41 +447,30 @@ class Bit:
             w = self.weight.data
             s = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()  # [out]
             w_q = torch.round(w / s.view(-1, 1)).clamp_(-1, 1).to(w.dtype)
-            return Bit.LinearInfer(
-                w_q=w_q,
-                s=s,
-                bias=(None if self.bias is None else self.bias.data.clone()),
-            )
+            bias = None if self.bias is None else self.bias.data.clone()
+            return Bit.LinearInfer(weight=w_q, scale=s, bias=bias,
+                    ).to(device=self.weight.device,dtype=self.weight.dtype)
 
     class LinearInfer(nn.Module):
         """Frozen ternary linear: y = (x @ Wq^T) * s + b"""
-
-        def __init__(self, w_q: torch.Tensor, s: torch.Tensor, bias):
+        def __init__(self, weight: torch.Tensor, scale: torch.Tensor, bias):
             super().__init__()
-            self.w_q = nn.Parameter(w_q.to(torch.int8), requires_grad=False)  # [out,in]
-            self.s = nn.Parameter(s, requires_grad=False)                     # [out]
-            if bias is None:
-                self.register_parameter("bias", None)
-            else:
-                self.bias = nn.Parameter(bias, requires_grad=False)
+            self.weight = nn.Parameter(weight, requires_grad=False)
+            self.scale = nn.Parameter(scale, requires_grad=False)
+            self.bias = nn.Parameter(bias, requires_grad=False) if bias is not None else None
+            self.save_dtype = torch.int8
 
-            self.register_buffer("_w_q_float", None, persistent=False)
-
-        def _weight(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-            if (
-                self._w_q_float is None
-                or self._w_q_float.dtype != dtype
-                or self._w_q_float.device != device
-            ):
-                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
-                self.s = self.s.to(dtype=dtype, device=device)
-                self.bias = self.bias.to(dtype=dtype, device=device)
-            return self._w_q_float
+        # ---- custom save / load hooks ----
+        def _save_to_state_dict(self, destination, prefix, keep_vars):
+            if self.save_dtype==torch.int8 and (
+                (self.weight.data>127).sum() + (self.weight.data<-128).sum()>0):
+                raise ValueError("weight.data is not in (-128, 127)")
+            self.weight.data = self.weight.data.to(self.save_dtype)
+            # let nn.Module save everything as usual
+            super()._save_to_state_dict(destination, prefix, keep_vars)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            w = self._weight(x.dtype, x.device)
-            y = F.linear(x, w, bias=None)
-            y = y * self.s
+            y = F.linear(x, self.weight, bias=None) * self.scale
             if self.bias is not None:
                 y = y + self.bias
             return y
