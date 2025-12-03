@@ -496,19 +496,27 @@ def make_feature_hooks(module: nn.Module, names, feats: dict, idx=0):
             handles.append(sub.register_forward_hook(SaveOutputHook(feats, ii)))
     return handles
 
+class DataModuleConfig(BaseModel):    
+    data_dir: str
+    batch_size: int
+    num_workers: int = 4,
+    mixup: bool = False
+    cutmix: bool = False
+    mix_alpha: float = 1.0
+
 # ----------------------------
 # CIFAR-100 DataModule (mixup/cutmix optional)
 # ----------------------------
-def mix_collate(batch, *, aug_cutmix: bool, aug_mixup: bool, alpha: float):
+def mix_collate(batch, *, cutmix: bool, mixup: bool, mix_alpha: float):
     xs, ys = zip(*batch)
     x = torch.stack(xs); y = torch.tensor(ys)
-    if not (aug_cutmix or aug_mixup):
+    if not (cutmix or mixup):
         return x, y
 
     import random
     lam = 1.0
-    if aug_cutmix and random.random() < 0.5:
-        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+    if cutmix and random.random() < 0.5:
+        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
         idx = torch.randperm(x.size(0))
         h, w = x.size(2), x.size(3)
         rx, ry = torch.randint(w, (1,)).item(), torch.randint(h, (1,)).item()
@@ -519,17 +527,17 @@ def mix_collate(batch, *, aug_cutmix: bool, aug_mixup: bool, alpha: float):
         lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
         return x, (y, y[idx], lam)
     else:
-        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
         idx = torch.randperm(x.size(0))
         x = lam * x + (1 - lam) * x[idx]
         return x, (y, y[idx], lam)
     
 class CIFAR100DataModule(pl.LightningDataModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
-                 aug_mixup: bool = False, aug_cutmix: bool = False, alpha: float = 1.0):
+                 mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
         self.data_dir, self.batch_size, self.num_workers = data_dir, batch_size, num_workers
-        self.aug_mixup, self.aug_cutmix, self.alpha = aug_mixup, aug_cutmix, alpha
+        self.mixup, self.cutmix, self.mix_alpha = mixup, cutmix, mix_alpha
 
     def setup(self, stage=None):
         mean = (0.5071,0.4867,0.4408); std=(0.2675,0.2565,0.2761)
@@ -547,9 +555,9 @@ class CIFAR100DataModule(pl.LightningDataModule):
     def train_dataloader(self):
         collate = partial(
             mix_collate,
-            aug_cutmix=self.aug_cutmix,
-            aug_mixup=self.aug_mixup,
-            alpha=self.alpha,
+            cutmix=self.cutmix,
+            mixup=self.mixup,
+            mix_alpha=self.mix_alpha,
         )
         return DataLoader(
             self.train_ds,
@@ -571,19 +579,19 @@ class CIFAR100DataModule(pl.LightningDataModule):
 # ----------------------------
 # Mixup / CutMix Collate Function
 # ----------------------------
-def mix_collate(batch, *, aug_cutmix: bool, aug_mixup: bool, alpha: float):
+def mix_collate(batch, *, cutmix: bool, mixup: bool, mix_alpha: float):
     xs, ys = zip(*batch)
     x = torch.stack(xs)
     y = torch.tensor(ys)
     
-    if not (aug_cutmix or aug_mixup):
+    if not (cutmix or mixup):
         return x, y
 
     lam = 1.0
     idx = torch.randperm(x.size(0))
 
-    if aug_cutmix and random.random() < 0.5:
-        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+    if cutmix and random.random() < 0.5:
+        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
         h, w = x.size(2), x.size(3)
         rx, ry = torch.randint(w, (1,)).item(), torch.randint(h, (1,)).item()
         rw = int(w * math.sqrt(1 - lam))
@@ -595,7 +603,7 @@ def mix_collate(batch, *, aug_cutmix: bool, aug_mixup: bool, alpha: float):
         lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
         return x, (y, y[idx], lam)
     else:
-        lam = torch.distributions.Beta(alpha, alpha).sample().item()
+        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
         x = lam * x + (1 - lam) * x[idx]
         return x, (y, y[idx], lam)
 
@@ -715,14 +723,14 @@ class TinyImageNetDataset(VisionDataset):
 # ----------------------------
 class TinyImageNetDataModule(pl.LightningDataModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
-                 aug_mixup: bool = False, aug_cutmix: bool = False, alpha: float = 1.0):
+                 mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.aug_mixup = aug_mixup
-        self.aug_cutmix = aug_cutmix
-        self.alpha = alpha
+        self.mixup = mixup
+        self.cutmix = cutmix
+        self.mix_alpha = mix_alpha
 
     def setup(self, stage=None):
         mean = (0.4802, 0.4481, 0.3975)
@@ -748,9 +756,9 @@ class TinyImageNetDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         collate = partial(
             mix_collate,
-            aug_cutmix=self.aug_cutmix,
-            aug_mixup=self.aug_mixup,
-            alpha=self.alpha,
+            cutmix=self.cutmix,
+            mixup=self.mixup,
+            mix_alpha=self.mix_alpha,
         )
         return DataLoader(
             self.train_ds,
@@ -778,7 +786,7 @@ class TinyImageNetDataModule(pl.LightningDataModule):
 # ----------------------------
 class MNISTDataModule(pl.LightningDataModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
-                 aug_mixup: bool = False, aug_cutmix: bool = False, alpha: float = 1.0):
+                 mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -829,24 +837,24 @@ class ImageNetDataModule(pl.LightningDataModule):
     ImageNet (1k) DataModule that matches your CIFAR style:
     - train: RandomResizedCrop(224) + HFlip + Normalize
     - val:   Resize(256) -> CenterCrop(224) + Normalize
-    - optional mixup/cutmix via your `mix_collate` and (aug_mixup, aug_cutmix, alpha)
+    - optional mixup/cutmix via your `mix_collate` and (mixup, cutmix, mix_alpha)
     """
     def __init__(self,
                  data_dir: str,
                  batch_size: int,
                  num_workers: int = 8,
-                 aug_mixup: bool = False,
-                 aug_cutmix: bool = False,
-                 alpha: float = 0.2,
+                 mixup: bool = False,
+                 cutmix: bool = False,
+                 mix_alpha: float = 0.2,
                  image_size: int = 224,
                  val_resize: int = 256):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.aug_mixup = aug_mixup
-        self.aug_cutmix = aug_cutmix
-        self.alpha = alpha
+        self.mixup = mixup
+        self.cutmix = cutmix
+        self.mix_alpha = mix_alpha
         self.image_size = image_size
         self.val_resize = val_resize
 
@@ -883,9 +891,9 @@ class ImageNetDataModule(pl.LightningDataModule):
         # Reuse your mix_collate just like CIFAR100DataModule
         collate = partial(
             mix_collate,
-            aug_cutmix=self.aug_cutmix,
-            aug_mixup=self.aug_mixup,
-            alpha=self.alpha,
+            cutmix=self.cutmix,
+            mixup=self.mixup,
+            mix_alpha=self.mix_alpha,
         )
         return DataLoader(
             self.train_ds,
@@ -948,7 +956,7 @@ class ExportBestTernary(Callback):
 # LightningModule: KD + hints + ternary eval/export
 # ----------------------------
 class CommonTrainConfig(BaseModel):
-    data: str = "./data"
+    data_dir: str = "./data"
     export_dir: str = "./ckpt_c100"
 
     epochs: int = Field(200, ge=1)
@@ -1000,7 +1008,7 @@ class LitBitConfig(BaseModel):
     model_name: str = ""
     model_size: str = ""
 
-    hint_points: List[str] = Field(default_factory=list)
+    hint_points: List[str|Tuple] = Field(default_factory=list)
     num_classes: int = -1
 
 class LitBit(pl.LightningModule):
@@ -1170,15 +1178,15 @@ class LitBit(pl.LightningModule):
 #     parser.add_argument("--lr", type=float, default=2e-1)
 #     parser.add_argument("--wd", type=float, default=5e-4)
 #     parser.add_argument("--label-smoothing", type=float, default=0.1)
-#     parser.add_argument("--alpha-kd", type=float, default=0.3)
-#     parser.add_argument("--alpha-hint", type=float, default=0.05)
+#     parser.add_argument("--mix_alpha-kd", type=float, default=0.3)
+#     parser.add_argument("--mix_alpha-hint", type=float, default=0.05)
 #     parser.add_argument("--T", type=float, default=4.0)
 #     parser.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
 #     parser.add_argument("--amp", action="store_true")
 #     parser.add_argument("--cpu", action="store_true")
 #     parser.add_argument("--mixup", action="store_true")
 #     parser.add_argument("--cutmix", action="store_true")
-#     parser.add_argument("--mix-alpha", type=float, default=1.0)
+#     parser.add_argument("--mix-mix_alpha", type=float, default=1.0)
 #     parser.add_argument("--seed", type=int, default=42)
 #     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use (default: 1, use -1 for all available)")
 #     parser.add_argument("--strategy", type=str, default="auto", choices=["auto", "ddp", "ddp_spawn", "fsdp"],
@@ -1199,8 +1207,8 @@ def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
     pl.seed_everything(args.seed, workers=True)
     if dm is None:
         dm = CIFAR100DataModule(
-            data_dir=args.data, batch_size=args.batch_size, num_workers=4,
-            aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
+            data_dir=args.data_dir, batch_size=args.batch_size, num_workers=4,
+            mixup=args.mixup, cutmix=args.cutmix, mix_alpha=args.mix_alpha
         )
 
     os.makedirs(args.export_dir, exist_ok=True)

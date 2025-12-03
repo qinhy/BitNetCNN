@@ -930,29 +930,68 @@ def make_mobilenetv5_teacher(size="300m",dataset=None,num_classes=None,device="c
 # ----------------------------
 # LightningModule: KD + hints
 # ----------------------------
+
+class Config(CommonTrainConfig):
+    dataset_name: Literal[
+        "c10", "cifar10",
+        "c100", "cifar100",
+        "timnet", "tiny",
+        "tinyimagenet", "tiny-imagenet",
+        "imnet", "imagenet", "in1k", "imagenet1k",
+    ] = Field(
+        default="timnet",
+        description="Target dataset (affects datamodule, num_classes, transforms).",
+    )
+
+    # For MobileNetV4 we accept conv + hybrid tags in one flag
+    model_size: Literal[
+        "tiny",
+        "small",
+        "medium",
+        "large",
+        "hybrid_medium",
+        "hybrid_large",
+    ] = Field(
+        default="tiny",
+        description="MobileNetV4 variant.",
+    )
+
+    drop_path: float = Field(
+        default=0.0,
+        description="Stochastic depth drop-path rate.",
+    )
+
+    teacher_pretrained: bool = Field(
+        default=True,
+        description=(
+            "Use ImageNet-pretrained teacher backbone when classes != 1000 "
+            "(head is replaced)."
+        ),
+    )
+    
+    batch_size:int=4
+    lr:float=0.2
+    alpha_kd:float=0.0
+    alpha_hint:float=0.05
+
 class LitMobileNetV5KD(LitBit):
     def __init__(
-        self,
-        lr, wd, epochs,
-        dataset_name='c100',
-        model_size="tiny",            # 'small'|'medium'|'large' or 'hybrid_medium'|'hybrid_large' (alias: hybrid_medium)
-        label_smoothing=0.1, alpha_kd=0.0, alpha_hint=0.0, T=4.0,
-        amp=True, export_dir="./ckpt_mnv5",
+        self, config:LitBitConfig,
         drop_path_rate=0.0,
         teacher_pretrained=True
     ):
         # dataset -> classes
-        ds = dataset_name.lower()
+        ds = config.dataset_name.lower()
         if ds in ['c10', 'cifar10']:
-            num_classes = 10
+            config.num_classes = 10
         elif ds in ['c100', 'cifar100']:
-            num_classes = 100
+            config.num_classes = 100
         elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-            num_classes = 200
+            config.num_classes = 200
         elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-            num_classes = 1000
+            config.num_classes = 1000
         else:
-            raise ValueError(f"Unsupported dataset: {dataset_name}")
+            raise ValueError(f"Unsupported dataset: {config.dataset_name}")
         
         def get_mnv5_arch_def(model_size: str) -> list[list[str]]:
             size = model_size.lower()
@@ -970,14 +1009,14 @@ class LitMobileNetV5KD(LitBit):
                 raise ValueError(f"Unknown MobileNetV5 model_size: {model_size}")
 
         # student & teacher
-        student = MobileNetV5Classifier(arch_def=get_mnv5_arch_def(model_size),
-                                        num_classes=num_classes,
+        config.student = MobileNetV5Classifier(arch_def=get_mnv5_arch_def(config.model_size),
+                                        num_classes=config.num_classes,
                                         drop_rate=drop_path_rate)
 
-        teacher = make_mobilenetv5_teacher(
+        config.teacher = make_mobilenetv5_teacher(
             size="300m",
             dataset=ds,
-            num_classes=num_classes,
+            num_classes=config.num_classes,
             device="cpu",
             pretrained=teacher_pretrained
         )
@@ -989,77 +1028,18 @@ class LitMobileNetV5KD(LitBit):
         # print(teacher(x).shape)
 
         # pick robust hint tap points via timm feature_info
-        hint_points = [("blocks.0","blocks.0"), ("blocks.1","blocks.1"),
+        config.hint_points = [("blocks.0","blocks.0"), ("blocks.1","blocks.1"),
                        ("blocks.2","blocks.2"), ("blocks.3","blocks.3"),
                        ("msfa","msfa")]
-
-        super().__init__(
-            lr, wd, epochs, label_smoothing,
-            alpha_kd, alpha_hint, T,
-            amp,
-            export_dir,
-            dataset_name=ds,
-            model_name='mobilenetv5',
-            model_size=model_size,
-            hint_points=hint_points,
-            student=student,
-            teacher=teacher,
-            num_classes=num_classes
-        )
+        config.dataset_name=ds
+        config.model_name='mobilenetv5'
+        config.model_size=config.model_size
+        config.num_classes=config.num_classes
+        super().__init__(config)
 
 # ----------------------------
 # CLI / main (MobileNetV5)
 # ----------------------------
-class Config(CommonTrainConfig):
-    dataset: Literal[
-        "c10", "cifar10",
-        "c100", "cifar100",
-        "timnet", "tiny",
-        "tinyimagenet", "tiny-imagenet",
-        "imnet", "imagenet", "in1k", "imagenet1k",
-    ] = Field(
-        default="timnet",
-        description="Target dataset (affects datamodule, num_classes, transforms).",
-    )
-
-    # For MobileNetV4 we accept conv + hybrid tags in one flag
-    model_size: Literal[
-        "small",
-        "medium",
-        "large",
-        "hybrid_medium",
-        "hybrid_large",
-    ] = Field(
-        default="hybrid_medium",
-        description="MobileNetV4 variant.",
-    )
-
-    drop_path: float = Field(
-        default=0.0,
-        description="Stochastic depth drop-path rate.",
-    )
-
-    teacher_pretrained: bool = Field(
-        default=True,
-        description=(
-            "Use ImageNet-pretrained teacher backbone when classes != 1000 "
-            "(head is replaced)."
-        ),
-    )
-    
-    out:Optional[str]=None
-    batch_size:int=4
-    lr:float=0.2
-    alpha_kd:float=0.0
-    alpha_hint:float=0.05
-
-def parse_args_mnv5():
-    parser = ArgumentParser(model=Config)
-    args = parser.parse_typed_args()
-    if args.out is None:
-        args.out = f"./ckpt_{args.dataset}_mnv5_{args.model_size}"
-    return args
-
 
 def _pick_datamodule_mnv5(dataset_name: str, dmargs: dict):
     # reuse your existing modules; same as before
@@ -1084,42 +1064,19 @@ def _pick_datamodule_mnv5(dataset_name: str, dmargs: dict):
 
 
 def main_mnv5():
-    args = parse_args_mnv5()
-
-    # Derive num_classes for export dir naming (same as your convnext main)
-    ds = args.dataset.lower()
-    if ds in ['c10', 'cifar10']:
-        ncls = 10
-    elif ds in ['c100', 'cifar100']:
-        ncls = 100
-    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-        ncls = 200
-    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-        ncls = 1000
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
-
-    out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
-
-    lit = LitMobileNetV5KD(
-        lr=args.lr, wd=args.wd, epochs=args.epochs,
-        dataset_name=args.dataset,
-        model_size=args.model_size,
-        label_smoothing=args.label_smoothing,
-        alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
-        amp=args.amp, export_dir=out_dir, drop_path_rate=args.drop_path,
+    parser = ArgumentParser(model=Config)
+    args:Config = parser.parse_typed_args()
+    args.export_dir = f"./ckpt_{args.dataset_name}_mnv5_{args.model_size}"
+    
+    config = LitBitConfig.model_validate(args.model_dump())
+    lit = LitMobileNetV5KD(config,
+        drop_path_rate=args.drop_path,
         teacher_pretrained=args.teacher_pretrained
     )
 
-    dmargs = dict(
-        data_dir=args.data,
-        batch_size=args.batch_size,
-        num_workers=4,
-        aug_mixup=args.mixup,
-        aug_cutmix=args.cutmix,
-        alpha=args.mix_alpha
-    )
-    dm = _pick_datamodule_mnv5(args.dataset, dmargs)
+    dmargs = DataModuleConfig.model_validate(args.model_dump())
+
+    dm = _pick_datamodule_mnv5(args.dataset_name, dmargs.model_dump())
 
     trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)

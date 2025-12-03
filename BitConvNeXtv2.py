@@ -350,12 +350,12 @@ def main():
     )
 
     dmargs = dict(
-        data_dir=args.data,
+        data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_workers=4,
-        aug_mixup=args.mixup,
-        aug_cutmix=args.cutmix,
-        alpha=args.mix_alpha
+        mixup=args.mixup,
+        cutmix=args.cutmix,
+        mix_alpha=args.mix_alpha
     )
     dm = _pick_datamodule(args.dataset, dmargs)
 
