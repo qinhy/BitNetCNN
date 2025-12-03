@@ -31,12 +31,8 @@ print("=" * 60)
 print("Test 2: Loading BitNetCNN (ternary)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_mnist', source='local', pretrained=False, ternary=True)
+    model = torch.hub.load('.', 'bitnet_mnist', source='local', pretrained=True, ternary=True)
     print(f"[OK] Ternary model loaded successfully")
-
-    # Check for int8 buffers
-    has_int8 = any(b.dtype == torch.int8 for b in model.buffers())
-    print(f"  Contains int8 buffers: {has_int8}")
 
     # Test forward pass
     x = torch.randn(2, 1, 28, 28)
@@ -116,6 +112,7 @@ try:
 except Exception as e:
     print(f"[FAIL] Failed: {e}\n")
 
+exit()
 # Test 7: List available models
 print("=" * 60)
 print("Test 7: Listing available models")

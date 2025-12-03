@@ -15,7 +15,8 @@ import warnings
 from PIL import Image, ImageTk
 
 import random
-from typing import Callable, List, Optional, Sequence, Tuple, Type, Union
+from typing import Callable, List, Literal, Optional, Sequence, Tuple, Type, Union
+from pydantic import BaseModel, Field
 import torch
 
 torch.set_float32_matmul_precision('high')
@@ -1103,29 +1104,60 @@ class LitBit(pl.LightningModule):
 # ----------------------------
 # Common CLI utilities
 # ----------------------------
-def add_common_args(parser):
-    """Add common training arguments to an argument parser."""
-    parser.add_argument("--data", type=str, default="./data")
-    parser.add_argument("--out",  type=str, default="./ckpt_c100")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--lr", type=float, default=2e-1)
-    parser.add_argument("--wd", type=float, default=5e-4)
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
-    parser.add_argument("--alpha-kd", type=float, default=0.3)
-    parser.add_argument("--alpha-hint", type=float, default=0.05)
-    parser.add_argument("--T", type=float, default=4.0)
-    parser.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
-    parser.add_argument("--amp", action="store_true")
-    parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--mixup", action="store_true")
-    parser.add_argument("--cutmix", action="store_true")
-    parser.add_argument("--mix-alpha", type=float, default=1.0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use (default: 1, use -1 for all available)")
-    parser.add_argument("--strategy", type=str, default="auto", choices=["auto", "ddp", "ddp_spawn", "fsdp"],
-                        help="Distributed training strategy (default: auto)")
-    return parser
+class CommonTrainConfig(BaseModel):
+    data: str = "./data"
+    out: str = "./ckpt_c100"
+
+    epochs: int = Field(200, ge=1)
+    batch_size: int = Field(512, ge=1)
+
+    lr: float = Field(2e-1, gt=0)
+    wd: float = Field(5e-4, ge=0)
+
+    label_smoothing: float = Field(0.1, ge=0.0, le=1.0)
+    alpha_kd: float = 0.3
+    alpha_hint: float = 0.05
+    T: float = Field(4.0, gt=0)
+
+    scale_op: Literal["mean", "median"] = "median"
+
+    amp: bool = False
+    cpu: bool = False
+    mixup: bool = False
+    cutmix: bool = False
+
+    mix_alpha: float = Field(1.0, ge=0.0)
+
+    seed: int = 42
+    gpus: int = Field(
+        1,
+        description="Number of GPUs to use (1 = default, -1 = all available)",
+    )
+    strategy: Literal["auto", "ddp", "ddp_spawn", "fsdp"] = "auto"
+
+# def add_common_args(parser):
+#     """Add common training arguments to an argument parser."""
+#     parser.add_argument("--data", type=str, default="./data")
+#     parser.add_argument("--out",  type=str, default="./ckpt_c100")
+#     parser.add_argument("--epochs", type=int, default=200)
+#     parser.add_argument("--batch-size", type=int, default=512)
+#     parser.add_argument("--lr", type=float, default=2e-1)
+#     parser.add_argument("--wd", type=float, default=5e-4)
+#     parser.add_argument("--label-smoothing", type=float, default=0.1)
+#     parser.add_argument("--alpha-kd", type=float, default=0.3)
+#     parser.add_argument("--alpha-hint", type=float, default=0.05)
+#     parser.add_argument("--T", type=float, default=4.0)
+#     parser.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
+#     parser.add_argument("--amp", action="store_true")
+#     parser.add_argument("--cpu", action="store_true")
+#     parser.add_argument("--mixup", action="store_true")
+#     parser.add_argument("--cutmix", action="store_true")
+#     parser.add_argument("--mix-alpha", type=float, default=1.0)
+#     parser.add_argument("--seed", type=int, default=42)
+#     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use (default: 1, use -1 for all available)")
+#     parser.add_argument("--strategy", type=str, default="auto", choices=["auto", "ddp", "ddp_spawn", "fsdp"],
+#                         help="Distributed training strategy (default: auto)")
+#     return parser
 
 def setup_trainer(args, lit_module, dm = None):
     """
@@ -1363,7 +1395,6 @@ def GUI_tool(model,
 
     root.mainloop()
 
-
 def load_tiny200_to_in1k_map(path: str, expected_out: int = 200) -> List[List[int]]:
     """
     Reads a mapping text file where each *line* corresponds to one Tiny-ImageNet class (0..199),
@@ -1404,7 +1435,6 @@ def load_tiny200_to_in1k_map(path: str, expected_out: int = 200) -> List[List[in
                 raise ValueError(f"Invalid IN1k index {k} in row {i}; expected 0..999.")
     return mapping
 
-
 def build_projection_matrix(mapping: Sequence[Sequence[int]],
                             in_dim: int = 1000,
                             dtype: torch.dtype = torch.float32,
@@ -1423,7 +1453,6 @@ def build_projection_matrix(mapping: Sequence[Sequence[int]],
         warnings.warn(f"{overlaps.numel()} ImageNet-1k indices map to multiple Tiny classes; "
                       "their probability mass will be counted multiple times before renormalization.")
     return M
-
 
 class IN1kToTiny200Adapter(nn.Module):
     """

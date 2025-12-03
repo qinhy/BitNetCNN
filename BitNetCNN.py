@@ -1,5 +1,5 @@
 # mnist_bitnet_lightning.py
-import argparse
+from pydantic2_argparse import ArgumentParser
 import torch
 
 torch.set_float32_matmul_precision('high')
@@ -146,10 +146,12 @@ class LitNetCNNKD(LitBit):
 # ----------------------------
 # CLI / main
 # ----------------------------
+
+class Config(CommonTrainConfig):
+    pass
 def parse_args():
-    p = argparse.ArgumentParser()
-    p = add_common_args(p)
-    p.set_defaults(
+    parser = ArgumentParser(model=Config)
+    parser.set_defaults(
         data="./data",
         out="./ckpt_mnist",
         epochs=50,
@@ -158,7 +160,7 @@ def parse_args():
         wd=1e-4,
         label_smoothing=0.0
     )
-    return p.parse_args()
+    return parser.parse_typed_args()
 
 def main():
     args = parse_args()
