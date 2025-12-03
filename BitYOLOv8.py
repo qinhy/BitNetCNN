@@ -472,8 +472,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     if args.dataset != "timnet":
         raise ValueError("Only Tiny-ImageNet is supported at the moment.")
 
-    if not args.out:
-        args.out = "./ckpt_timnet_yolov8"
+    if not args.export_dir:
+        args.export_dir = "./ckpt_timnet_yolov8"
 
     if args.model_size not in SIZE_TO_MULT:
         raise ValueError(f"Unknown model size: {args.model_size}")
