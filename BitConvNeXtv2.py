@@ -1,4 +1,5 @@
 import argparse
+from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -252,24 +253,47 @@ class LitConvNeXtV2KD(LitBit):
 # ----------------------------
 # CLI / main
 # ----------------------------
+class Config(CommonTrainConfig):
+    dataset: Literal[
+        "c10", "cifar10",
+        "c100", "cifar100",
+        "timnet", "tiny",
+        "tinyimagenet", "tiny-imagenet",
+        "imnet", "imagenet", "in1k", "imagenet1k",
+    ] = Field(
+        default="timnet",
+        description="Target dataset (affects datamodule, num_classes, transforms).",
+    )
+
+    model_size: Literal[
+        "atto", "femto", "pico", "nano",
+        "tiny", "base", "large", "huge",
+    ] = Field(
+        default="nano",
+        description="Model size preset.",
+    )
+
+    drop_path: float = Field(
+        default=0.1,
+        description="Stochastic depth drop-path rate.",
+    )
+
+    teacher_pretrained: bool = Field(
+        default=True,
+        description=(
+            "Use ImageNet-pretrained teacher backbone when classes != 1000 "
+            "(head is replaced)."
+        ),
+    )
+    out: Optional[str] =None
+    batch_size: int =512
+    lr: float =0.2
+    alpha_kd: float =0.0
+    alpha_hint: float =0.1
+
 def parse_args():
-    p = argparse.ArgumentParser()
-    p = add_common_args(p)
-
-    # Defaults tuned for small images; adjust as needed from CLI
-    p.add_argument("--dataset", type=str, default="timnet",
-                   choices=["c10", "cifar10", "c100", "cifar100", "timnet", "tiny",
-                            "tinyimagenet", "tiny-imagenet", "imnet", "imagenet", "in1k", "imagenet1k"],
-                   help="Target dataset (affects datamodule, num_classes, transforms).")
-    p.add_argument("--model-size", type=str, default="nano",
-                   choices=["atto", "femto", "pico", "nano", "tiny", "base", "large", "huge"])
-    p.add_argument("--drop-path", type=float, default=0.1)
-    p.add_argument("--teacher-pretrained", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=True,
-                   help="Use ImageNet-pretrained teacher backbone when classes != 1000 (head is replaced).")
-
-    p.set_defaults(out=None,batch_size=512,lr=0.2,alpha_kd=0.0,alpha_hint=0.1)
-    
-    args = p.parse_args()
+    parser = ArgumentParser(model=Config)
+    args = parser.parse_typed_args()
     
     if args.out is None:
         args.out = f"./ckpt_{args.dataset}_convnextv2_{args.model_size}"

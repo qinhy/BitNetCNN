@@ -3,19 +3,14 @@ import argparse
 import json
 from math import ceil
 import os
-from typing import Dict, Iterable, Optional, Tuple, List
+from typing import Dict, Iterable, Literal, Optional, Tuple, List
 
+from pydantic import Field
+from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
 
-from common_utils import (
-    Bit,
-    LitBit,
-    TinyImageNetDataModule,
-    add_common_args,
-    setup_trainer,
-)
-
+from common_utils import *
 # -----------------------------------------------------------------------------
 # YOLOv8 presets and helpers
 # -----------------------------------------------------------------------------
@@ -406,46 +401,73 @@ class LitBitYOLOv8KD(LitBit):
 # CLI
 # -----------------------------------------------------------------------------
 
-def get_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser = add_common_args(parser)
+class Config(CommonTrainConfig):
+    dataset: Literal["timnet"] = Field(
+        default="timnet",
+        description="Currently only Tiny-ImageNet is supported for YOLOv8 distillation.",
+    )
 
-    parser.add_argument("--dataset", type=str, default="timnet", choices=["timnet"],
-                        help="Currently only Tiny-ImageNet is supported for YOLOv8 distillation.")
+    teacher_variant: Optional[str] = Field(
+        default=None,
+        description="Ultralytics YOLOv8 cls weight id (e.g., yolov8n-cls.pt). If omitted, inferred from --model-size.",
+    )
 
-    parser.add_argument("--teacher-variant", type=str, default=None,
-                        help="Ultralytics YOLOv8 cls weight id (e.g., yolov8n-cls.pt). If omitted, inferred from --model-size.")
-    parser.add_argument("--teacher-checkpoint", type=str, default=None,
-                        help="Optional local checkpoint path for the YOLOv8 teacher (overrides --teacher-variant).")
+    teacher_checkpoint: Optional[str] = Field(
+        default=None,
+        description="Optional local checkpoint path for the YOLOv8 teacher (overrides --teacher-variant).",
+    )
 
-    parser.add_argument("--model-size", type=str, default="nano",
-                        choices=["n","s","m","l","x","nano","small","medium","large","xlarge"],
-                        help="Student size preset (maps to YOLOv8 width/depth multipliers).")
-    parser.add_argument("--width-mult", type=float, default=None,
-                        help="Override width multiplier (if set, overrides --model-size for width).")
-    parser.add_argument("--depth-mult", type=float, default=None,
-                        help="Override depth multiplier (if set, overrides --model-size for depth).")
+    model_size: Literal[
+        "n", "s", "m", "l", "x",
+        "nano", "small", "medium", "large", "xlarge"
+    ] = Field(
+        default="nano",
+        description="Student size preset (maps to YOLOv8 width/depth multipliers).",
+    )
 
-    parser.add_argument("--teacher-class-map", type=str, default='./timnet_to_imagenet1k_indices.txt',
-                        help="Path to 200-length list (txt or JSON) mapping Tiny-ImageNet order to teacher indices.")
+    width_mult: Optional[float] = Field(
+        default=None,
+        description="Override width multiplier (if set, overrides --model-size for width).",
+    )
 
-    parser.add_argument("--expansion", type=float, default=0.5,
-                        help="Bottleneck expansion ratio (hidden=c2*expansion, rounded).")
-    parser.add_argument("--use-sppf", action="store_true",
-                        help="Use SPPF block before the head (Ultralytics YOLOv8-cls defaults to NO SPPF).")
-    parser.add_argument("--embed-dim", type=int, default=1280,
-                        help="Head embedding width (Ultralytics YOLOv8-cls uses 1280).")
-    parser.add_argument("--dropout", type=float, default=0.0,
-                        help="Dropout before classifier.")
+    depth_mult: Optional[float] = Field(
+        default=None,
+        description="Override depth multiplier (if set, overrides --model-size for depth).",
+    )
 
-    parser.add_argument("--print-summary", action="store_true",
-                        help="Print student parameter summary on startup.")    
-    parser.set_defaults(out=None)
-    return parser
+    teacher_class_map: str = Field(
+        default="./timnet_to_imagenet1k_indices.txt",
+        description="Path to 200-length list (txt or JSON) mapping Tiny-ImageNet order to teacher indices.",
+    )
 
+    expansion: float = Field(
+        default=0.5,
+        description="Bottleneck expansion ratio (hidden=c2*expansion, rounded).",
+    )
+
+    use_sppf: bool = Field(
+        default=False,
+        description="Use SPPF block before the head (Ultralytics YOLOv8-cls defaults to NO SPPF).",
+    )
+
+    embed_dim: int = Field(
+        default=1280,
+        description="Head embedding width (Ultralytics YOLOv8-cls uses 1280).",
+    )
+
+    dropout: float = Field(
+        default=0.0,
+        description="Dropout before classifier.",
+    )
+
+    print_summary: bool = Field(
+        default=False,
+        description="Print student parameter summary on startup.",
+    )
+    
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    parser = get_parser()
-    args = parser.parse_args(argv)
+    parser = ArgumentParser(model=Config)
+    args = parser.parse_typed_args()
 
     if args.dataset != "timnet":
         raise ValueError("Only Tiny-ImageNet is supported at the moment.")

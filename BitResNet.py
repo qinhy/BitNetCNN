@@ -1,6 +1,8 @@
 import argparse
-from typing import Callable, Dict, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Literal, Optional, Tuple
 
+from pydantic import Field
+from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
 from torchvision.models.resnet import BasicBlock, Bottleneck, ResNet
@@ -16,14 +18,7 @@ from bitlayers import convs
 from bitlayers.bit import Bit
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels
-from common_utils import (  # noqa: F401 (re-exported for backwards compat)
-    LitBit,
-    TinyImageNetDataModule,
-    CIFAR100DataModule,
-    ImageNetDataModule,
-    add_common_args,
-    setup_trainer,
-)
+from common_utils import *
 
 
 # ---------------------------------------------------------------------------
@@ -480,37 +475,29 @@ class LitBitResNetKD(LitBit):
 # ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------
+class Config(CommonTrainConfig):
+    out:Optional[str]=None
+    model_size: Literal["18", "50"] = Field(
+        default="18",
+        description="Model size"
+    )
 
-
-def get_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser = add_common_args(parser)
-    parser.add_argument("--model-size", type=str, default="18", choices=["18", "50"])
-    parser.add_argument(
-        "--dataset",
-        type=str,
+    dataset: Literal["c100", "imnet", "timnet"] = Field(
         default="timnet",
-        choices=["c100", "imnet", "timnet"],
-        help="Dataset to use (affects stems, classes, transforms)",
+        description="Dataset to use (affects stems, classes, transforms)",
     )
-    parser.add_argument(
-        "--timnet_teacher_epochs",
-        type=int,
-        default=200,
-        choices=[50, 100, 200],
-        help="Which Tiny-ImageNet ResNet teacher to load from zeyuanyin/tiny-imagenet",
-    )
-    parser.set_defaults(out=None)
-    return parser
 
+    timnet_teacher_epochs: Literal[50, 100, 200] = Field(
+        default=200,
+        description="Which Tiny-ImageNet ResNet teacher to load from zeyuanyin/tiny-imagenet",
+    )
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    parser = get_parser()
-    args = parser.parse_args(argv)
+    parser = ArgumentParser(model=Config)
+    args = parser.parse_typed_args()
     if args.out is None:
         args.out = f"./ckpt_{args.dataset}_rn{args.model_size}"
     return args
-
 
 def run_training(args: argparse.Namespace) -> None:
     export_dir = f"{args.out}_{args.dataset}"

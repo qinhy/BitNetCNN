@@ -270,6 +270,7 @@ import re
 from functools import partial
 from typing import List, Optional, Sequence, Union
 
+from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1009,27 +1010,52 @@ class LitMobileNetV5KD(LitBit):
 # ----------------------------
 # CLI / main (MobileNetV5)
 # ----------------------------
+class Config(CommonTrainConfig):
+    dataset: Literal[
+        "c10", "cifar10",
+        "c100", "cifar100",
+        "timnet", "tiny",
+        "tinyimagenet", "tiny-imagenet",
+        "imnet", "imagenet", "in1k", "imagenet1k",
+    ] = Field(
+        default="timnet",
+        description="Target dataset (affects datamodule, num_classes, transforms).",
+    )
+
+    # For MobileNetV4 we accept conv + hybrid tags in one flag
+    model_size: Literal[
+        "small",
+        "medium",
+        "large",
+        "hybrid_medium",
+        "hybrid_large",
+    ] = Field(
+        default="hybrid_medium",
+        description="MobileNetV4 variant.",
+    )
+
+    drop_path: float = Field(
+        default=0.0,
+        description="Stochastic depth drop-path rate.",
+    )
+
+    teacher_pretrained: bool = Field(
+        default=True,
+        description=(
+            "Use ImageNet-pretrained teacher backbone when classes != 1000 "
+            "(head is replaced)."
+        ),
+    )
+    
+    out:Optional[str]=None
+    batch_size:int=4
+    lr:float=0.2
+    alpha_kd:float=0.0
+    alpha_hint:float=0.05
+
 def parse_args_mnv5():
-    p = argparse.ArgumentParser()
-    p = add_common_args(p)
-
-    p.add_argument("--dataset", type=str, default="timnet",
-                   choices=["c10", "cifar10", "c100", "cifar100", "timnet", "tiny",
-                            "tinyimagenet", "tiny-imagenet", "imnet", "imagenet", "in1k", "imagenet1k"],
-                   help="Target dataset (affects datamodule, num_classes, transforms).")
-
-    # For MobileNetV5 we accept conv + hybrid tags in one flag
-    p.add_argument("--model-size", type=str, default="small",
-                   choices=["tiny", "small", "base", "large", "300m"],
-                   help="MobileNetV5 variant.")
-
-    p.add_argument("--drop-path", type=float, default=0.0)
-    p.add_argument("--teacher-pretrained", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=True,
-                   help="Use ImageNet-pretrained teacher backbone when classes != 1000 (head is replaced).")
-
-    p.set_defaults(out=None,batch_size=4,lr=0.2,alpha_kd=0.0,alpha_hint=0.05)
-
-    args = p.parse_args()
+    parser = ArgumentParser(model=Config)
+    args = parser.parse_typed_args()
     if args.out is None:
         args.out = f"./ckpt_{args.dataset}_mnv5_{args.model_size}"
     return args

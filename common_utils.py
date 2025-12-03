@@ -15,7 +15,7 @@ import warnings
 from PIL import Image, ImageTk
 
 import random
-from typing import Callable, List, Literal, Optional, Sequence, Tuple, Type, Union
+from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, Type, Union
 from pydantic import BaseModel, Field
 import torch
 
@@ -946,164 +946,6 @@ class ExportBestTernary(Callback):
 # ----------------------------
 # LightningModule: KD + hints + ternary eval/export
 # ----------------------------
-class LitBit(pl.LightningModule):
-    def __init__(self, lr, wd, epochs, label_smoothing=0.1,
-                 alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
-                 width_mult=1.0, amp=True,
-                 export_dir="./ckpt_c100_mbv2",
-                 student=None,
-                 teacher=None,
-                 dataset_name='',
-                 model_name='',
-                 model_size='',
-                 hint_points=[],
-                 num_classes=-1):
-        super().__init__()
-        self.save_hyperparameters(ignore=['student','teacher','_t_feats','_s_feats',
-                                          '_t_handles','_s_handles','_ternary_snapshot'])
-        self.scale_op = scale_op
-        self.student = student
-        self.teacher = teacher
-        self.dataset_name = dataset_name
-        self.model_name = model_name
-        self.model_size = model_size
-        if alpha_kd<=0 and alpha_hint<=0:
-            self.teacher=None
-        if self.teacher:
-            for p in self.teacher.parameters(): p.requires_grad_(False)
-        self.ce = nn.CrossEntropyLoss(label_smoothing=label_smoothing).eval()
-        self.kd = KDLoss(T=T).eval()
-        self.hint = AdaptiveHintLoss().eval()
-        self.hint_points = hint_points
-        self.acc_fp = MulticlassAccuracy(num_classes=num_classes).eval()
-                        # average='micro', multidim_average='global', top_k=1).eval()
-
-        self._ternary_snapshot = None
-        self._t_feats = {}
-        self._s_feats = {}
-        self._t_handles = []
-        self._s_handles = []
-        self.t_acc_fp = None
-
-    def setup(self, stage=None):
-        if self.teacher:
-            self.teacher = self.teacher.to(self.device).eval()
-            if self.hparams.alpha_hint>0:
-                self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats, 0)
-                self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, 1)
-
-    def teardown(self, stage=None):
-        for h in getattr(self, "_t_handles", []):
-            try: h.remove()
-            except: pass
-        for h in getattr(self, "_s_handles", []):
-            try: h.remove()
-            except: pass
-
-    def forward(self, x):
-        return self.student(x)
-
-    def on_fit_start(self):
-        n_params = sum(p.numel() for p in self.student.parameters())
-        acc_name = self.trainer.accelerator.__class__.__name__
-        strategy_name = self.trainer.strategy.__class__.__name__
-        num_devices = getattr(self.trainer, "num_devices", None) or len(self.trainer.devices or [])
-        dev_str = str(self.device)
-        cuda_name = ""
-        if torch.cuda.is_available() and "cuda" in dev_str:
-            try: cuda_name = f" | CUDA: {torch.cuda.get_device_name(self.device.index or 0)}"
-            except: pass
-        self.print(f"Model params: {n_params/1e6:.2f}M | Accelerator: {acc_name} | Devices: {num_devices} | Strategy: {strategy_name} | Device: {dev_str}{cuda_name}")
-
-    @torch.no_grad()
-    def _clone_student(self):
-        clone = self.student.clone()
-        clone.load_state_dict(self.student.state_dict(), strict=True)
-        clone = convert_to_ternary(clone)
-        return clone.eval().to(self.device)
-
-    def on_validation_epoch_start(self):
-        print()
-        self._ternary_snapshot = self._clone_student()
-
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        is_mix = isinstance(y, tuple)
-        if is_mix:
-            y_a, y_b, lam = y
-
-        # use_amp = bool(self.hparams.amp and "cuda" in str(self.device))
-
-        z_s = self.student(x)
-        
-        if is_mix:
-            loss_ce = lam * self.ce(z_s, y_a) + (1 - lam) * self.ce(z_s, y_b)
-        else:
-            loss_ce = self.ce(z_s, y)
-
-        if self.teacher:
-            z_t = self.teacher(x)
-
-        loss_kd = 0.0
-        if self.hparams.alpha_kd > 0:
-            loss_kd = self.kd(z_s.float(), z_t.float())
-
-        # Hints
-        loss_hint = 0.0
-        if self.hparams.alpha_hint>0 and len(self.hint_points)>0:
-            for n in self.hint_points:                
-                sn = tn = n
-                if type(n)==tuple:
-                    sn,tn = n
-                if sn not in self._s_feats:
-                    raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
-                if tn not in self._t_feats:
-                    raise ValueError(f"Hint point {tn} not found in teacher features of {self._t_feats}.")
-                loss_hint = loss_hint + self.hint(sn, self._s_feats[sn].float(), self._t_feats[tn].float())
-
-        loss = (1.0 - self.hparams.alpha_kd) * loss_ce + self.hparams.alpha_kd * loss_kd + self.hparams.alpha_hint * loss_hint
-
-        logd = {}
-        logd["train/loss"] = loss
-        if loss_ce>0.0 : logd["train/ce"] = loss_ce
-        if loss_kd>0.0 : logd["train/kd"] = loss_kd
-        if loss_hint>0.0 : logd["train/hint"] = loss_hint
-        logd["lr"] = self.trainer.optimizers[0].param_groups[0]["lr"]
-        self.log_dict(logd, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=x.size(0))
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        def log_val(n,model=None,acc=None,x=x,y=y):
-            if acc is None:
-                # acc = (model(x).argmax(1)==y).sum()/x.size(0)
-                acc = self.acc_fp(model(x), y)
-            self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
-            return acc
-        
-        with torch.no_grad():
-            acc_fp = log_val("acc_fp", self.student)
-            acc_t = log_val("acc_tern", self._ternary_snapshot)
-            if self.hparams.alpha_kd>0:
-                if self.t_acc_fp is None and self.teacher:
-                    self.t_acc_fp = log_val("t_acc_fp", self.teacher)
-                else:
-                    log_val("t_acc_fp", acc=self.t_acc_fp)
-
-    def configure_optimizers(self):
-        opt = torch.optim.SGD(
-            list(self.student.parameters()) + list(self.hint.parameters()),
-            lr=self.hparams.lr, momentum=0.9, weight_decay=self.hparams.wd, nesterov=True
-        )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.hparams.epochs)
-        return {
-            "optimizer": opt,
-            "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
-        }
-
-# ----------------------------
-# Common CLI utilities
-# ----------------------------
 class CommonTrainConfig(BaseModel):
     data: str = "./data"
     out: str = "./ckpt_c100"
@@ -1135,6 +977,189 @@ class CommonTrainConfig(BaseModel):
     )
     strategy: Literal["auto", "ddp", "ddp_spawn", "fsdp"] = "auto"
 
+class LitBitConfig(BaseModel):
+    lr: float
+    wd: float
+    epochs: int
+
+    label_smoothing: float = 0.1
+    alpha_kd: float = 0.7
+    alpha_hint: float = 0.05
+    T: float = 4.0
+    scale_op: str = "median"
+
+    width_mult: float = 1.0
+    amp: bool = True
+    export_dir: str = "./ckpt_c100_mbv2"
+
+    student: Optional[Any] = None
+    teacher: Optional[Any] = None
+
+    dataset_name: str = ""
+    model_name: str = ""
+    model_size: str = ""
+
+    hint_points: List[int] = Field(default_factory=list)
+    num_classes: int = -1
+
+class LitBit(pl.LightningModule):
+    def __init__(self, config:LitBitConfig):
+        super().__init__()
+        if type(config) is not dict:
+            config = config.model_dump()
+        config = LitBitConfig.model_validate(config)
+        self.save_hyperparameters(ignore=['student','teacher','_t_feats','_s_feats',
+                                          '_t_handles','_s_handles','_ternary_snapshot'])
+        self.scale_op = config.scale_op
+        self.student:nn.Module = config.student
+        self.teacher = config.teacher
+        self.dataset_name = config.dataset_name
+        self.model_name = config.model_name
+        self.model_size = config.model_size
+        self.alpha_kd = config.alpha_kd
+        self.alpha_hint = config.alpha_hint
+        if self.alpha_kd<=0 and self.alpha_hint<=0:
+            self.teacher=None
+        if self.teacher:
+            for p in self.teacher.parameters(): p.requires_grad_(False)
+        self.ce = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing).eval()
+        self.kd = KDLoss(T=T).eval()
+        self.hint = AdaptiveHintLoss().eval()
+        self.hint_points = config.hint_points
+        self.acc_fp = MulticlassAccuracy(num_classes=config.num_classes).eval()
+                        # average='micro', multidim_average='global', top_k=1).eval()
+
+        self._ternary_snapshot = None
+        self._t_feats = {}
+        self._s_feats = {}
+        self._t_handles = []
+        self._s_handles = []
+        self.t_acc_fp = None
+        self.lr = config.lr
+        self.wd = config.wd
+        self.epochs = config.epochs
+
+    def setup(self, stage=None):
+        if self.teacher:
+            self.teacher = self.teacher.to(self.device).eval()
+            if self.alpha_hint>0:
+                self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats, 0)
+                self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, 1)
+
+    def teardown(self, stage=None):
+        for h in getattr(self, "_t_handles", []):
+            try: h.remove()
+            except: pass
+        for h in getattr(self, "_s_handles", []):
+            try: h.remove()
+            except: pass
+
+    def forward(self, x):
+        return self.student(x)
+
+    def on_fit_start(self):
+        n_params = sum(p.numel() for p in self.student.parameters())
+        acc_name = self.trainer.accelerator.__class__.__name__
+        strategy_name = self.trainer.strategy.__class__.__name__
+        num_devices = getattr(self.trainer, "num_devices", None) or len(self.trainer.devices or [])
+        dev_str = str(self.device)
+        cuda_name = ""
+        if torch.cuda.is_available() and "cuda" in dev_str:
+            try: cuda_name = f" | CUDA: {torch.cuda.get_device_name(self.device.index or 0)}"
+            except: pass
+        self.print(f"Model params: {n_params/1e6:.2f}M | Accelerator: {acc_name} | Devices: {num_devices} | Strategy: {strategy_name} | Device: {dev_str}{cuda_name}")
+
+    @torch.no_grad()
+    def _clone_student(self):
+        clone:nn.Module = self.student.clone()
+        clone.load_state_dict(self.student.state_dict(), strict=True)
+        clone = convert_to_ternary(clone)
+        return clone.eval().to(self.device)
+
+    def on_validation_epoch_start(self):
+        print()
+        self._ternary_snapshot = self._clone_student()
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        is_mix = isinstance(y, tuple)
+        if is_mix:
+            y_a, y_b, lam = y
+
+        # use_amp = bool(self.amp and "cuda" in str(self.device))
+
+        z_s = self.student(x)
+        z_t = None
+        
+        if is_mix:
+            loss_ce = lam * self.ce(z_s, y_a) + (1 - lam) * self.ce(z_s, y_b)
+        else:
+            loss_ce = self.ce(z_s, y)
+
+        if self.teacher:
+            z_t = self.teacher(x)
+
+        loss_kd = 0.0
+        if z_t and self.alpha_kd > 0:
+            loss_kd = self.kd(z_s.float(), z_t.float())
+
+        # Hints
+        loss_hint = 0.0
+        if self.alpha_hint>0 and len(self.hint_points)>0:
+            for n in self.hint_points:                
+                sn = tn = n
+                if type(n)==tuple:
+                    sn,tn = n
+                if sn not in self._s_feats:
+                    raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
+                if tn not in self._t_feats:
+                    raise ValueError(f"Hint point {tn} not found in teacher features of {self._t_feats}.")
+                loss_hint = loss_hint + self.hint(sn, self._s_feats[sn].float(), self._t_feats[tn].float())
+
+        loss = (1.0 - self.alpha_kd) * loss_ce + self.alpha_kd * loss_kd + self.alpha_hint * loss_hint
+
+        logd = {}
+        logd["train/loss"] = loss
+        if loss_ce>0.0 : logd["train/ce"] = loss_ce
+        if loss_kd>0.0 : logd["train/kd"] = loss_kd
+        if loss_hint>0.0 : logd["train/hint"] = loss_hint
+        logd["lr"] = self.trainer.optimizers[0].param_groups[0]["lr"]
+        self.log_dict(logd, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=x.size(0))
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        def log_val(n,model=None,acc=None,x=x,y=y):
+            if acc is None and model is not None:
+                # acc = (model(x).argmax(1)==y).sum()/x.size(0)
+                acc = self.acc_fp(model(x), y)
+            if acc is not None:
+                self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+            return acc
+        
+        with torch.no_grad():
+            acc_fp = log_val("acc_fp", self.student)
+            acc_t = log_val("acc_tern", self._ternary_snapshot)
+            if self.alpha_kd>0:
+                if self.t_acc_fp is None and self.teacher:
+                    self.t_acc_fp = log_val("t_acc_fp", self.teacher)
+                else:
+                    log_val("t_acc_fp", acc=self.t_acc_fp)
+
+    def configure_optimizers(self):
+        opt = torch.optim.SGD(
+            list(self.student.parameters()) + list(self.hint.parameters()),
+            lr=self.lr, momentum=0.9, weight_decay=self.wd, nesterov=True
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
+        }
+
+# ----------------------------
+# Common CLI utilities
+# ----------------------------
 # def add_common_args(parser):
 #     """Add common training arguments to an argument parser."""
 #     parser.add_argument("--data", type=str, default="./data")
