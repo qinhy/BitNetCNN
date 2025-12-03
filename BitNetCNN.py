@@ -1,5 +1,5 @@
 # mnist_bitnet_lightning.py
-from pydantic2_argparse import ArgumentParser
+from pydanticV2_argparse import ArgumentParser
 import torch
 
 torch.set_float32_matmul_precision('high')
@@ -109,24 +109,27 @@ class NetCNN(nn.Module):
 # ----------------------------
 # LightningModule wrapper using LitBit
 # ----------------------------
+class Config(CommonTrainConfig):
+    data:str="./data"
+    out:Optional[str]="./ckpt_mnist"
+    epochs:int=50
+    batch_size:int=512
+    lr:float=2e-3
+    wd:float=1e-4
+    label_smoothing:float=0.0
+
 class LitNetCNNKD(LitBit):
-    def __init__(self, lr, wd, epochs, label_smoothing=0.0,
-                 alpha_kd=0.0, alpha_hint=0.0, T=4.0, scale_op="median",
-                 width_mult=1.0, amp=True, export_dir="./ckpt_mnist"):
+    def __init__(self, config):
         # No teacher, no KD for MNIST (simple model)
-        student = NetCNN(in_channels=1, num_classes=10, expand_ratio=5, scale_op=scale_op)
-        super().__init__(
-            lr=lr, wd=wd, epochs=epochs, label_smoothing=label_smoothing,
-            alpha_kd=alpha_kd, alpha_hint=alpha_hint, T=T, scale_op=scale_op,
-            width_mult=width_mult, amp=amp, export_dir=export_dir,
+        student = NetCNN(in_channels=1, num_classes=10, expand_ratio=5, scale_op=config.scale_op)
+        config = dict(**config.model_dump(),
             dataset_name='mnist',
             model_name='netcnn',
             model_size='small',
-            hint_points=[],
             student=student,
-            teacher=None,
             num_classes=10,
         )
+        super().__init__(config)
         # Override metrics for MNIST (10 classes instead of 100)
         self.acc_fp = MulticlassAccuracy(num_classes=10).eval()
         self.acc_tern = MulticlassAccuracy(num_classes=10).eval()
@@ -135,9 +138,9 @@ class LitNetCNNKD(LitBit):
         # Use AdamW for MNIST instead of SGD
         opt = torch.optim.AdamW(
             list(self.student.parameters()) + list(self.hint.parameters()),
-            lr=self.hparams.lr, weight_decay=self.hparams.wd
+            lr=self.lr, weight_decay=self.wd
         )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.hparams.epochs, eta_min=self.hparams.lr*0.01)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs, eta_min=self.lr*0.01)
         return {
             "optimizer": opt,
             "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
@@ -146,37 +149,16 @@ class LitNetCNNKD(LitBit):
 # ----------------------------
 # CLI / main
 # ----------------------------
-
-class Config(CommonTrainConfig):
-    pass
 def parse_args():
     parser = ArgumentParser(model=Config)
-    parser.set_defaults(
-        data="./data",
-        out="./ckpt_mnist",
-        epochs=50,
-        batch_size=512,
-        lr=2e-3,
-        wd=1e-4,
-        label_smoothing=0.0
-    )
     return parser.parse_typed_args()
 
 def main():
     args = parse_args()
-
-    lit = LitNetCNNKD(
-        lr=args.lr, wd=args.wd, epochs=args.epochs,
-        label_smoothing=args.label_smoothing,
-        alpha_kd=0.0, alpha_hint=0.0, T=args.T,
-        scale_op=args.scale_op, amp=args.amp, export_dir=args.out
-    )
-
+    lit = LitNetCNNKD(args)
     trainer, dm = setup_trainer(args, lit)
-
     # Override datamodule with MNIST
     dm = MNISTDataModule(data_dir=args.data, batch_size=args.batch_size, num_workers=4)
-
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)
 

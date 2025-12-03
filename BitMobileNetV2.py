@@ -1,4 +1,5 @@
 import argparse
+from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
 from bitlayers import convs
@@ -193,22 +194,36 @@ class LitBitMBv2KD(LitBit):
 # ----------------------------
 # CLI / main
 # ----------------------------
-def parse_args():
-    p = argparse.ArgumentParser()
-    p = add_common_args(p)
-    p.set_defaults(out=None, batch_size=16)
-    p.add_argument("--width-mult", type=float, default=1.4)
-    p.add_argument("--teacher-variant", type=str, default="cifar100_mobilenetv2_x1_4")
-    p.add_argument("--dataset", type=str, default="timnet",
-                   choices=["c100","timnet"],
-                   help="Dataset to use (affects classes, transforms)")
-    p.add_argument("--timnet_teacher_epochs", type=int, default=200,
-                   choices=[50, 100, 200],
-                   help="Which Tiny-ImageNet MobileNetV2 teacher to load from zeyuanyin/tiny-imagenet")
-    return p.parse_args()
+class Config(CommonTrainConfig):
+    width_mult: float = Field(
+        default=1.4,
+        description="Width multiplier for MobileNetV2.",
+    )
 
+    teacher_variant: str = Field(
+        default="cifar100_mobilenetv2_x1_4",
+        description="Teacher checkpoint/variant name.",
+    )
+
+    dataset: Literal["c100", "timnet"] = Field(
+        default="timnet",
+        description="Dataset to use (affects classes, transforms).",
+    )
+
+    timnet_teacher_epochs: Literal[50, 100, 200] = Field(
+        default=200,
+        description=(
+            "Which Tiny-ImageNet MobileNetV2 teacher to load from "
+            "zeyuanyin/tiny-imagenet."
+        ),
+    )
+    
+    out:Optional[str]=None
+    batch_size:int=16
+    
 def main():
-    args = parse_args()
+    parser = ArgumentParser(model=Config)
+    args = parser.parse_typed_args()
 
     if args.out is None:
         args.out = f"./ckpt_{args.dataset}_mbv2"
