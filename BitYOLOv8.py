@@ -522,9 +522,9 @@ def run_training(args: argparse.Namespace) -> None:
         data_dir=args.data,
         batch_size=args.batch_size,
         num_workers=min(8, os.cpu_count() or 4),
-        aug_mixup=args.mixup,
-        aug_cutmix=args.cutmix,
-        alpha=args.mix_alpha,
+        mixup=args.mixup,
+        cutmix=args.cutmix,
+        mix_alpha=args.mix_alpha,
     )
     dm = TinyImageNetDataModule(**dm_kwargs)
 

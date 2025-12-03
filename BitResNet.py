@@ -356,7 +356,6 @@ _TEACHER_MAP: Dict[str, Dict[str, Callable[..., ResNet]]] = {
 # LightningModule wrappers
 # ---------------------------------------------------------------------------
 
-
 def _canonical_dataset(dataset_name: str) -> str:
     mapping = {
         "c100": "c100",
@@ -442,12 +441,12 @@ def main() -> None:
     args = parser.parse_typed_args()
 
     dmargs = dict(
-        data_dir=args.data,
+        data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_workers=4,
-        aug_mixup=args.mixup,
-        aug_cutmix=args.cutmix,
-        alpha=args.mix_alpha,
+        mixup=args.mixup,
+        cutmix=args.cutmix,
+        mix_alpha=args.mix_alpha,
     )
 
     if args.dataset_name == "c100":
