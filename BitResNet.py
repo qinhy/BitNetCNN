@@ -12,7 +12,10 @@ from torchvision.models import (
 )
 from huggingface_hub import hf_hub_download
 
+from bitlayers import convs
 from bitlayers.bit import Bit
+from bitlayers.acts import ActModels
+from bitlayers.norms import NormModels
 from common_utils import (  # noqa: F401 (re-exported for backwards compat)
     LitBit,
     TinyImageNetDataModule,
@@ -27,104 +30,8 @@ from common_utils import (  # noqa: F401 (re-exported for backwards compat)
 # Bit-blocks and core network
 # ---------------------------------------------------------------------------
 
-class BasicBlockBit(nn.Module):
-    expansion = 1
-
-    def __init__(
-        self,
-        inplanes: int,
-        planes: int,
-        stride: int = 1,
-        downsample: Optional[nn.Module] = None,
-        scale_op: str = "median",
-    ) -> None:
-        super().__init__()
-        self.conv1 = Bit.Conv2d(
-            inplanes,
-            planes,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            bias=True,
-            scale_op=scale_op,
-        )
-        self.norm1 = nn.BatchNorm2d(planes)
-        self.act = nn.SiLU(inplace=True)
-        self.conv2 = Bit.Conv2d(
-            planes,
-            planes,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=True,
-            scale_op=scale_op,
-        )
-        self.norm2 = nn.BatchNorm2d(planes)
-        self.downsample = downsample
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x
-        out = self.act(self.norm1(self.conv1(x)))
-        out = self.norm2(self.conv2(out))
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        return self.act(out + identity)
-
-
-class BottleneckBit(nn.Module):
-    expansion = 4
-
-    def __init__(
-        self,
-        inplanes: int,
-        planes: int,
-        stride: int = 1,
-        downsample: Optional[nn.Module] = None,
-        scale_op: str = "median",
-    ) -> None:
-        super().__init__()
-        width = planes
-        self.conv1 = Bit.Conv2d(
-            inplanes,
-            width,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True,
-            scale_op=scale_op,
-        )
-        self.norm1 = nn.BatchNorm2d(width)
-        self.conv2 = Bit.Conv2d(
-            width,
-            width,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            bias=True,
-            scale_op=scale_op,
-        )
-        self.norm2 = nn.BatchNorm2d(width)
-        self.conv3 = Bit.Conv2d(
-            width,
-            planes * self.expansion,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True,
-            scale_op=scale_op,
-        )
-        self.norm3 = nn.BatchNorm2d(planes * self.expansion)
-        self.act = nn.SiLU(inplace=True)
-        self.downsample = downsample
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x
-        out = self.act(self.norm1(self.conv1(x)))
-        out = self.act(self.norm2(self.conv2(out)))
-        out = self.norm3(self.conv3(out))
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        return self.act(out + identity)
+BasicBlockBit = convs.Conv2dModels.ResNetBasicBlock
+BottleneckBit = convs.Conv2dModels.ResNetBottleneck
 
 
 class BitResNet(nn.Module):
@@ -133,6 +40,7 @@ class BitResNet(nn.Module):
         block: Callable[..., nn.Module],
         layers: Iterable[int],
         num_classes: int,
+        expansion: int,
         scale_op: str = "median",
         in_ch: int = 3,
         small_stem: bool = True,
@@ -145,6 +53,7 @@ class BitResNet(nn.Module):
         self.in_ch = in_ch
         self.inplanes = 64
         self.small_stem = small_stem
+        self.expansion = expansion
 
         if small_stem:
             # CIFAR / Tiny stem: 3x3 stride 1, no maxpool
@@ -152,11 +61,8 @@ class BitResNet(nn.Module):
                 Bit.Conv2d(
                     in_ch,
                     self.inplanes,
-                    kernel_size=3,
-                    stride=1,
-                    padding=1,
-                    bias=True,
-                    scale_op=scale_op,
+                    kernel_size=3,stride=1,padding=1,
+                    bias=True,scale_op=scale_op,
                 ),
                 nn.BatchNorm2d(self.inplanes),
                 nn.SiLU(inplace=True),
@@ -167,11 +73,8 @@ class BitResNet(nn.Module):
                 Bit.Conv2d(
                     in_ch,
                     self.inplanes,
-                    kernel_size=7,
-                    stride=2,
-                    padding=3,
-                    bias=True,
-                    scale_op=scale_op,
+                    kernel_size=7,stride=2,padding=3,
+                    bias=True,scale_op=scale_op,
                 ),
                 nn.BatchNorm2d(self.inplanes),
                 nn.SiLU(inplace=True),
@@ -185,8 +88,16 @@ class BitResNet(nn.Module):
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            Bit.Linear(512 * block.expansion, num_classes, bias=True, scale_op=scale_op),
+            Bit.Linear(512 * self.expansion, num_classes, bias=True, scale_op=scale_op),
         )
+
+    @staticmethod
+    def _act() -> ActModels.type:
+        return ActModels.SiLU(inplace=True)
+
+    @staticmethod
+    def _norm() -> NormModels.type:
+        return NormModels.BatchNorm2d(num_features=-1)
 
     def _make_layer(
         self,
@@ -196,41 +107,91 @@ class BitResNet(nn.Module):
         stride: int,
         scale_op: str,
     ) -> nn.Sequential:
-        downsample = None
-        out_ch = planes * block.expansion
-        if stride != 1 or self.inplanes != out_ch:
-            downsample = nn.Sequential(
-                Bit.Conv2d(
-                    self.inplanes,
-                    out_ch,
-                    kernel_size=1,
-                    stride=stride,
-                    bias=True,
-                    scale_op=scale_op,
-                ),
-                nn.BatchNorm2d(out_ch),
-            )
-        layers = [
-            block(
-                self.inplanes,
-                planes,
-                stride=stride,
-                downsample=downsample,
-                scale_op=scale_op,
-            )
-        ]
-        self.inplanes = out_ch
-        for _ in range(1, blocks):
+        out_ch = planes * self.expansion
+        layers = []
+        for block_idx in range(blocks):
+            block_stride = stride if block_idx == 0 else 1
             layers.append(
-                block(
-                    self.inplanes,
-                    planes,
-                    stride=1,
-                    downsample=None,
+                self._build_block(
+                    block=block,
+                    inplanes=self.inplanes,
+                    out_channels=out_ch,
+                    stride=block_stride,
                     scale_op=scale_op,
                 )
             )
+            self.inplanes = out_ch
         return nn.Sequential(*layers)
+
+    def _build_block(
+        self,
+        block: Callable[..., nn.Module],
+        inplanes: int,
+        out_channels: int,
+        stride: int,
+        scale_op: str,
+    ) -> nn.Module:
+        shortcut_layer = None
+        if stride != 1 or inplanes != out_channels:
+            shortcut_layer = convs.Conv2dModels.Conv2dNorm(
+                in_channels=-1,
+                norm=self._norm(),
+                scale_op=scale_op,
+            )
+
+        if block is BasicBlockBit:
+            block_cfg = BasicBlockBit(
+                in_channels=inplanes,
+                out_channels=out_channels,
+                stride=stride,
+                padding=1,
+                act_layer=self._act(),
+                conv1_layer=convs.Conv2dModels.Conv2dNormAct(
+                    in_channels=-1,
+                    norm=self._norm(),
+                    act=self._act(),
+                    scale_op=scale_op,
+                ),
+                conv2_layer=convs.Conv2dModels.Conv2dNorm(
+                    in_channels=-1,
+                    norm=self._norm(),
+                    scale_op=scale_op,
+                ),
+                shortcut_layer=shortcut_layer,
+                scale_op=scale_op,
+                bit=True,
+            )
+        elif block is BottleneckBit:
+            block_cfg = BottleneckBit(
+                in_channels=inplanes,
+                out_channels=out_channels,
+                stride=stride,
+                padding=1,
+                act_layer=self._act(),
+                conv_reduce_layer=convs.Conv2dModels.Conv2dNormAct(
+                    in_channels=-1,
+                    norm=self._norm(),
+                    act=self._act(),
+                    scale_op=scale_op,
+                ),
+                conv_transform_layer=convs.Conv2dModels.Conv2dNormAct(
+                    in_channels=-1,
+                    norm=self._norm(),
+                    act=self._act(),
+                    scale_op=scale_op,
+                ),
+                conv_expand_layer=convs.Conv2dModels.Conv2dNorm(
+                    in_channels=-1,
+                    norm=self._norm(),
+                    scale_op=scale_op,
+                ),
+                shortcut_layer=shortcut_layer,
+                scale_op=scale_op,
+            )
+        else:
+            raise ValueError(f"Unsupported block type: {block}")
+
+        return block_cfg.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
@@ -254,7 +215,7 @@ class BitResNet18(BitResNet):
         in_ch: int = 3,
         small_stem: bool = True,
     ) -> None:
-        super().__init__(BasicBlockBit, [2, 2, 2, 2], num_classes, scale_op, in_ch, small_stem)
+        super().__init__(BasicBlockBit, [2, 2, 2, 2], num_classes, 1, scale_op, in_ch, small_stem)
 
 
 class BitResNet50(BitResNet):
@@ -265,7 +226,7 @@ class BitResNet50(BitResNet):
         in_ch: int = 3,
         small_stem: bool = True,
     ) -> None:
-        super().__init__(BottleneckBit, [3, 4, 6, 3], num_classes, scale_op, in_ch, small_stem)
+        super().__init__(BottleneckBit, [3, 4, 6, 3], num_classes, 4, scale_op, in_ch, small_stem)
 
 
 # ---------------------------------------------------------------------------
@@ -515,77 +476,6 @@ class LitBitResNetKD(LitBit):
             teacher=teacher,
             num_classes=num_classes,
         )
-
-
-class LitBitResNet18KD(LitBitResNetKD):
-    def __init__(
-        self,
-        lr: float,
-        wd: float,
-        epochs: int,
-        label_smoothing: float = 0.1,
-        alpha_kd: float = 0.7,
-        alpha_hint: float = 0.05,
-        T: float = 4.0,
-        scale_op: str = "median",
-        width_mult: float = 1.0,
-        amp: bool = True,
-        export_dir: str = "./ckpt_kd_rn18",
-        dataset_name: str = "c100",
-        timnet_teacher_epochs: int = 200,
-    ) -> None:
-        super().__init__(
-            lr,
-            wd,
-            epochs,
-            label_smoothing,
-            alpha_kd,
-            alpha_hint,
-            T,
-            scale_op,
-            width_mult,
-            amp,
-            export_dir,
-            dataset_name,
-            timnet_teacher_epochs,
-            model_size="18",
-        )
-
-
-class LitBitResNet50KD(LitBitResNetKD):
-    def __init__(
-        self,
-        lr: float,
-        wd: float,
-        epochs: int,
-        label_smoothing: float = 0.1,
-        alpha_kd: float = 0.7,
-        alpha_hint: float = 0.05,
-        T: float = 4.0,
-        scale_op: str = "median",
-        width_mult: float = 1.0,
-        amp: bool = True,
-        export_dir: str = "./ckpt_kd_rn50",
-        dataset_name: str = "c100",
-        timnet_teacher_epochs: int = 200,
-    ) -> None:
-        super().__init__(
-            lr,
-            wd,
-            epochs,
-            label_smoothing,
-            alpha_kd,
-            alpha_hint,
-            T,
-            scale_op,
-            width_mult,
-            amp,
-            export_dir,
-            dataset_name,
-            timnet_teacher_epochs,
-            model_size="50",
-        )
-
 
 # ---------------------------------------------------------------------------
 # CLI helpers
