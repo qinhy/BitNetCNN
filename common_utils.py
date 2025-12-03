@@ -777,7 +777,8 @@ class TinyImageNetDataModule(pl.LightningDataModule):
 # MNIST DataModule
 # ----------------------------
 class MNISTDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4):
+    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
+                 aug_mixup: bool = False, aug_cutmix: bool = False, alpha: float = 1.0):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
@@ -948,7 +949,7 @@ class ExportBestTernary(Callback):
 # ----------------------------
 class CommonTrainConfig(BaseModel):
     data: str = "./data"
-    out: str = "./ckpt_c100"
+    export_dir: str = "./ckpt_c100"
 
     epochs: int = Field(200, ge=1)
     batch_size: int = Field(512, ge=1)
@@ -999,7 +1000,7 @@ class LitBitConfig(BaseModel):
     model_name: str = ""
     model_size: str = ""
 
-    hint_points: List[int] = Field(default_factory=list)
+    hint_points: List[str] = Field(default_factory=list)
     num_classes: int = -1
 
 class LitBit(pl.LightningModule):
@@ -1184,7 +1185,7 @@ class LitBit(pl.LightningModule):
 #                         help="Distributed training strategy (default: auto)")
 #     return parser
 
-def setup_trainer(args, lit_module, dm = None):
+def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
     """
     Setup common PyTorch Lightning training components.
 
@@ -1202,11 +1203,11 @@ def setup_trainer(args, lit_module, dm = None):
             aug_mixup=args.mixup, aug_cutmix=args.cutmix, alpha=args.mix_alpha
         )
 
-    os.makedirs(args.out, exist_ok=True)
-    logger = CSVLogger(save_dir=args.out, name="logs")
+    os.makedirs(args.export_dir, exist_ok=True)
+    logger = CSVLogger(save_dir=args.export_dir, name="logs")
     ckpt_cb = ModelCheckpoint(monitor="val/acc_tern", mode="max", save_top_k=1, save_last=True)
     lr_cb = LearningRateMonitor(logging_interval="epoch")
-    export_cb = ExportBestTernary(args.out, monitor="val/acc_tern", mode="max")
+    export_cb = ExportBestTernary(args.export_dir, monitor="val/acc_tern", mode="max")
     callbacks = [ckpt_cb, lr_cb, export_cb]
 
     accelerator = "cpu" if args.cpu else "auto"

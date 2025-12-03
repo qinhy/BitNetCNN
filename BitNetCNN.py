@@ -109,15 +109,6 @@ class NetCNN(nn.Module):
 # ----------------------------
 # LightningModule wrapper using LitBit
 # ----------------------------
-class Config(CommonTrainConfig):
-    data:str="./data"
-    out:Optional[str]="./ckpt_mnist"
-    epochs:int=50
-    batch_size:int=512
-    lr:float=2e-3
-    wd:float=1e-4
-    label_smoothing:float=0.0
-
 class LitNetCNNKD(LitBit):
     def __init__(self, config):
         # No teacher, no KD for MNIST (simple model)
@@ -149,12 +140,18 @@ class LitNetCNNKD(LitBit):
 # ----------------------------
 # CLI / main
 # ----------------------------
-def parse_args():
-    parser = ArgumentParser(model=Config)
-    return parser.parse_typed_args()
+class Config(CommonTrainConfig):
+    data:str="./data"
+    export_dir:Optional[str]="./ckpt_mnist"
+    epochs:int=50
+    batch_size:int=512
+    lr:float=2e-3
+    wd:float=1e-4
+    label_smoothing:float=0.0
 
 def main():
-    args = parse_args()
+    parser = ArgumentParser(model=Config)
+    args = parser.parse_typed_args()
     lit = LitNetCNNKD(args)
     trainer, dm = setup_trainer(args, lit)
     # Override datamodule with MNIST

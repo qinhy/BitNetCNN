@@ -399,90 +399,25 @@ def _build_student(
 
 def _build_teacher(
     model_size: str,
-    dataset_key: str,
+    dataset_name: str,
     device: str,
     timnet_teacher_epochs: int,
 ) -> ResNet:
     teachers = _TEACHER_MAP[model_size]
-    if dataset_key in ("c100", "imnet"):
-        return teachers[dataset_key](device=device)
-    if dataset_key == "timnet":
-        return teachers[dataset_key](device=device, epochs=timnet_teacher_epochs)
-    raise ValueError(f"Unsupported dataset key for teachers: {dataset_key}")
+    if dataset_name in ("c100", "imnet"):
+        return teachers[dataset_name](device=device)
+    if dataset_name == "timnet":
+        return teachers[dataset_name](device=device, epochs=timnet_teacher_epochs)
+    raise ValueError(f"Unsupported dataset key for teachers: {dataset_name}")
 
-
-class LitBitResNetKD(LitBit):
-    def __init__(
-        self,
-        lr: float,
-        wd: float,
-        epochs: int,
-        label_smoothing: float = 0.1,
-        alpha_kd: float = 0.7,
-        alpha_hint: float = 0.05,
-        T: float = 4.0,
-        scale_op: str = "median",
-        width_mult: float = 1.0,
-        amp: bool = True,
-        export_dir: Optional[str] = None,
-        dataset_name: str = "c100",
-        timnet_teacher_epochs: int = 200,
-        model_size: str = "18",
-    ) -> None:
-        model_size = str(model_size)
-        if model_size not in ("18", "50"):
-            raise ValueError(f"Unsupported model_size: {model_size}")
-
-        dataset_key = _canonical_dataset(dataset_name)
-        num_classes, small_stem = _num_classes_and_stem(dataset_key)
-
-        student = _build_student(
-            model_size=model_size,
-            num_classes=num_classes,
-            scale_op=scale_op,
-            small_stem=small_stem,
-        )
-        teacher = _build_teacher(
-            model_size=model_size,
-            dataset_key=dataset_key,
-            device="cpu",
-            timnet_teacher_epochs=timnet_teacher_epochs,
-        )
-
-        export_dir = export_dir or f"./ckpt_kd_rn{model_size}"
-
-        super().__init__(
-            lr,
-            wd,
-            epochs,
-            label_smoothing,
-            alpha_kd,
-            alpha_hint,
-            T,
-            scale_op,
-            width_mult,
-            amp,
-            export_dir,
-            dataset_name=dataset_key,
-            model_name="resnet",
-            model_size=model_size,
-            hint_points=["layer1", "layer2", "layer3", "layer4"],
-            student=student,
-            teacher=teacher,
-            num_classes=num_classes,
-        )
-
-# ---------------------------------------------------------------------------
-# CLI helpers
-# ---------------------------------------------------------------------------
 class Config(CommonTrainConfig):
-    out:Optional[str]=None
+    export_dir:Optional[str]=''
     model_size: Literal["18", "50"] = Field(
         default="18",
         description="Model size"
     )
 
-    dataset: Literal["c100", "imnet", "timnet"] = Field(
+    dataset_name: Literal["c100", "imnet", "timnet"] = Field(
         default="timnet",
         description="Dataset to use (affects stems, classes, transforms)",
     )
@@ -492,31 +427,19 @@ class Config(CommonTrainConfig):
         description="Which Tiny-ImageNet ResNet teacher to load from zeyuanyin/tiny-imagenet",
     )
 
-def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
+class LitBitResNetKD(LitBit):    
+    def __init__(
+        self,
+        config:LitBitConfig,
+    ) -> None:        
+        super().__init__(config)
+
+# ---------------------------------------------------------------------------
+# CLI helpers
+# ---------------------------------------------------------------------------
+def main() -> None:
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
-    if args.out is None:
-        args.out = f"./ckpt_{args.dataset}_rn{args.model_size}"
-    return args
-
-def run_training(args: argparse.Namespace) -> None:
-    export_dir = f"{args.out}_{args.dataset}"
-    lit = LitBitResNetKD(
-        lr=args.lr,
-        wd=args.wd,
-        epochs=args.epochs,
-        label_smoothing=args.label_smoothing,
-        alpha_kd=args.alpha_kd,
-        alpha_hint=args.alpha_hint,
-        T=args.T,
-        scale_op=args.scale_op,
-        width_mult=1.0,
-        amp=args.amp,
-        export_dir=export_dir,
-        dataset_name=args.dataset,
-        timnet_teacher_epochs=args.timnet_teacher_epochs,
-        model_size=args.model_size,
-    )
 
     dmargs = dict(
         data_dir=args.data,
@@ -527,23 +450,44 @@ def run_training(args: argparse.Namespace) -> None:
         alpha=args.mix_alpha,
     )
 
-    if args.dataset == "c100":
+    if args.dataset_name == "c100":
         dm = CIFAR100DataModule(**dmargs)
-    elif args.dataset == "imnet":
+    elif args.dataset_name == "imnet":
         dm = ImageNetDataModule(**dmargs)
-    elif args.dataset == "timnet":
+    elif args.dataset_name == "timnet":
         dm = TinyImageNetDataModule(**dmargs)
     else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
+        raise ValueError(f"Unsupported dataset: {args.dataset_name}")
 
+    config = LitBitConfig.model_validate(args.model_dump())
+
+    config.model_size = str(config.model_size)
+    if config.model_size not in ("18", "50"):
+        raise ValueError(f"Unsupported model_size: {config.model_size}")
+
+    config.dataset_name = _canonical_dataset(config.dataset_name)
+    config.num_classes, small_stem = _num_classes_and_stem(config.dataset_name)
+    config.export_dir = args.export_dir = f"./ckpt_{config.dataset_name}_rn{config.model_size}"  
+
+    config.student = _build_student(
+        model_size=config.model_size,
+        num_classes=config.num_classes,
+        scale_op=config.scale_op,
+        small_stem=small_stem,
+    )
+    config.teacher = _build_teacher(
+        model_size=config.model_size,
+        dataset_name=config.dataset_name,
+        device="cpu",
+        timnet_teacher_epochs=200,
+    )
+    config.model_name="resnet"
+    config.hint_points=["layer1", "layer2", "layer3", "layer4"]
+    
+    lit = LitBitResNetKD(config)
     trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)
-
-
-def main(argv: Optional[Iterable[str]] = None) -> None:
-    args = parse_args(argv)
-    run_training(args)
 
 
 if __name__ == "__main__":
