@@ -851,17 +851,7 @@ class LitMobileNetV4KD(LitBit):
 # CLI / main (MobileNetV4)
 # ----------------------------
 class Config(CommonTrainConfig):
-    dataset: Literal[
-        "c10", "cifar10",
-        "c100", "cifar100",
-        "timnet", "tiny",
-        "tinyimagenet", "tiny-imagenet",
-        "imnet", "imagenet", "in1k", "imagenet1k",
-    ] = Field(
-        default="timnet",
-        description="Target dataset (affects datamodule, num_classes, transforms).",
-    )
-
+    dataset_nam: str = "timnet"
     # For MobileNetV4 we accept conv + hybrid tags in one flag
     model_size: Literal[
         "small",
@@ -893,15 +883,6 @@ class Config(CommonTrainConfig):
     alpha_kd:float=0.0
     alpha_hint:float=0.0005
     
-def parse_args_mnv4():
-    parser = ArgumentParser(model=Config)
-    args = parser.parse_typed_args()
-
-    if args.out is None:
-        args.out = f"./ckpt_{args.dataset}_mnv4_{args.model_size}"
-    return args
-
-
 def _pick_datamodule_mnv4(dataset_name: str, dmargs: dict):
     # reuse your existing modules; same as before
     ds = dataset_name.lower()
@@ -925,10 +906,12 @@ def _pick_datamodule_mnv4(dataset_name: str, dmargs: dict):
 
 
 def main_mnv4():
-    args = parse_args_mnv4()
+    parser = ArgumentParser(model=Config)
+    args = parser.parse_typed_args()
+    args.export_dir = f"./ckpt_{args.dataset_nam}_mnv4_{args.model_size}"
 
     # Derive num_classes for export dir naming (same as your convnext main)
-    ds = args.dataset.lower()
+    ds = args.dataset_nam.lower()
     if ds in ['c10', 'cifar10']:
         ncls = 10
     elif ds in ['c100', 'cifar100']:
@@ -938,17 +921,13 @@ def main_mnv4():
     elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
         ncls = 1000
     else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
+        raise ValueError(f"Unsupported dataset: {args.dataset_nam}")
 
     out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
 
     lit = LitMobileNetV4KD(
-        lr=args.lr, wd=args.wd, epochs=args.epochs,
-        dataset_name=args.dataset,
-        model_size=args.model_size,
-        label_smoothing=args.label_smoothing,
-        alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
-        amp=args.amp, export_dir=out_dir, drop_path_rate=args.drop_path,
+        **args.model_dump(),
+        drop_path_rate=args.drop_path,
         teacher_pretrained=args.teacher_pretrained
     )
 
@@ -960,7 +939,7 @@ def main_mnv4():
         cutmix=args.cutmix,
         mix_alpha=args.mix_alpha
     )
-    dm = _pick_datamodule_mnv4(args.dataset, dmargs)
+    dm = _pick_datamodule_mnv4(args.dataset_nam, dmargs)
 
     trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)

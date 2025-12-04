@@ -499,7 +499,7 @@ def make_feature_hooks(module: nn.Module, names, feats: dict, idx=0):
 class DataModuleConfig(BaseModel):    
     data_dir: str
     batch_size: int
-    num_workers: int = 4,
+    num_workers: int = 4
     mixup: bool = False
     cutmix: bool = False
     mix_alpha: float = 1.0
@@ -957,7 +957,11 @@ class ExportBestTernary(Callback):
 # ----------------------------
 class CommonTrainConfig(BaseModel):
     data_dir: str = "./data"
-    export_dir: str = "./ckpt_c100"
+    export_dir:Optional[str]=''
+    dataset_name: Literal["c100", "imnet", "timnet"] = Field(
+        default="c100",
+        description="Dataset to use (affects stems, classes, transforms)",
+    )
 
     epochs: int = Field(200, ge=1)
     batch_size: int = Field(512, ge=1)
@@ -1027,17 +1031,22 @@ class LitBit(pl.LightningModule):
         self.model_size = config.model_size
         self.alpha_kd = config.alpha_kd
         self.alpha_hint = config.alpha_hint
+        
+        self.ce = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing).eval()
+        self.kd = KDLoss(T=config.T).eval()
+        self.hint = AdaptiveHintLoss().eval()
+
         if self.alpha_kd<=0 and self.alpha_hint<=0:
             self.teacher=None
+            self.hint = None
+            self.kd = None
         if self.teacher:
             for p in self.teacher.parameters(): p.requires_grad_(False)
-        self.ce = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing).eval()
-        self.kd = KDLoss(T=T).eval()
-        self.hint = AdaptiveHintLoss().eval()
+            if self.alpha_kd == 0.0:
+                self.kd = None
         self.hint_points = config.hint_points
         self.acc_fp = MulticlassAccuracy(num_classes=config.num_classes).eval()
                         # average='micro', multidim_average='global', top_k=1).eval()
-
         self._ternary_snapshot = None
         self._t_feats = {}
         self._s_feats = {}
@@ -1109,7 +1118,7 @@ class LitBit(pl.LightningModule):
             z_t = self.teacher(x)
 
         loss_kd = 0.0
-        if z_t and self.alpha_kd > 0:
+        if z_t is not None and self.alpha_kd > 0:
             loss_kd = self.kd(z_s.float(), z_t.float())
 
         # Hints
@@ -1169,30 +1178,6 @@ class LitBit(pl.LightningModule):
 # ----------------------------
 # Common CLI utilities
 # ----------------------------
-# def add_common_args(parser):
-#     """Add common training arguments to an argument parser."""
-#     parser.add_argument("--data", type=str, default="./data")
-#     parser.add_argument("--out",  type=str, default="./ckpt_c100")
-#     parser.add_argument("--epochs", type=int, default=200)
-#     parser.add_argument("--batch-size", type=int, default=512)
-#     parser.add_argument("--lr", type=float, default=2e-1)
-#     parser.add_argument("--wd", type=float, default=5e-4)
-#     parser.add_argument("--label-smoothing", type=float, default=0.1)
-#     parser.add_argument("--mix_alpha-kd", type=float, default=0.3)
-#     parser.add_argument("--mix_alpha-hint", type=float, default=0.05)
-#     parser.add_argument("--T", type=float, default=4.0)
-#     parser.add_argument("--scale-op", type=str, default="median", choices=["mean","median"])
-#     parser.add_argument("--amp", action="store_true")
-#     parser.add_argument("--cpu", action="store_true")
-#     parser.add_argument("--mixup", action="store_true")
-#     parser.add_argument("--cutmix", action="store_true")
-#     parser.add_argument("--mix-mix_alpha", type=float, default=1.0)
-#     parser.add_argument("--seed", type=int, default=42)
-#     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use (default: 1, use -1 for all available)")
-#     parser.add_argument("--strategy", type=str, default="auto", choices=["auto", "ddp", "ddp_spawn", "fsdp"],
-#                         help="Distributed training strategy (default: auto)")
-#     return parser
-
 def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
     """
     Setup common PyTorch Lightning training components.

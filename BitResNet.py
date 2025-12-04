@@ -76,7 +76,7 @@ class BitResNet(nn.Module):
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             )
 
-        self.layer1 = self._make_layer(block, 64, self.layers[0], stride=1, scale_op=scale_op)
+        self.layer1 = self._make_layer(block, 64,  self.layers[0], stride=1, scale_op=scale_op)
         self.layer2 = self._make_layer(block, 128, self.layers[1], stride=2, scale_op=scale_op)
         self.layer3 = self._make_layer(block, 256, self.layers[2], stride=2, scale_op=scale_op)
         self.layer4 = self._make_layer(block, 512, self.layers[3], stride=2, scale_op=scale_op)
@@ -356,22 +356,6 @@ _TEACHER_MAP: Dict[str, Dict[str, Callable[..., ResNet]]] = {
 # LightningModule wrappers
 # ---------------------------------------------------------------------------
 
-def _canonical_dataset(dataset_name: str) -> str:
-    mapping = {
-        "c100": "c100",
-        "cifar100": "c100",
-        "imnet": "imnet",
-        "imagenet": "imnet",
-        "timnet": "timnet",
-        "tiny-imagenet": "timnet",
-        "tiny_imagenet": "timnet",
-    }
-    key = dataset_name.lower()
-    if key not in mapping:
-        raise ValueError(f"Unsupported dataset: {dataset_name}")
-    return mapping[key]
-
-
 def _num_classes_and_stem(dataset_key: str) -> Tuple[int, bool]:
     if dataset_key == "c100":
         return 100, True
@@ -410,28 +394,15 @@ def _build_teacher(
     raise ValueError(f"Unsupported dataset key for teachers: {dataset_name}")
 
 class Config(CommonTrainConfig):
-    export_dir:Optional[str]=''
+    dataset_name: str = "c100"
     model_size: Literal["18", "50"] = Field(
         default="18",
         description="Model size"
     )
-
-    dataset_name: Literal["c100", "imnet", "timnet"] = Field(
-        default="timnet",
-        description="Dataset to use (affects stems, classes, transforms)",
-    )
-
     timnet_teacher_epochs: Literal[50, 100, 200] = Field(
         default=200,
         description="Which Tiny-ImageNet ResNet teacher to load from zeyuanyin/tiny-imagenet",
     )
-
-class LitBitResNetKD(LitBit):    
-    def __init__(
-        self,
-        config:LitBitConfig,
-    ) -> None:        
-        super().__init__(config)
 
 # ---------------------------------------------------------------------------
 # CLI helpers
@@ -440,15 +411,7 @@ def main() -> None:
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
 
-    dmargs = dict(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=4,
-        mixup=args.mixup,
-        cutmix=args.cutmix,
-        mix_alpha=args.mix_alpha,
-    )
-
+    dmargs = DataModuleConfig.model_validate(args.model_dump()).model_dump()
     if args.dataset_name == "c100":
         dm = CIFAR100DataModule(**dmargs)
     elif args.dataset_name == "imnet":
@@ -464,7 +427,6 @@ def main() -> None:
     if config.model_size not in ("18", "50"):
         raise ValueError(f"Unsupported model_size: {config.model_size}")
 
-    config.dataset_name = _canonical_dataset(config.dataset_name)
     config.num_classes, small_stem = _num_classes_and_stem(config.dataset_name)
     config.export_dir = args.export_dir = f"./ckpt_{config.dataset_name}_rn{config.model_size}"  
 
@@ -483,7 +445,7 @@ def main() -> None:
     config.model_name="resnet"
     config.hint_points=["layer1", "layer2", "layer3", "layer4"]
     
-    lit = LitBitResNetKD(config)
+    lit = LitBit(config)
     trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)

@@ -402,7 +402,7 @@ class LitBitYOLOv8KD(LitBit):
 # -----------------------------------------------------------------------------
 
 class Config(CommonTrainConfig):
-    dataset: Literal["timnet"] = Field(
+    dataset_name: Literal["timnet"] = Field(
         default="timnet",
         description="Currently only Tiny-ImageNet is supported for YOLOv8 distillation.",
     )
@@ -465,11 +465,11 @@ class Config(CommonTrainConfig):
         description="Print student parameter summary on startup.",
     )
     
-def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
+def parse_args():
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
 
-    if args.dataset != "timnet":
+    if args.dataset_name != "timnet":
         raise ValueError("Only Tiny-ImageNet is supported at the moment.")
 
     if not args.export_dir:
@@ -493,7 +493,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 # Train / Validate
 # -----------------------------------------------------------------------------
 
-def run_training(args: argparse.Namespace) -> None:
+def run_training(args:Config) -> None:
     lit = LitBitYOLOv8KD(
         lr=args.lr,
         wd=args.wd,
@@ -504,7 +504,7 @@ def run_training(args: argparse.Namespace) -> None:
         T=args.T,
         scale_op=args.scale_op,
         amp=args.amp,
-        export_dir=args.out,
+        export_dir=args.export_dir,
         teacher_variant=args.teacher_variant,
         teacher_checkpoint=args.teacher_checkpoint,
         width_mult=args.width_mult,
@@ -519,7 +519,7 @@ def run_training(args: argparse.Namespace) -> None:
     )
 
     dm_kwargs: Dict[str, object] = dict(
-        data_dir=args.data,
+        data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_workers=min(8, os.cpu_count() or 4),
         mixup=args.mixup,
