@@ -113,8 +113,8 @@ class LitNetCNNKD(LitBit):
     def __init__(self, config):
         # No teacher, no KD for MNIST (simple model)
         student = NetCNN(in_channels=1, num_classes=10, expand_ratio=5, scale_op=config.scale_op)
+        config.dataset_name='mnist'
         config = dict(**config.model_dump(),
-            dataset_name='mnist',
             model_name='netcnn',
             model_size='small',
             student=student,
