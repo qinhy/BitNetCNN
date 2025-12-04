@@ -498,12 +498,26 @@ def make_feature_hooks(module: nn.Module, names, feats: dict, idx=0):
 
 class DataModuleConfig(BaseModel):    
     data_dir: str
+    dataset_name: str = ""
     batch_size: int
     num_workers: int = 4
     mixup: bool = False
     cutmix: bool = False
     mix_alpha: float = 1.0
 
+    def build(self):
+        ds = self.dataset_name.lower()
+        dmargs = self.model_dump(exclude=['dataset_name'])
+        if ds in ['c100', 'cifar100']:
+            return CIFAR100DataModule(**dmargs)
+        elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
+            return TinyImageNetDataModule(**dmargs)
+        elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
+            return ImageNetDataModule(**dmargs)
+        elif ds in ['mnist']:
+            return MNISTDataModule(**dmargs)
+        else:
+            raise ValueError(f"Unsupported dataset: {ds}")
 # ----------------------------
 # CIFAR-100 DataModule (mixup/cutmix optional)
 # ----------------------------
@@ -941,12 +955,12 @@ class ExportBestTernary(Callback):
         if self._is_better(current, self.best):
             self.best = current
             # save FP student
-            best_fp = copy.deepcopy(pl_module.student).cpu().eval()
+            best_fp = copy.deepcopy(pl_module.student).cpu()
             fp_path = os.path.join(self.out_dir, f"bit_{model_name}_{model_size}_{dataset_name}_best_fp.pt")
             torch.save({"model": best_fp.state_dict(), "acc_tern": current}, fp_path)
             pl_module.print(f"[OK] saved {fp_path} (val/acc_tern={current*100:.2f}%)")
             # save ternary PoT export
-            tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu().eval()
+            tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu()
             tern_path = os.path.join(self.out_dir,
                                      f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_acc@{current*100:.2f}.pt")
             torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
@@ -1025,28 +1039,33 @@ class LitBit(pl.LightningModule):
                                           '_t_handles','_s_handles','_ternary_snapshot'])
         self.scale_op = config.scale_op
         self.student:nn.Module = config.student
-        self.teacher = config.teacher
+        self.teacher:nn.Module = config.teacher
         self.dataset_name = config.dataset_name
         self.model_name = config.model_name
         self.model_size = config.model_size
+        self.num_classes = config.num_classes
         self.alpha_kd = config.alpha_kd
         self.alpha_hint = config.alpha_hint
         
-        self.ce = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing).eval()
-        self.kd = KDLoss(T=config.T).eval()
-        self.hint = AdaptiveHintLoss().eval()
+        self.ce = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        self.kd = KDLoss(T=config.T)
+        self.hint = AdaptiveHintLoss()
+
+        if self.teacher is None:
+            self.alpha_kd=0.0
+            self.alpha_hint=0.0
+        else:
+            for p in self.teacher.parameters(): p.requires_grad_(False)
+
+        if self.alpha_kd<=0:
+            self.kd = None
+        if self.alpha_hint<=0:
+            self.hint = None
 
         if self.alpha_kd<=0 and self.alpha_hint<=0:
             self.teacher=None
-            self.hint = None
-            self.kd = None
-        if self.teacher:
-            for p in self.teacher.parameters(): p.requires_grad_(False)
-            if self.alpha_kd == 0.0:
-                self.kd = None
+
         self.hint_points = config.hint_points
-        self.acc_fp = MulticlassAccuracy(num_classes=config.num_classes).eval()
-                        # average='micro', multidim_average='global', top_k=1).eval()
         self._ternary_snapshot = None
         self._t_feats = {}
         self._s_feats = {}
@@ -1059,7 +1078,7 @@ class LitBit(pl.LightningModule):
 
     def setup(self, stage=None):
         if self.teacher:
-            self.teacher = self.teacher.to(self.device).eval()
+            self.teacher = self.teacher.to(self.device)
             if self.alpha_hint>0:
                 self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats, 0)
                 self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, 1)
@@ -1092,7 +1111,7 @@ class LitBit(pl.LightningModule):
         clone:nn.Module = self.student.clone()
         clone.load_state_dict(self.student.state_dict(), strict=True)
         clone = convert_to_ternary(clone)
-        return clone.eval().to(self.device)
+        return clone.to(self.device)
 
     def on_validation_epoch_start(self):
         print()
@@ -1115,7 +1134,8 @@ class LitBit(pl.LightningModule):
             loss_ce = self.ce(z_s, y)
 
         if self.teacher:
-            z_t = self.teacher(x)
+            with torch.no_grad():
+                z_t = self.teacher(x)
 
         loss_kd = 0.0
         if z_t is not None and self.alpha_kd > 0:
@@ -1147,26 +1167,36 @@ class LitBit(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        def log_val(n,model=None,acc=None,x=x,y=y):
-            if acc is None and model is not None:
-                # acc = (model(x).argmax(1)==y).sum()/x.size(0)
-                acc = self.acc_fp(model(x), y)
-            if acc is not None:
-                self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
-            return acc
+        def log_val(n,model=None,acc=None,x=x,y=y):            
+            with torch.no_grad():
+                if acc is None and model is not None:
+                    # acc = (model(x).argmax(1)==y).sum()/x.size(0)
+                    acc = MulticlassAccuracy(num_classes=self.num_classes
+                            # average='micro', multidim_average='global', top_k=1
+                        ).to(x.device)(model(x), y)
+                if acc is not None:
+                    self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+                return acc
         
-        with torch.no_grad():
-            acc_fp = log_val("acc_fp", self.student)
-            acc_t = log_val("acc_tern", self._ternary_snapshot)
-            if self.alpha_kd>0:
-                if self.t_acc_fp is None and self.teacher:
-                    self.t_acc_fp = log_val("t_acc_fp", self.teacher)
-                else:
-                    log_val("t_acc_fp", acc=self.t_acc_fp)
+        acc_fp = log_val("acc_fp", self.student)
+        acc_t = log_val("acc_tern", self._ternary_snapshot)
+        if self.alpha_kd>0:
+            if self.t_acc_fp is None and self.teacher:
+                self.t_acc_fp = log_val("t_acc_fp", self.teacher)
+            else:
+                log_val("t_acc_fp", acc=self.t_acc_fp)
 
+    def configure_optimizer_params(self):
+        params = list(self.student.parameters())
+        if self.hint:
+            params += list(self.hint.parameters())
+        if self.kd:
+            params += list(self.kd.parameters())
+        return params
+    
     def configure_optimizers(self):
         opt = torch.optim.SGD(
-            list(self.student.parameters()) + list(self.hint.parameters()),
+            self.configure_optimizer_params(),
             lr=self.lr, momentum=0.9, weight_decay=self.wd, nesterov=True
         )
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)

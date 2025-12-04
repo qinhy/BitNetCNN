@@ -61,7 +61,7 @@ class BitMobileNetV2(nn.Module):
     CIFAR-friendly BitMobileNetV2:
       - 3x3 s=1 stem
       - MobileNetV2 setting (CIFAR-sized)
-      - Collects stage-end names in self.hint_names for hooks
+      - Collects stage-end names in self.hint_points for hooks
     """
     def __init__(self, num_classes=100, width_mult=1.0, round_nearest=8,
                  scale_op="median", in_ch=3, act=ActModels.SiLU(), last_channel_override=None):
@@ -89,7 +89,7 @@ class BitMobileNetV2(nn.Module):
                                  act=act).build()
 
         features = []
-        self.hint_names = []
+        self.hint_points = []
         for t, c, n, s in setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
@@ -99,7 +99,7 @@ class BitMobileNetV2(nn.Module):
                                         expand_ratio=t, scale_op=scale_op,act=act).build()
                 )
                 input_channel = output_channel
-            self.hint_names.append(f"features.{len(features)-1}")
+            self.hint_points.append(f"features.{len(features)-1}")
         self.features = nn.Sequential(*features)
 
         self.head_conv = ConvBNActBit(in_channels=input_channel,out_channels=last_channel,
@@ -143,7 +143,7 @@ class BitMobileNetV2(nn.Module):
 # ----------------------------
 def make_mobilenetv2_teacher_from_hub(variant="cifar100_mobilenetv2_x1_4", device="cuda"):
     teacher = torch.hub.load("chenyaofo/pytorch-cifar-models", variant, pretrained=True)
-    return teacher.to(device).eval()
+    return teacher.to(device)
 
 def make_resnet18_tiny_teacher_from_self(device: str = "cuda"):
     model = torch.hub.load('.', 'bitnet_resnet18', source='local',
@@ -154,42 +154,32 @@ def make_resnet18_tiny_teacher_from_self(device: str = "cuda"):
 # LightningModule: KD + hints + ternary eval/export
 # ----------------------------
 class LitBitMBv2KD(LitBit):
-    def __init__(self, lr, wd, epochs, label_smoothing=0.1,
-                 alpha_kd=0.7, alpha_hint=0.05, T=4.0, scale_op="median",
-                 width_mult=1.0, amp=True, teacher_variant="cifar100_mobilenetv2_x1_4",
-                 export_dir="./ckpt_c100_mbv2",
-                 dataset_name='c100',
-                 timnet_teacher_epochs: int = 200):  # NEW
+    def __init__(self, config:LitBitConfig,
+                 width_mult,
+                 teacher_variant="cifar100_mobilenetv2_x1_4"):
 
-        if dataset_name in ['c100','cifar100']:
+        if config.dataset_name in ['c100','cifar100']:
             num_classes = 100
-        elif dataset_name == 'timnet':
+        elif config.dataset_name == 'timnet':
             num_classes = 200
         else:
-            raise ValueError(f"Unsupported dataset: {dataset_name}")
+            raise ValueError(f"Unsupported dataset: {config.dataset_name}")
 
-        student = BitMobileNetV2(num_classes=num_classes, width_mult=width_mult, scale_op=scale_op)
+        config.student = BitMobileNetV2(num_classes=num_classes, width_mult=width_mult, scale_op=config.scale_op)
+        config.hint_points = config.student.hint_points
 
         # Teacher per dataset
-        if dataset_name in ['c100','cifar100']:
-            teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu")
-        elif dataset_name == 'timnet':
-            teacher = make_resnet18_tiny_teacher_from_self()
-            alpha_hint = 0.0
+        if config.dataset_name in ['c100','cifar100']:
+            config.teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu")
+            config.num_classes = 100
+        elif config.dataset_name == 'timnet':
+            config.teacher = None#make_resnet18_tiny_teacher_from_self()
+            config.num_classes = 200
+            config.alpha_hint = 0.0
         else:
-            raise ValueError(f"Unsupported dataset: {dataset_name}")
-
-        super().__init__(lr, wd, epochs, label_smoothing,
-        alpha_kd, alpha_hint, T, scale_op,
-        width_mult, amp,
-        export_dir,
-        dataset_name=dataset_name,
-        model_name='mobilenetv2',
-        model_size='x140',
-        hint_points=student.hint_names,
-        student=student,
-        teacher=teacher,
-        num_classes=num_classes)
+            raise ValueError(f"Unsupported dataset: {config.dataset_name}")
+        
+        super().__init__(config)
         
 # ----------------------------
 # CLI / main
@@ -199,61 +189,38 @@ class Config(CommonTrainConfig):
         default=1.4,
         description="Width multiplier for MobileNetV2.",
     )
+    model_name: str = "mbv2"
+    model_size: str = ""
 
     teacher_variant: str = Field(
         default="cifar100_mobilenetv2_x1_4",
         description="Teacher checkpoint/variant name.",
     )
 
-    dataset: Literal["c100", "timnet"] = Field(
-        default="timnet",
-        description="Dataset to use (affects classes, transforms).",
-    )
-
-    timnet_teacher_epochs: Literal[50, 100, 200] = Field(
-        default=200,
-        description=(
-            "Which Tiny-ImageNet MobileNetV2 teacher to load from "
-            "zeyuanyin/tiny-imagenet."
-        ),
-    )
-    
-    out:Optional[str]=None
     batch_size:int=16
-    
+    label_smoothing:float=0.1
+    alpha_kd:float=0.7
+    alpha_hint:float=0.05
+    T:float=4.0
+
+    scale_op:str="median"
+    export_dir:str="./ckpt_c100_mbv2"
+    dataset_name:str='c100'
+
 def main():
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
 
-    if args.out is None:
-        args.out = f"./ckpt_{args.dataset}_mbv2"
+    args.export_dir = f"./ckpt_{args.dataset_name}_mbv2"
+    args.model_size = f"x{int(args.width_mult*100)}"
 
     lit = LitBitMBv2KD(
-        lr=args.lr, wd=args.wd, epochs=args.epochs,
-        label_smoothing=args.label_smoothing,
-        alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
-        scale_op=args.scale_op, width_mult=args.width_mult,
-        amp=args.amp, teacher_variant=args.teacher_variant,
-        export_dir=args.out,
-        dataset_name=args.dataset,
-        timnet_teacher_epochs=args.timnet_teacher_epochs
+        LitBitConfig.model_validate(args.model_dump()),
+        width_mult=args.width_mult,
+        teacher_variant=args.teacher_variant,
     )
 
-    dmargs = dict(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=4,
-        mixup=args.mixup,
-        cutmix=args.cutmix,
-        mix_alpha=args.mix_alpha
-    )
-
-    if args.dataset == "c100":
-        dm = CIFAR100DataModule(**dmargs)
-    elif args.dataset == "timnet":
-        dm = TinyImageNetDataModule(**dmargs)
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
+    dm = DataModuleConfig.model_validate(args.model_dump()).build()
 
     trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)
