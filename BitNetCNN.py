@@ -121,14 +121,11 @@ class LitNetCNNKD(LitBit):
             num_classes=10,
         )
         super().__init__(config)
-        # Override metrics for MNIST (10 classes instead of 100)
-        self.acc_fp = MulticlassAccuracy(num_classes=10).eval()
-        self.acc_tern = MulticlassAccuracy(num_classes=10).eval()
-
+        
     def configure_optimizers(self):
         # Use AdamW for MNIST instead of SGD
         opt = torch.optim.AdamW(
-            list(self.student.parameters()) + list(self.hint.parameters()),
+            self.configure_optimizer_params(),
             lr=self.lr, weight_decay=self.wd
         )
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs, eta_min=self.lr*0.01)
@@ -155,7 +152,7 @@ def main():
     lit = LitNetCNNKD(args)
     trainer, dm = setup_trainer(args, lit)
     # Override datamodule with MNIST
-    dm = MNISTDataModule(data_dir=args.data, batch_size=args.batch_size, num_workers=4)
+    dm = DataModuleConfig.model_validate(args.model_dump()).build()
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)
 

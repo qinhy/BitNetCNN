@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 
 dependencies = [
     "pillow>=11.3.0",
-    "pydanticv2-argparse>=1.0.2",
+    "pydanticv2-argparse>=1.0.5",
     "pytorch-lightning>=2.5.5",
     "timm>=1.0.20",
     "torch==2.4.1+cu124",

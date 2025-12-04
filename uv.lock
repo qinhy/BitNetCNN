@@ -153,7 +153,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pillow", specifier = ">=11.3.0" },
-    { name = "pydanticv2-argparse", specifier = ">=1.0.2" },
+    { name = "pydanticv2-argparse", specifier = ">=1.0.5" },
     { name = "pytorch-lightning", specifier = ">=2.5.5" },
     { name = "timm", specifier = ">=1.0.20" },
     { name = "torch", specifier = "==2.4.1+cu124", index = "https://download.pytorch.org/whl/cu124" },
@@ -1527,15 +1527,15 @@ wheels = [
 
 [[package]]
 name = "pydanticv2-argparse"
-version = "1.0.2"
+version = "1.0.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/77/59/7f685a8799786294a3cad7324b9763eff0989e83ff5ab55ba5b29ab9a6a4/pydanticv2_argparse-1.0.2.tar.gz", hash = "sha256:3196b62fdeb826b6c1309a0b5a327ac6e0a24198a64100f156ce55dd5ea7ba04", size = 15324, upload-time = "2025-12-03T06:08:21.851Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/42/36306294afa60245d922b12dd38b5bc98f9c38e868270ddeee8ea0982133/pydanticv2_argparse-1.0.5.tar.gz", hash = "sha256:ecd6c4de5d57289a37653230255eaff32874f82f87ee6a8264206387fd2bc85f", size = 13128, upload-time = "2025-12-04T05:11:38.378Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/37/c7/fd3b6362277c8390731154164e6e0c7d68c5966c04801e5e46cd2040f2c6/pydanticv2_argparse-1.0.2-py3-none-any.whl", hash = "sha256:f61a82dde48ecae57a8486e555caa30152fee0f9126e765af72a745949e60dfd", size = 19329, upload-time = "2025-12-03T06:08:20.137Z" },
+    { url = "https://files.pythonhosted.org/packages/27/a5/c432de9d88e0e98a4b58c65b716878098b0de291ba693e3ce30f7c62cb20/pydanticv2_argparse-1.0.5-py3-none-any.whl", hash = "sha256:b65d687bc39a5eaac5a619e46c36712fe7578034d405c4887317bc9256de91ba", size = 14630, upload-time = "2025-12-04T05:11:37.289Z" },
 ]
 
 [[package]]

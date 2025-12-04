@@ -411,16 +411,7 @@ def main() -> None:
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
 
-    dmargs = DataModuleConfig.model_validate(args.model_dump()).model_dump()
-    if args.dataset_name == "c100":
-        dm = CIFAR100DataModule(**dmargs)
-    elif args.dataset_name == "imnet":
-        dm = ImageNetDataModule(**dmargs)
-    elif args.dataset_name == "timnet":
-        dm = TinyImageNetDataModule(**dmargs)
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset_name}")
-
+    dm = DataModuleConfig.model_validate(args.model_dump()).build()
     config = LitBitConfig.model_validate(args.model_dump())
 
     config.model_size = str(config.model_size)
