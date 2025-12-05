@@ -4,6 +4,7 @@ import argparse
 from typing import Literal, Optional
 import warnings
 
+from pydantic import Field
 from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
@@ -934,7 +935,7 @@ def main_mnv4():
     dmargs = dict(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=1,
         mixup=args.mixup,
         cutmix=args.cutmix,
         mix_alpha=args.mix_alpha
