@@ -1,6 +1,4 @@
 import argparse
-from typing import Literal
-from pydantic import Field
 from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
@@ -354,10 +352,10 @@ def main():
     dmargs = dict(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
-        num_workers=4,
-        aug_mixup=args.mixup,
-        aug_cutmix=args.cutmix,
-        alpha=args.mix_alpha
+        num_workers=1,
+        mixup=args.mixup,
+        cutmix=args.cutmix,
+        mix_alpha=args.mix_alpha
     )
     dm = _pick_datamodule(args.dataset, dmargs)
 

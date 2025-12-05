@@ -500,7 +500,7 @@ class DataModuleConfig(BaseModel):
     data_dir: str
     dataset_name: str = ""
     batch_size: int
-    num_workers: int = 4
+    num_workers: int = 1
     mixup: bool = False
     cutmix: bool = False
     mix_alpha: float = 1.0
@@ -547,7 +547,7 @@ def mix_collate(batch, *, cutmix: bool, mixup: bool, mix_alpha: float):
         return x, (y, y[idx], lam)
     
 class CIFAR100DataModule(pl.LightningDataModule):
-    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
+    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
                  mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
         self.data_dir, self.batch_size, self.num_workers = data_dir, batch_size, num_workers
@@ -736,7 +736,7 @@ class TinyImageNetDataset(VisionDataset):
 # TinyImageNet DataModule
 # ----------------------------
 class TinyImageNetDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
+    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
                  mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
         self.data_dir = data_dir
@@ -799,7 +799,7 @@ class TinyImageNetDataModule(pl.LightningDataModule):
 # MNIST DataModule
 # ----------------------------
 class MNISTDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 4,
+    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
                  mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
         self.data_dir = data_dir
@@ -856,7 +856,7 @@ class ImageNetDataModule(pl.LightningDataModule):
     def __init__(self,
                  data_dir: str,
                  batch_size: int,
-                 num_workers: int = 8,
+                 num_workers: int = 1,
                  mixup: bool = False,
                  cutmix: bool = False,
                  mix_alpha: float = 0.2,
@@ -1222,7 +1222,7 @@ def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
     pl.seed_everything(args.seed, workers=True)
     if dm is None:
         dm = CIFAR100DataModule(
-            data_dir=args.data_dir, batch_size=args.batch_size, num_workers=4,
+            data_dir=args.data_dir, batch_size=args.batch_size, num_workers=1,
             mixup=args.mixup, cutmix=args.cutmix, mix_alpha=args.mix_alpha
         )
 
@@ -1277,6 +1277,7 @@ def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
         log_every_n_steps=50,
         deterministic=False,
         sync_batchnorm=True if (devices > 1 or devices == -1) else False,
+        num_sanity_val_steps=0
     )
 
     return trainer, dm
