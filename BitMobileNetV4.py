@@ -4,7 +4,6 @@ import argparse
 from typing import Literal, Optional
 import warnings
 
-from pydantic import Field
 from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
