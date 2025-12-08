@@ -982,17 +982,7 @@ class LitMobileNetV5KD(LitBit):
     ):
         # dataset -> classes
         ds = config.dataset_name.lower()
-        if ds in ['c10', 'cifar10']:
-            config.num_classes = 10
-        elif ds in ['c100', 'cifar100']:
-            config.num_classes = 100
-        elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-            config.num_classes = 200
-        elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-            config.num_classes = 1000
-        else:
-            raise ValueError(f"Unsupported dataset: {config.dataset_name}")
-        
+
         def get_mnv5_arch_def(model_size: str) -> list[list[str]]:
             size = model_size.lower()
             if size == "tiny":
@@ -1040,44 +1030,18 @@ class LitMobileNetV5KD(LitBit):
 # ----------------------------
 # CLI / main (MobileNetV5)
 # ----------------------------
-
-def _pick_datamodule_mnv5(dataset_name: str, dmargs: dict):
-    # reuse your existing modules; same as before
-    ds = dataset_name.lower()
-    if ds in ['c100', 'cifar100']:
-        if 'CIFAR100DataModule' in globals():
-            return CIFAR100DataModule(**dmargs)
-        else:
-            raise RuntimeError("CIFAR100DataModule not found in common_utils.")
-    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-        if 'TinyImageNetDataModule' in globals():
-            return TinyImageNetDataModule(**dmargs)
-        else:
-            raise RuntimeError("TinyImageNetDataModule not found in common_utils.")
-    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-        if 'ImageNetDataModule' in globals():
-            return ImageNetDataModule(**dmargs)
-        else:
-            raise RuntimeError("ImageNetDataModule not found in common_utils.")
-    else:
-        raise ValueError(f"Unsupported dataset: {dataset_name}")
-
-
 def main_mnv5():
     parser = ArgumentParser(model=Config)
     args:Config = parser.parse_typed_args()
     args.export_dir = f"./ckpt_{args.dataset_name}_mnv5_{args.model_size}"
-    
+    dm = DataModuleConfig.model_validate(args.model_dump())
     config = LitBitConfig.model_validate(args.model_dump())
+    config.num_classes = dm.num_classes
     lit = LitMobileNetV5KD(config,
         drop_path_rate=args.drop_path,
         teacher_pretrained=args.teacher_pretrained
     )
-
-    dmargs = DataModuleConfig.model_validate(args.model_dump())
-
-    dm = _pick_datamodule_mnv5(args.dataset_name, dmargs.model_dump())
-
+    dm = dm.build()
     trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)

@@ -355,17 +355,6 @@ _TEACHER_MAP: Dict[str, Dict[str, Callable[..., ResNet]]] = {
 # ---------------------------------------------------------------------------
 # LightningModule wrappers
 # ---------------------------------------------------------------------------
-
-def _num_classes_and_stem(dataset_key: str) -> Tuple[int, bool]:
-    if dataset_key == "c100":
-        return 100, True
-    if dataset_key == "imnet":
-        return 1000, False
-    if dataset_key == "timnet":
-        return 200, True
-    raise ValueError(f"Unsupported dataset key: {dataset_key}")
-
-
 def _build_student(
     model_size: str,
     num_classes: int,
@@ -411,14 +400,14 @@ def main() -> None:
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
 
-    dm = DataModuleConfig.model_validate(args.model_dump()).build()
+    dm = DataModuleConfig.model_validate(args.model_dump())
     config = LitBitConfig.model_validate(args.model_dump())
 
     config.model_size = str(config.model_size)
     if config.model_size not in ("18", "50"):
         raise ValueError(f"Unsupported model_size: {config.model_size}")
 
-    config.num_classes, small_stem = _num_classes_and_stem(config.dataset_name)
+    config.num_classes, small_stem = dm.num_classes, True
     config.export_dir = args.export_dir = f"./ckpt_{config.dataset_name}_rn{config.model_size}"  
 
     config.student = _build_student(
@@ -437,6 +426,7 @@ def main() -> None:
     config.hint_points=["layer1", "layer2", "layer3", "layer4"]
     
     lit = LitBit(config)
+    dm = dm.build()
     trainer, dm = setup_trainer(args, lit, dm)
     trainer.fit(lit, datamodule=dm)
     trainer.validate(lit, datamodule=dm)

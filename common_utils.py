@@ -499,25 +499,45 @@ def make_feature_hooks(module: nn.Module, names, feats: dict, idx=0):
 class DataModuleConfig(BaseModel):    
     data_dir: str
     dataset_name: str = ""
+    num_classes:int = -1
     batch_size: int
     num_workers: int = 1
     mixup: bool = False
     cutmix: bool = False
     mix_alpha: float = 1.0
 
-    def build(self):
-        ds = self.dataset_name.lower()
-        dmargs = self.model_dump(exclude=['dataset_name'])
+    _datasets = {}
+
+    def model_post_init(self, context):
+        self._datasets = {
+            'c100':CIFAR100DataModule,
+            'timnet':TinyImageNetDataModule,
+            'imnet':ImageNetDataModule,
+            'mnist':MNISTDataModule,
+        }
+        ds = self.dataset_name.lower()        
         if ds in ['c100', 'cifar100']:
-            return CIFAR100DataModule(**dmargs)
+            self.num_classes = 100
+            self.dataset_name = 'c100'
         elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-            return TinyImageNetDataModule(**dmargs)
+            self.num_classes = 200
+            self.dataset_name = 'timnet'
         elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-            return ImageNetDataModule(**dmargs)
+            self.num_classes = 1000
+            self.dataset_name = 'imnet'
         elif ds in ['mnist']:
-            return MNISTDataModule(**dmargs)
+            self.num_classes = 10
+            self.dataset_name = 'mnist'
         else:
             raise ValueError(f"Unsupported dataset: {ds}")
+        return super().model_post_init(context)
+
+    def build(self):
+        return self._datasets[self.dataset_name](
+            **self.model_dump(exclude=['dataset_name'])
+        )
+        
+        
 # ----------------------------
 # CIFAR-100 DataModule (mixup/cutmix optional)
 # ----------------------------
