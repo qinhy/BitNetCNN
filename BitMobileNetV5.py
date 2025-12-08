@@ -1042,9 +1042,9 @@ def main_mnv5():
         teacher_pretrained=args.teacher_pretrained
     )
     dm = dm.build()
-    trainer, dm = setup_trainer(args, lit, dm)
+    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-    trainer.validate(lit, datamodule=dm)
+
 
 
 if __name__ == "__main__":

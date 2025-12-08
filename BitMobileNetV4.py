@@ -882,68 +882,25 @@ class Config(CommonTrainConfig):
     lr:float=0.2
     alpha_kd:float=0.0
     alpha_hint:float=0.0005
-    
-def _pick_datamodule_mnv4(dataset_name: str, dmargs: dict):
-    # reuse your existing modules; same as before
-    ds = dataset_name.lower()
-    if ds in ['c100', 'cifar100']:
-        if 'CIFAR100DataModule' in globals():
-            return CIFAR100DataModule(**dmargs)
-        else:
-            raise RuntimeError("CIFAR100DataModule not found in common_utils.")
-    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-        if 'TinyImageNetDataModule' in globals():
-            return TinyImageNetDataModule(**dmargs)
-        else:
-            raise RuntimeError("TinyImageNetDataModule not found in common_utils.")
-    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-        if 'ImageNetDataModule' in globals():
-            return ImageNetDataModule(**dmargs)
-        else:
-            raise RuntimeError("ImageNetDataModule not found in common_utils.")
-    else:
-        raise ValueError(f"Unsupported dataset: {dataset_name}")
-
 
 def main_mnv4():
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
     args.export_dir = f"./ckpt_{args.dataset_nam}_mnv4_{args.model_size}"
-
-    # Derive num_classes for export dir naming (same as your convnext main)
-    ds = args.dataset_nam.lower()
-    if ds in ['c10', 'cifar10']:
-        ncls = 10
-    elif ds in ['c100', 'cifar100']:
-        ncls = 100
-    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-        ncls = 200
-    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-        ncls = 1000
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset_nam}")
-
-    out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
-
+    
+    dm = DataModuleConfig.model_validate(args)
+    config = LitBitConfig.model_validate({**args.model_dump(), **dm.model_dump()})
+    
     lit = LitMobileNetV4KD(
-        **args.model_dump(),
+        **config.model_dump(),
         drop_path_rate=args.drop_path,
         teacher_pretrained=args.teacher_pretrained
     )
 
-    dmargs = dict(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=1,
-        mixup=args.mixup,
-        cutmix=args.cutmix,
-        mix_alpha=args.mix_alpha
-    )
-    dm = _pick_datamodule_mnv4(args.dataset_nam, dmargs)
-
-    trainer, dm = setup_trainer(args, lit, dm)
+    dm = dm.build()
+    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-    trainer.validate(lit, datamodule=dm)
+
 
 
 if __name__ == "__main__":

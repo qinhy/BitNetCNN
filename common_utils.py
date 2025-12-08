@@ -534,7 +534,7 @@ class DataModuleConfig(BaseModel):
 
     def build(self):
         return self._datasets[self.dataset_name](
-            **self.model_dump(exclude=['dataset_name'])
+            **self.model_dump(exclude=['dataset_name','num_classes'])
         )
         
         
@@ -1228,7 +1228,7 @@ class LitBit(pl.LightningModule):
 # ----------------------------
 # Common CLI utilities
 # ----------------------------
-def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
+def setup_trainer(args:CommonTrainConfig):
     """
     Setup common PyTorch Lightning training components.
 
@@ -1240,12 +1240,6 @@ def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
         tuple: (trainer, datamodule)
     """
     pl.seed_everything(args.seed, workers=True)
-    if dm is None:
-        dm = CIFAR100DataModule(
-            data_dir=args.data_dir, batch_size=args.batch_size, num_workers=1,
-            mixup=args.mixup, cutmix=args.cutmix, mix_alpha=args.mix_alpha
-        )
-
     os.makedirs(args.export_dir, exist_ok=True)
     logger = CSVLogger(save_dir=args.export_dir, name="logs")
     ckpt_cb = ModelCheckpoint(monitor="val/acc_tern", mode="max", save_top_k=1, save_last=True)
@@ -1300,7 +1294,7 @@ def setup_trainer(args:CommonTrainConfig, lit_module, dm = None):
         num_sanity_val_steps=0
     )
 
-    return trainer, dm
+    return trainer
 
 def GUI_tool(model,
              resize=None,

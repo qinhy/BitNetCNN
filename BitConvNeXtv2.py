@@ -359,9 +359,9 @@ def main():
     )
     dm = _pick_datamodule(args.dataset, dmargs)
 
-    trainer, dm = setup_trainer(args, lit, dm)
+    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-    trainer.validate(lit, datamodule=dm)
+
 
 if __name__ == "__main__":
     main()

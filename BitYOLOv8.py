@@ -528,9 +528,9 @@ def run_training(args:Config) -> None:
     )
     dm = TinyImageNetDataModule(**dm_kwargs)
 
-    trainer, dm = setup_trainer(args, lit, dm)
+    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-    trainer.validate(lit, datamodule=dm)
+
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:
