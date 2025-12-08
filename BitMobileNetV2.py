@@ -158,23 +158,14 @@ class LitBitMBv2KD(LitBit):
                  width_mult,
                  teacher_variant="cifar100_mobilenetv2_x1_4"):
 
-        if config.dataset_name in ['c100','cifar100']:
-            num_classes = 100
-        elif config.dataset_name == 'timnet':
-            num_classes = 200
-        else:
-            raise ValueError(f"Unsupported dataset: {config.dataset_name}")
-
-        config.student = BitMobileNetV2(num_classes=num_classes, width_mult=width_mult, scale_op=config.scale_op)
-        config.hint_points = config.student.hint_points
+        config.student = student = BitMobileNetV2(num_classes=config.num_classes, width_mult=width_mult, scale_op=config.scale_op)
+        config.hint_points = student.hint_points
 
         # Teacher per dataset
         if config.dataset_name in ['c100','cifar100']:
             config.teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu")
-            config.num_classes = 100
         elif config.dataset_name == 'timnet':
             config.teacher = None#make_resnet18_tiny_teacher_from_self()
-            config.num_classes = 200
             config.alpha_hint = 0.0
         else:
             raise ValueError(f"Unsupported dataset: {config.dataset_name}")
@@ -214,17 +205,19 @@ def main():
     args.export_dir = f"./ckpt_{args.dataset_name}_mbv2"
     args.model_size = f"x{int(args.width_mult*100)}"
 
+    dm = DataModuleConfig.model_validate(args.model_dump())
+    config = LitBitConfig.model_validate(args.model_dump())
+
     lit = LitBitMBv2KD(
-        LitBitConfig.model_validate(args.model_dump()),
+        config=config,
         width_mult=args.width_mult,
         teacher_variant=args.teacher_variant,
     )
 
-    dm = DataModuleConfig.model_validate(args.model_dump()).build()
-
-    trainer, dm = setup_trainer(args, lit, dm)
+    dm = dm.build()
+    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-    trainer.validate(lit, datamodule=dm)
+
 
 if __name__ == "__main__":
     main()

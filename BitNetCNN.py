@@ -150,11 +150,11 @@ def main():
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
     lit = LitNetCNNKD(args)
-    trainer, dm = setup_trainer(args, lit)
     # Override datamodule with MNIST
     dm = DataModuleConfig.model_validate(args.model_dump()).build()
+    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-    trainer.validate(lit, datamodule=dm)
+
 
 if __name__ == "__main__":
     main()

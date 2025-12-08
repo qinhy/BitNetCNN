@@ -1,4 +1,4 @@
-uv run BitNetCNN.py --epochs 1 --batch-size 512
+@REM uv run BitNetCNN.py --epochs 1 --batch-size 512
 
 uv run BitResNet.py --epochs 1 --batch-size 64 --dataset-name c100 --model-size 18
 uv run BitResNet.py --epochs 1 --batch-size 64 --dataset-name timnet --model-size 18

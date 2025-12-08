@@ -14,7 +14,7 @@ from torchvision.models import (
 )
 from huggingface_hub import hf_hub_download
 
-from bitlayers import convs
+from bitlayers.convs import Conv2dModels
 from bitlayers.bit import Bit
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels
@@ -25,14 +25,13 @@ from common_utils import *
 # Bit-blocks and core network
 # ---------------------------------------------------------------------------
 
-BasicBlockBit = convs.Conv2dModels.ResNetBasicBlock
-BottleneckBit = convs.Conv2dModels.ResNetBottleneck
-
+BasicBlockBit = Conv2dModels.ResNetBasicBlock
+BottleneckBit = Conv2dModels.ResNetBottleneck
 
 class BitResNet(nn.Module):
     def __init__(
         self,
-        block: Callable[..., nn.Module],
+        block_cls: Callable[..., nn.Module],
         layers: Iterable[int],
         num_classes: int,
         expansion: int,
@@ -41,7 +40,7 @@ class BitResNet(nn.Module):
         small_stem: bool = True,
     ) -> None:
         super().__init__()
-        self.block_cls = block
+        self.block_cls = block_cls
         self.layers = tuple(layers)
         self.num_classes = num_classes
         self.scale_op = scale_op
@@ -52,34 +51,38 @@ class BitResNet(nn.Module):
 
         if small_stem:
             # CIFAR / Tiny stem: 3x3 stride 1, no maxpool
-            self.stem = nn.Sequential(
-                Bit.Conv2d(
-                    in_ch,
-                    self.inplanes,
-                    kernel_size=3,stride=1,padding=1,
-                    bias=True,scale_op=scale_op,
-                ),
-                nn.BatchNorm2d(self.inplanes),
-                nn.SiLU(inplace=True),
-            )
+            self.stem = Conv2dModels.Conv2dNormAct(
+                in_channels=in_ch,
+                out_channels=self.inplanes,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                scale_op=scale_op,
+                bias=True,
+                norm=self._norm(),
+                act=self._act(),
+            ).build()
         else:
             # ImageNet stem: 7x7 stride 2 + maxpool
             self.stem = nn.Sequential(
-                Bit.Conv2d(
-                    in_ch,
-                    self.inplanes,
-                    kernel_size=7,stride=2,padding=3,
-                    bias=True,scale_op=scale_op,
-                ),
-                nn.BatchNorm2d(self.inplanes),
-                nn.SiLU(inplace=True),
+                Conv2dModels.Conv2dNormAct(
+                    in_channels=in_ch,
+                    out_channels=self.inplanes,
+                    kernel_size=7,
+                    stride=2,
+                    padding=3,
+                    scale_op=scale_op,
+                    bias=True,
+                    norm=self._norm(),
+                    act=self._act(),
+                ).build(),
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             )
 
-        self.layer1 = self._make_layer(block, 64,  self.layers[0], stride=1, scale_op=scale_op)
-        self.layer2 = self._make_layer(block, 128, self.layers[1], stride=2, scale_op=scale_op)
-        self.layer3 = self._make_layer(block, 256, self.layers[2], stride=2, scale_op=scale_op)
-        self.layer4 = self._make_layer(block, 512, self.layers[3], stride=2, scale_op=scale_op)
+        self.layer1 = self._make_layer(block_cls, 64,  self.layers[0], stride=1, scale_op=scale_op)
+        self.layer2 = self._make_layer(block_cls, 128, self.layers[1], stride=2, scale_op=scale_op)
+        self.layer3 = self._make_layer(block_cls, 256, self.layers[2], stride=2, scale_op=scale_op)
+        self.layer4 = self._make_layer(block_cls, 512, self.layers[3], stride=2, scale_op=scale_op)
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
@@ -128,7 +131,7 @@ class BitResNet(nn.Module):
     ) -> nn.Module:
         shortcut_layer = None
         if stride != 1 or inplanes != out_channels:
-            shortcut_layer = convs.Conv2dModels.Conv2dNorm(
+            shortcut_layer = Conv2dModels.Conv2dNorm(
                 in_channels=-1,
                 norm=self._norm(),
                 scale_op=scale_op,
@@ -141,13 +144,13 @@ class BitResNet(nn.Module):
                 stride=stride,
                 padding=1,
                 act_layer=self._act(),
-                conv1_layer=convs.Conv2dModels.Conv2dNormAct(
+                conv1_layer=Conv2dModels.Conv2dNormAct(
                     in_channels=-1,
                     norm=self._norm(),
                     act=self._act(),
                     scale_op=scale_op,
                 ),
-                conv2_layer=convs.Conv2dModels.Conv2dNorm(
+                conv2_layer=Conv2dModels.Conv2dNorm(
                     in_channels=-1,
                     norm=self._norm(),
                     scale_op=scale_op,
@@ -163,19 +166,19 @@ class BitResNet(nn.Module):
                 stride=stride,
                 padding=1,
                 act_layer=self._act(),
-                conv_reduce_layer=convs.Conv2dModels.Conv2dNormAct(
+                conv_reduce_layer=Conv2dModels.Conv2dNormAct(
                     in_channels=-1,
                     norm=self._norm(),
                     act=self._act(),
                     scale_op=scale_op,
                 ),
-                conv_transform_layer=convs.Conv2dModels.Conv2dNormAct(
+                conv_transform_layer=Conv2dModels.Conv2dNormAct(
                     in_channels=-1,
                     norm=self._norm(),
                     act=self._act(),
                     scale_op=scale_op,
                 ),
-                conv_expand_layer=convs.Conv2dModels.Conv2dNorm(
+                conv_expand_layer=Conv2dModels.Conv2dNorm(
                     in_channels=-1,
                     norm=self._norm(),
                     scale_op=scale_op,
@@ -194,36 +197,16 @@ class BitResNet(nn.Module):
         return self.head(x)
 
     def clone(self) -> "BitResNet":
-        return self.__class__(
+        return self.__class__(            
+            block_cls=self.block_cls,
+            layers=self.layers,
             num_classes=self.num_classes,
+            expansion=self.expansion,
             scale_op=self.scale_op,
             in_ch=self.in_ch,
             small_stem=self.small_stem,
         )
-
-
-class BitResNet18(BitResNet):
-    def __init__(
-        self,
-        num_classes: int,
-        scale_op: str = "median",
-        in_ch: int = 3,
-        small_stem: bool = True,
-    ) -> None:
-        super().__init__(BasicBlockBit, [2, 2, 2, 2], num_classes, 1, scale_op, in_ch, small_stem)
-
-
-class BitResNet50(BitResNet):
-    def __init__(
-        self,
-        num_classes: int,
-        scale_op: str = "median",
-        in_ch: int = 3,
-        small_stem: bool = True,
-    ) -> None:
-        super().__init__(BottleneckBit, [3, 4, 6, 3], num_classes, 4, scale_op, in_ch, small_stem)
-
-
+    
 # ---------------------------------------------------------------------------
 # Teacher networks
 # ---------------------------------------------------------------------------
@@ -363,9 +346,9 @@ def _build_student(
     in_ch: int = 3,
 ) -> BitResNet:
     if model_size == "18":
-        return BitResNet18(num_classes=num_classes, scale_op=scale_op, in_ch=in_ch, small_stem=small_stem)
+        return BitResNet(BasicBlockBit, [2, 2, 2, 2], num_classes, 1, scale_op, in_ch, small_stem)
     if model_size == "50":
-        return BitResNet50(num_classes=num_classes, scale_op=scale_op, in_ch=in_ch, small_stem=small_stem)
+        return BitResNet(BottleneckBit, [3, 4, 6, 3], num_classes, 4, scale_op, in_ch, small_stem)
     raise ValueError(f"Unsupported model_size: {model_size}")
 
 
@@ -392,6 +375,7 @@ class Config(CommonTrainConfig):
         default=200,
         description="Which Tiny-ImageNet ResNet teacher to load from zeyuanyin/tiny-imagenet",
     )
+    num_workers: int = 1
 
 # ---------------------------------------------------------------------------
 # CLI helpers
@@ -399,15 +383,14 @@ class Config(CommonTrainConfig):
 def main() -> None:
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
-
     dm = DataModuleConfig.model_validate(args.model_dump())
-    config = LitBitConfig.model_validate(args.model_dump())
+    config = LitBitConfig.model_validate({**args.model_dump(), **dm.model_dump()})
 
     config.model_size = str(config.model_size)
     if config.model_size not in ("18", "50"):
         raise ValueError(f"Unsupported model_size: {config.model_size}")
 
-    config.num_classes, small_stem = dm.num_classes, True
+    small_stem = True
     config.export_dir = args.export_dir = f"./ckpt_{config.dataset_name}_rn{config.model_size}"  
 
     config.student = _build_student(
@@ -427,9 +410,9 @@ def main() -> None:
     
     lit = LitBit(config)
     dm = dm.build()
-    trainer, dm = setup_trainer(args, lit, dm)
+    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-    trainer.validate(lit, datamodule=dm)
+
 
 
 if __name__ == "__main__":
