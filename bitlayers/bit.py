@@ -100,7 +100,8 @@ class Bit:
             """
             s = _reduce_abs(weight, keep_dim=dim, op=scale_op)
             w_bar = (weight / s).detach()
-            w_q = torch.round(w_bar).clamp_(-1, 1)
+            w_q = torch.round(w_bar)
+            w_q = w_q.clamp(-1, 1)
             # STE: pass-through gradient
             return weight + (w_q * s - weight).detach()
 
@@ -279,7 +280,8 @@ class Bit:
         def forward(self, w: torch.Tensor) -> torch.Tensor:
             s = _reduce_abs(w, keep_dim=self.dim, op=self.scale_op)
             w_bar = (w / s).detach()
-            w_q = torch.round(w_bar).clamp_(-1, 1)
+            w_q = torch.round(w_bar)
+            w_q = w_q.clamp(-1, 1)
             return w + (w_q * s - w).detach()
 
     # ------------------------------------------------------------------
@@ -338,7 +340,7 @@ class Bit:
             return wq, None
 
         @torch.no_grad()
-        def to_ternary(self):
+        def to_ternary(self, dtype=torch.int8):
             """
             Convert this layer into a frozen Bit.Conv2dInfer, carrying over:
             - per-out-channel weight scale `s` and Wq in {-1,0,+1},
@@ -348,10 +350,11 @@ class Bit:
             s_vec = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()  # [out]
             s = s_vec.view(-1, 1, 1)                                        # [out,1,1] for conv broadcast
             w_bar = w / s_vec.view(-1, 1, 1, 1)
-            w_q = torch.round(w_bar).clamp_(-1, 1).to(w.dtype)
+            w_q = torch.round(w_bar).to(w.dtype)
+            w_q = w_q.clamp(-1, 1)
 
             return Bit.Conv2dInfer(
-                weight=w_q,
+                weight=w_q.to(dtype=torch.int8) if dtype else w_q,
                 scale=s,
                 bias=(None if self.bias is None else self.bias.data.clone()),
                 in_channels=self.in_channels,
@@ -424,7 +427,7 @@ class Bit:
             self.bias = bias if bias is None else nn.Parameter(bias, requires_grad=False) # [out]
 
         def get_weights(self, dtype: torch.dtype, device: torch.device):
-            return self.weight, self.scale
+            return self.weight.to(dtype=dtype), self.scale
 
     # ------------------------------------------------------------------
     # Train-time Linear & Inference Linear (unchanged from old working code)
@@ -443,11 +446,12 @@ class Bit:
             return F.linear(x, wq, self.bias)
 
         @torch.no_grad()
-        def to_ternary(self):
+        def to_ternary(self, dtype=torch.int8):
             w = self.weight.data
             s = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()  # [out]
-            w_q = torch.round(w / s.view(-1, 1)).clamp_(-1, 1).to(w.dtype)
+            w_q = torch.round(w / s.view(-1, 1)).clamp(-1, 1).to(w.dtype)
             bias = None if self.bias is None else self.bias.data.clone()
+            w_q = w_q.to(dtype=torch.int8) if dtype else w_q
             return Bit.LinearInfer(weight=w_q, scale=s, bias=bias,
                     ).to(device=self.weight.device,dtype=self.weight.dtype)
 

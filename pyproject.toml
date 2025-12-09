@@ -19,6 +19,9 @@ dependencies = [
 dev = [
     "huggingface-hub>=0.35.1",
     "ipython>=9.5.0",
+    "onnx",
+    "onnxruntime",
+    "onnxscript<0.4",
     "timm>=1.0.20",
 ]
 

@@ -10,23 +10,6 @@ import torch
 from torchvision.ops.misc import FrozenBatchNorm2d
 
 class NormModules:
-    class Norm(nn.Module):
-        def __init__(
-            self,
-            para: BaseModel | dict,
-            para_cls: Type[BaseModel],
-            layer_cls: Type[nn.Module],
-        ):
-            if isinstance(para, dict):
-                para = para_cls(**para)
-            self.para = json.loads(para.model_dump_json())
-
-            super().__init__()
-            self.norm = layer_cls(**para.model_dump())
-
-        def forward(self, x):
-            return self.norm(x)
-
     class RmsNorm2d(nn.Module):
         """ RmsNorm2D for NCHW tensors, w/ fast apex or cast norm if available
 
@@ -105,21 +88,21 @@ class NormModels:
 
     class BatchNorm1d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.BatchNorm1d)
+            return nn.BatchNorm1d(**self.model_dump())
 
     class BatchNorm2d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.BatchNorm2d)
+            return nn.BatchNorm2d(**self.model_dump())
 
     class BatchNorm3d(_BatchNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.BatchNorm3d)
+            return nn.BatchNorm3d(**self.model_dump())
 
     class SyncBatchNorm(_BatchNormBase):
         process_group: Optional[object] = None
 
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.SyncBatchNorm)
+            return nn.SyncBatchNorm(**self.model_dump())
 
     class _InstanceNormBase(BaseModel):
         num_features: int
@@ -130,15 +113,15 @@ class NormModels:
 
     class InstanceNorm1d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.InstanceNorm1d)
+            return nn.InstanceNorm1d(**self.model_dump())
 
     class InstanceNorm2d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.InstanceNorm2d)
+            return nn.InstanceNorm2d(**self.model_dump())
 
     class InstanceNorm3d(_InstanceNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.InstanceNorm3d)
+            return nn.InstanceNorm3d(**self.model_dump())
 
     class GroupNorm(BaseModel):
         num_features: int
@@ -147,7 +130,7 @@ class NormModels:
         affine: bool = True
 
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.GroupNorm)
+            return nn.GroupNorm(**self.model_dump())
 
     # class GroupNorm1(BaseModel):
     #     num_features: int
@@ -165,8 +148,7 @@ class NormModels:
         data_format:str = "channels_last"
 
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self),
-                                     NormModels._LayerNormModule)
+            return NormModels._LayerNormModule(**self.model_dump())
 
     class _LayerNormModule(nn.Module):
         """ LayerNorm that supports two data formats: channels_last (default) or channels_first. """
@@ -197,8 +179,7 @@ class NormModels:
         num_features: int
         
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self),
-                                     NormModels._GlobalResponseNormModule)
+            return NormModels._GlobalResponseNormModule(**self.model_dump())
 
     class _GlobalResponseNormModule(nn.Module):
         """ GRN (Global Response Normalization) layer """
@@ -236,7 +217,7 @@ class NormModels:
 
     class RmsNorm(_RmsNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.RMSNorm)
+            return nn.RMSNorm(**self.model_dump())
 
     # class RmsNormFp32(_RmsNormBase):
     #     def build(self) -> nn.Module:
@@ -244,7 +225,7 @@ class NormModels:
 
     class RmsNorm2d(_RmsNormBase):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), NormModules.RmsNorm2d)
+            return NormModules.RmsNorm2d(**self.model_dump())
 
     # class RmsNorm2dFp32(_RmsNormBase):
     #     def build(self) -> nn.Module:
@@ -276,11 +257,11 @@ class NormModels:
         eps: float = 1e-5
 
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), FrozenBatchNorm2d)
+            return FrozenBatchNorm2d(**self.model_dump())
 
     class Identity(BaseModel):
         def build(self) -> nn.Module:
-            return NormModules.Norm(self, type(self), nn.Identity)
+            return nn.Identity(**self.model_dump())
 
     type = Union[BatchNorm1d,BatchNorm2d,BatchNorm3d,SyncBatchNorm,
                  InstanceNorm1d,InstanceNorm2d,InstanceNorm3d,GroupNorm,LayerNorm,
