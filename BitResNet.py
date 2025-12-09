@@ -14,11 +14,11 @@ from torchvision.models import (
 )
 from huggingface_hub import hf_hub_download
 
+from common_utils import *
 from bitlayers.convs import Conv2dModels
 from bitlayers.bit import Bit
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels
-from common_utils import *
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ class BitResNet(nn.Module):
                 stride=1,
                 padding=1,
                 scale_op=scale_op,
-                bias=True,
+                bias=False,
                 norm=self._norm(),
                 act=self._act(),
             ).build()
@@ -72,7 +72,7 @@ class BitResNet(nn.Module):
                     stride=2,
                     padding=3,
                     scale_op=scale_op,
-                    bias=True,
+                    bias=False,
                     norm=self._norm(),
                     act=self._act(),
                 ).build(),
@@ -97,6 +97,23 @@ class BitResNet(nn.Module):
     def _norm() -> NormModels.type:
         return NormModels.BatchNorm2d(num_features=-1)
 
+    @staticmethod
+    def _conv_norm_act(scale_op):
+        return Conv2dModels.Conv2dNormAct(
+                    in_channels=-1,
+                    norm=BitResNet._norm(),
+                    act=BitResNet._act(),
+                    scale_op=scale_op,
+                )
+    
+    @staticmethod
+    def _conv_norm(scale_op):
+        return Conv2dModels.Conv2dNorm(
+                    in_channels=-1,
+                    norm=BitResNet._norm(),
+                    scale_op=scale_op,
+                )
+    
     def _make_layer(
         self,
         block: Callable[..., nn.Module],
@@ -131,11 +148,7 @@ class BitResNet(nn.Module):
     ) -> nn.Module:
         shortcut_layer = None
         if stride != 1 or inplanes != out_channels:
-            shortcut_layer = Conv2dModels.Conv2dNorm(
-                in_channels=-1,
-                norm=self._norm(),
-                scale_op=scale_op,
-            )
+            shortcut_layer = self._conv_norm(scale_op)
 
         if block is BasicBlockBit:
             block_cfg = BasicBlockBit(
@@ -144,17 +157,8 @@ class BitResNet(nn.Module):
                 stride=stride,
                 padding=1,
                 act_layer=self._act(),
-                conv1_layer=Conv2dModels.Conv2dNormAct(
-                    in_channels=-1,
-                    norm=self._norm(),
-                    act=self._act(),
-                    scale_op=scale_op,
-                ),
-                conv2_layer=Conv2dModels.Conv2dNorm(
-                    in_channels=-1,
-                    norm=self._norm(),
-                    scale_op=scale_op,
-                ),
+                conv1_layer=self._conv_norm_act(scale_op),
+                conv2_layer=self._conv_norm(scale_op),
                 shortcut_layer=shortcut_layer,
                 scale_op=scale_op,
                 bit=True,
@@ -166,23 +170,9 @@ class BitResNet(nn.Module):
                 stride=stride,
                 padding=1,
                 act_layer=self._act(),
-                conv_reduce_layer=Conv2dModels.Conv2dNormAct(
-                    in_channels=-1,
-                    norm=self._norm(),
-                    act=self._act(),
-                    scale_op=scale_op,
-                ),
-                conv_transform_layer=Conv2dModels.Conv2dNormAct(
-                    in_channels=-1,
-                    norm=self._norm(),
-                    act=self._act(),
-                    scale_op=scale_op,
-                ),
-                conv_expand_layer=Conv2dModels.Conv2dNorm(
-                    in_channels=-1,
-                    norm=self._norm(),
-                    scale_op=scale_op,
-                ),
+                conv_reduce_layer=self._conv_norm_act(scale_op),
+                conv_transform_layer=self._conv_norm_act(scale_op),
+                conv_expand_layer=self._conv_norm(scale_op),
                 shortcut_layer=shortcut_layer,
                 scale_op=scale_op,
             )
@@ -215,14 +205,14 @@ class BitResNet(nn.Module):
 class ResNet18CIFAR(ResNet):
     def __init__(self, num_classes: int = 100) -> None:
         super().__init__(block=BasicBlock, layers=[2, 2, 2, 2], num_classes=num_classes)
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=True)
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.maxpool = nn.Identity()
 
 
 class ResNet50CIFAR(ResNet):
     def __init__(self, num_classes: int = 100) -> None:
         super().__init__(block=Bottleneck, layers=[3, 4, 6, 3], num_classes=num_classes)
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=True)
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.maxpool = nn.Identity()
 
 
@@ -415,5 +405,5 @@ def main() -> None:
 
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

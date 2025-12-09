@@ -151,7 +151,8 @@ class Bit:
             s = _reduce_abs(w, keep_dim=self.dim, op=self.scale_op)
             w_bar = (w / s).detach()
             w_q = torch.round(w_bar).clamp_(-1, 1)
-            return w + (w_q * s - w).detach()
+            dw = (w_q * s - w).detach()
+            return w + dw
 
     # ----------------------------
     # Inference (frozen) ternary modules — no activation quantization
