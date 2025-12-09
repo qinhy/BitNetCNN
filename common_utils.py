@@ -1565,6 +1565,19 @@ class IN1kToTiny200Adapter(nn.Module):
         if return_logits:
             return (p200 + 1e-12).log()
         return p200
+
+def set_export_mode(m, flag=True):
+    if hasattr(m, "export_mode"):
+        m.export_mode = flag
+    for c in m.children():
+        set_export_mode(c, flag)
+
+def export_onnx(model, dummy_input, path="model.onnx"):
+    model = model.eval()
+    set_export_mode(model, True)
+    exported = torch.onnx.dynamo_export(model, dummy_input)
+    exported.save(path)
+
 # if __name__ == '__main__':
 #     freeze_support()
 #     dm = TinyImageNetDataModule("./data",4)
