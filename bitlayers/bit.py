@@ -474,7 +474,8 @@ class Bit:
             super()._save_to_state_dict(destination, prefix, keep_vars)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            y = F.linear(x, self.weight, bias=None) * self.scale
+            w = self.weight.to(dtype=x.dtype)
+            y = F.linear(x, w, bias=None) * self.scale
             if self.bias is not None:
                 y = y + self.bias
             return y
