@@ -181,6 +181,14 @@ class BitResNet(nn.Module):
 
         return block_cfg.build()
 
+    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x = self.stem(x)
+        c2 = self.layer1(x)
+        c3 = self.layer2(c2)
+        c4 = self.layer3(c3)
+        c5 = self.layer4(c4)
+        return c2, c3, c4, c5
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
         x = self.layer4(self.layer3(self.layer2(self.layer1(x))))
