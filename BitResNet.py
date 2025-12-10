@@ -375,6 +375,15 @@ class Config(CommonTrainConfig):
     )
     num_workers: int = 1
 
+    batch_size:int = 512
+    epochs:int = 400
+
+    mixup: bool = True
+    cutmix: bool = True
+
+    lr: float = 0.2
+    alpha_kd: float = 0.3
+    alpha_hint: float = 0.05
 # ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------

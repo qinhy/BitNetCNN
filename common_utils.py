@@ -24,7 +24,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torchvision import transforms as T
+from torchvision.transforms import v2
+from torch.utils.data import default_collate
 import pytorch_lightning as pl
 from pytorch_lightning import Callback
 from pytorch_lightning.loggers import CSVLogger
@@ -34,6 +35,56 @@ from torchmetrics.classification import MulticlassAccuracy
 from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import extract_archive, check_integrity, download_url, verify_str_arg
+
+class Cutout(nn.Module):
+    """Simple Cutout transform for tensors [C, H, W].
+
+    size:
+        - int  -> square hole (size x size)
+        - (h, w) -> rectangular hole (height x width)
+    """
+    def __init__(self, size: Union[int, Tuple[int, int]] = 16):
+        super().__init__()
+        if isinstance(size, int):
+            self.size = (size, size)
+        else:
+            if len(size) != 2:
+                raise ValueError(f"Cutout size must be int or (h, w) tuple, got: {size}")
+            self.size = tuple(size)
+            
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        # img is expected to be a Tensor after ToTensor()
+        if not torch.is_tensor(img):
+            return img
+
+        _, h, w = img.shape
+        if h == 0 or w == 0:
+            return img
+
+        mask_h, mask_w = self.size
+        mask_h_half = mask_h // 2
+        mask_w_half = mask_w // 2
+
+        cy = torch.randint(0, h, (1,)).item()
+        cx = torch.randint(0, w, (1,)).item()
+
+        y1 = max(0, cy - mask_h_half)
+        y2 = min(h, cy + mask_h_half)
+        x1 = max(0, cx - mask_w_half)
+        x2 = min(w, cx + mask_w_half)
+
+        img[:, y1:y2, x1:x2] = 0.0
+        return img
+
+class SoftTargetCrossEntropy(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, logits, targets):
+        # targets: [B, num_classes] of probabilities (MixUp/CutMix)
+        log_probs = F.log_softmax(logits, dim=1)
+        loss = -(targets * log_probs).sum(dim=1).mean()
+        return loss
 
 # Constants
 EPS = 1e-12
@@ -542,58 +593,121 @@ class DataModuleConfig(BaseModel):
 # ----------------------------
 # CIFAR-100 DataModule (mixup/cutmix optional)
 # ----------------------------
-def mix_collate(batch, *, cutmix: bool, mixup: bool, mix_alpha: float):
-    xs, ys = zip(*batch)
-    x = torch.stack(xs); y = torch.tensor(ys)
-    if not (cutmix or mixup):
+class CIFAR100DataModule(pl.LightningDataModule):
+    """
+    CIFAR-100 DataModule with:
+      - RandAugment + Cutout in train transforms
+      - Optional MixUp / CutMix at collate-time (v2.MixUp / v2.CutMix)
+    """
+
+    num_classes: int = 100
+
+    def __init__(
+        self,
+        data_dir: str,
+        batch_size: int,
+        num_workers: int = 1,
+        mixup: bool = False,
+        cutmix: bool = False,
+        mix_alpha: float = 1.0,
+        val_batch_size: Optional[int] = 256,
+    ):
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.val_batch_size = val_batch_size or batch_size
+        self.num_workers = num_workers
+
+        self.mixup = mixup
+        self.cutmix = cutmix
+        self.mix_alpha = mix_alpha
+
+        self.train_ds = None
+        self.val_ds = None
+
+    def prepare_data(self) -> None:
+        # Download if needed
+        datasets.CIFAR100(root=self.data_dir, train=True, download=True)
+        datasets.CIFAR100(root=self.data_dir, train=False, download=True)
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        mean = (0.5071, 0.4867, 0.4408)
+        std = (0.2675, 0.2565, 0.2761)
+
+        train_tf = v2.Compose([
+            v2.RandomCrop(32, padding=4),
+            v2.RandomHorizontalFlip(),
+            v2.RandAugment(num_ops=2, magnitude=9),
+            v2.ToImage(), v2.ToDtype(torch.float32, scale=True), # v2.ToTensor(),
+            Cutout(size=(8,8)),          # Cutout after ToTensor
+            v2.Normalize(mean, std),
+        ])
+
+        val_tf = v2.Compose([
+            v2.ToImage(), v2.ToDtype(torch.float32, scale=True), # v2.ToTensor(),
+            v2.Normalize(mean, std),
+        ])
+
+        if stage is None or stage == "fit":
+            self.train_ds = datasets.CIFAR100(
+                root=self.data_dir,
+                train=True,
+                download=False,
+                transform=train_tf,
+            )
+            self.val_ds = datasets.CIFAR100(
+                root=self.data_dir,
+                train=False,
+                download=False,
+                transform=val_tf,
+            )
+
+        if stage == "validate" and self.val_ds is None:
+            self.val_ds = datasets.CIFAR100(
+                root=self.data_dir,
+                train=False,
+                download=False,
+                transform=val_tf,
+            )
+
+        # Build collate-time MixUp/CutMix transform (no nested function)
+        self._build_collate_transform()
+
+    def _build_collate_transform(self):
+        """Create a v2 MixUp/CutMix/RandomChoice transform, stored on self."""
+        if not self.mixup and not self.cutmix:
+            self._collate_transform = None
+            return
+
+        transforms_list = []
+        if self.mixup:
+            transforms_list.append(
+                v2.MixUp(num_classes=self.num_classes, alpha=self.mix_alpha)
+            )
+        if self.cutmix:
+            transforms_list.append(
+                v2.CutMix(num_classes=self.num_classes, alpha=self.mix_alpha)
+            )
+
+        if len(transforms_list) == 1:
+            self._collate_transform = transforms_list[0]
+        else:
+            self._collate_transform = v2.RandomChoice(transforms_list)
+
+    def train_collate_fn(self, batch):
+        """
+        This method is picklable (no nested closure).
+        DataLoader will call this in worker processes.
+        """
+        x, y = default_collate(batch)
+        if self._collate_transform is not None:
+            x, y = self._collate_transform(x, y)
         return x, y
 
-    import random
-    lam = 1.0
-    if cutmix and random.random() < 0.5:
-        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
-        idx = torch.randperm(x.size(0))
-        h, w = x.size(2), x.size(3)
-        rx, ry = torch.randint(w, (1,)).item(), torch.randint(h, (1,)).item()
-        rw = int(w * math.sqrt(1 - lam)); rh = int(h * math.sqrt(1 - lam))
-        x1, y1 = max(rx - rw//2, 0), max(ry - rh//2, 0)
-        x2, y2 = min(rx + rw//2, w), min(ry + rh//2, h)
-        x[:, :, y1:y2, x1:x2] = x[idx, :, y1:y2, x1:x2]
-        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
-        return x, (y, y[idx], lam)
-    else:
-        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
-        idx = torch.randperm(x.size(0))
-        x = lam * x + (1 - lam) * x[idx]
-        return x, (y, y[idx], lam)
-    
-class CIFAR100DataModule(pl.LightningDataModule):
-    def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
-                 mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
-        super().__init__()
-        self.data_dir, self.batch_size, self.num_workers = data_dir, batch_size, num_workers
-        self.mixup, self.cutmix, self.mix_alpha = mixup, cutmix, mix_alpha
-
-    def setup(self, stage=None):
-        mean = (0.5071,0.4867,0.4408); std=(0.2675,0.2565,0.2761)
-        train_tf = transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomRotation(10),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std),
-        ])
-        val_tf = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
-        self.train_ds = datasets.CIFAR100(root=self.data_dir, train=True,  download=True, transform=train_tf)
-        self.val_ds   = datasets.CIFAR100(root=self.data_dir, train=False, download=True, transform=val_tf)
-
     def train_dataloader(self):
-        collate = partial(
-            mix_collate,
-            cutmix=self.cutmix,
-            mixup=self.mixup,
-            mix_alpha=self.mix_alpha,
-        )
+        # If no MixUp/CutMix, let DataLoader use its own default collate_fn.
+        collate_fn = self.train_collate_fn if self._collate_transform is not None else None
+
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
@@ -602,45 +716,18 @@ class CIFAR100DataModule(pl.LightningDataModule):
             pin_memory=True,
             drop_last=True,
             persistent_workers=True if self.num_workers > 0 else False,
-            collate_fn=collate,
+            collate_fn=collate_fn,
         )
 
-
-    def val_dataloader(self,batch_size=256):
-        return DataLoader(self.val_ds, batch_size=batch_size, shuffle=False,
-                          num_workers=self.num_workers, pin_memory=True,
-                          persistent_workers=True if self.num_workers > 0 else False)
-
-# ----------------------------
-# Mixup / CutMix Collate Function
-# ----------------------------
-def mix_collate(batch, *, cutmix: bool, mixup: bool, mix_alpha: float):
-    xs, ys = zip(*batch)
-    x = torch.stack(xs)
-    y = torch.tensor(ys)
-    
-    if not (cutmix or mixup):
-        return x, y
-
-    lam = 1.0
-    idx = torch.randperm(x.size(0))
-
-    if cutmix and random.random() < 0.5:
-        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
-        h, w = x.size(2), x.size(3)
-        rx, ry = torch.randint(w, (1,)).item(), torch.randint(h, (1,)).item()
-        rw = int(w * math.sqrt(1 - lam))
-        rh = int(h * math.sqrt(1 - lam))
-        x1, y1 = max(rx - rw // 2, 0), max(ry - rh // 2, 0)
-        x2, y2 = min(rx + rw // 2, w), min(ry + rh // 2, h)
-
-        x[:, :, y1:y2, x1:x2] = x[idx, :, y1:y2, x1:x2]
-        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
-        return x, (y, y[idx], lam)
-    else:
-        lam = torch.distributions.Beta(mix_alpha, mix_alpha).sample().item()
-        x = lam * x + (1 - lam) * x[idx]
-        return x, (y, y[idx], lam)
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.val_ds,
+            batch_size=self.val_batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False,
+        )
 
 # ----------------------------
 # Tiny ImageNet Dataset Helper
@@ -789,12 +876,6 @@ class TinyImageNetDataModule(pl.LightningDataModule):
         self.val_ds   = TinyImageNetDataset(self.data_dir, split='val', transform=val_tfm, download=True)
 
     def train_dataloader(self):
-        collate = partial(
-            mix_collate,
-            cutmix=self.cutmix,
-            mixup=self.mixup,
-            mix_alpha=self.mix_alpha,
-        )
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
@@ -803,7 +884,6 @@ class TinyImageNetDataModule(pl.LightningDataModule):
             pin_memory=True,
             drop_last=True,
             persistent_workers=True if self.num_workers > 0 else False,
-            collate_fn=collate,
         )
 
     def val_dataloader(self, batch_size: int = None):
@@ -923,13 +1003,6 @@ class ImageNetDataModule(pl.LightningDataModule):
         # self.num_classes = len(self.train_ds.classes)
 
     def train_dataloader(self):
-        # Reuse your mix_collate just like CIFAR100DataModule
-        collate = partial(
-            mix_collate,
-            cutmix=self.cutmix,
-            mixup=self.mixup,
-            mix_alpha=self.mix_alpha,
-        )
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
@@ -938,7 +1011,6 @@ class ImageNetDataModule(pl.LightningDataModule):
             pin_memory=True,
             drop_last=True,
             persistent_workers=True if self.num_workers > 0 else False,
-            collate_fn=collate,
         )
 
     def val_dataloader(self, batch_size: int = None):
@@ -1068,9 +1140,11 @@ class LitBit(pl.LightningModule):
         self.alpha_kd = config.alpha_kd
         self.alpha_hint = config.alpha_hint
         
-        self.ce = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        self.ce_hard = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        self.ce_soft = SoftTargetCrossEntropy()
         self.kd = KDLoss(T=config.T)
         self.hint = AdaptiveHintLoss()
+
 
         if self.teacher is None:
             self.alpha_kd=0.0
@@ -1137,23 +1211,27 @@ class LitBit(pl.LightningModule):
     def on_validation_epoch_start(self):
         print()
         self._ternary_snapshot = self._clone_student()
-
-    def training_step(self, batch, batch_idx):
+        
+    def training_step(self, batch:Tuple[torch.Tensor,torch.Tensor], batch_idx):
         x, y = batch
-        is_mix = isinstance(y, tuple)
-        if is_mix:
-            y_a, y_b, lam = y
-
-        # use_amp = bool(self.amp and "cuda" in str(self.device))
+        # y:
+        #   - LongTensor [B] when no MixUp/CutMix
+        #   - FloatTensor [B, num_classes] when MixUp/CutMix (from v2)
 
         z_s = self.student(x)
         z_t = None
-        
-        if is_mix:
-            loss_ce = lam * self.ce(z_s, y_a) + (1 - lam) * self.ce(z_s, y_b)
-        else:
-            loss_ce = self.ce(z_s, y)
 
+        # --------- classification loss (CE) --------- #
+        if y.ndim == 2:
+            # soft labels from MixUp/CutMix
+            loss_ce = self.ce_soft(z_s, y)
+            y_hard = y.argmax(dim=1)
+        else:
+            # hard labels (with label smoothing)
+            loss_ce = self.ce_hard(z_s, y)
+            y_hard = y
+
+        # --------- teacher logits (for KD) --------- #
         if self.teacher:
             with torch.no_grad():
                 z_t = self.teacher(x)
@@ -1162,26 +1240,42 @@ class LitBit(pl.LightningModule):
         if z_t is not None and self.alpha_kd > 0:
             loss_kd = self.kd(z_s.float(), z_t.float())
 
-        # Hints
+        # --------- hint loss --------- #
         loss_hint = 0.0
-        if self.alpha_hint>0 and len(self.hint_points)>0:
-            for n in self.hint_points:                
+        if self.alpha_hint > 0 and len(self.hint_points) > 0:
+            for n in self.hint_points:
                 sn = tn = n
-                if type(n)==tuple:
-                    sn,tn = n
+                if isinstance(n, tuple):
+                    sn, tn = n
                 if sn not in self._s_feats:
                     raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
                 if tn not in self._t_feats:
                     raise ValueError(f"Hint point {tn} not found in teacher features of {self._t_feats}.")
-                loss_hint = loss_hint + self.hint(sn, self._s_feats[sn].float(), self._t_feats[tn].float())
+                loss_hint = loss_hint + self.hint(
+                    sn,
+                    self._s_feats[sn].float(),
+                    self._t_feats[tn].float(),
+                )
 
+        # --------- total loss --------- #
         loss = (1.0 - self.alpha_kd) * loss_ce + self.alpha_kd * loss_kd + self.alpha_hint * loss_hint
 
+        # --------- logging --------- #
         logd = {}
         logd["train/loss"] = loss
-        if loss_ce>0.0 : logd["train/ce"] = loss_ce
-        if loss_kd>0.0 : logd["train/kd"] = loss_kd
-        if loss_hint>0.0 : logd["train/hint"] = loss_hint
+        if loss_ce > 0.0:
+            logd["train/ce"] = loss_ce
+        if loss_kd > 0.0:
+            logd["train/kd"] = loss_kd
+        if loss_hint > 0.0:
+            logd["train/hint"] = loss_hint
+
+        # optional: training accuracy (using hard labels)
+        with torch.no_grad():
+            preds = z_s.argmax(dim=1)
+            acc = (preds == y_hard).float().mean()
+        logd["train/acc"] = acc
+
         logd["lr"] = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log_dict(logd, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=x.size(0))
         return loss
@@ -1330,7 +1424,7 @@ def GUI_tool(model,
 
     # Default preprocess: just ToTensor (0..1), no resize
     if preprocess is None:
-        preprocess = T.ToTensor()
+        preprocess = transforms.ToTensor()
 
     # Helpers
     def load_image(path,resize=resize):
