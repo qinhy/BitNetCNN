@@ -36,6 +36,27 @@ from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import extract_archive, check_integrity, download_url, verify_str_arg
 
+def snap_model(model):
+    def snapshot_params(m):
+        return {k: v.detach().clone().cpu() for k, v in m.named_parameters()}
+    param = snapshot_params(model)
+    def snapshot_buffers(m):
+        return {k: v.detach().clone().cpu() for k, v in m.named_buffers()}
+    buf = snapshot_buffers(model)
+    return param,buf
+
+@torch.no_grad()
+def recover_snap(model: nn.Module, params_snap, bufs_snap):
+    # restore parameters
+    for name, p in model.named_parameters():
+        if name in params_snap:
+            p.copy_(params_snap[name].to(p.device))
+
+    # restore buffers (e.g. BN running_mean/var)
+    for name, b in model.named_buffers():
+        if name in bufs_snap:
+            b.copy_(bufs_snap[name].to(b.device))
+
 class Cutout(nn.Module):
     """Simple Cutout transform for tensors [C, H, W].
 
@@ -493,60 +514,6 @@ def replace_all2Bit(model: nn.Module, scale_op: str = "median", wrap_same: bool 
             setattr(model, name, new_child)
 
     return convs, linears
-# ----------------------------
-# KD losses & feature hints (unchanged from your pattern)
-# ----------------------------
-class KDLoss(nn.Module):
-    def __init__(self, T=4.0): super().__init__(); self.T=T
-    def forward(self, z_s, z_t):
-        T = self.T
-        return F.kl_div(F.log_softmax(z_s/T,1), F.softmax(z_t/T,1), reduction="batchmean") * (T*T)
-
-class AdaptiveHintLoss(nn.Module):
-    """Learnable 1x1 per hint; auto matches spatial size then SmoothL1."""
-    def __init__(self):
-        super().__init__()
-        self.proj = nn.ModuleDict()
-    
-    @staticmethod
-    def _k(name: str) -> str:
-        # bijective mapping so we never collide with real underscores etc.
-        # U+2027 (Hyphenation Point) is printable and allowed in names.
-        return name.replace('.', '\u2027')
-
-    def forward(self, name, f_s, f_t):
-        f_s = F.adaptive_avg_pool2d(f_s, f_t.shape[-2:])
-        c_s, c_t = f_s.shape[1], f_t.shape[1]
-        k = self._k(name)
-        if (k not in self.proj or
-            self.proj[k].in_channels != c_s or
-            self.proj[k].out_channels != c_t):
-            self.proj[k] = nn.Conv2d(c_s, c_t, kernel_size=1, bias=True).to(f_s.device)
-        f_s = self.proj[k](f_s)
-        return F.smooth_l1_loss(f_s, f_t.detach())
-
-
-class SaveOutputHook:
-    """Picklable forward hook that stores outputs into a dict under a given key."""
-    __slots__ = ("store", "key")
-    def __init__(self, store: dict, key: str):
-        self.store = store
-        self.key = key
-    def __call__(self, module, module_in, module_out):
-        self.store[self.key] = module_out
-
-def make_feature_hooks(module: nn.Module, names, feats: dict, idx=0):
-    """Register picklable forward hooks; returns list of handles."""
-    handles = []
-    if type(names[0]) == tuple:
-        names = [n[idx] for n in names]
-    name_set = set(names)
-    for n, sub in module.named_modules():
-        for i,ii in enumerate(name_set):
-            if n.endswith(ii):break
-        if n.endswith(ii):
-            handles.append(sub.register_forward_hook(SaveOutputHook(feats, ii)))
-    return handles
 
 class DataModuleConfig(BaseModel):    
     data_dir: str
@@ -624,12 +591,7 @@ class CIFAR100DataModule(pl.LightningDataModule):
         self.val_ds = None
 
         self.num_classes = 100
-
-    def prepare_data(self) -> None:
-        # Download if needed
-        datasets.CIFAR100(root=self.data_dir, train=True, download=True)
-        datasets.CIFAR100(root=self.data_dir, train=False, download=True)
-
+        
     def setup(self, stage: Optional[str] = None) -> None:
         mean = (0.5071, 0.4867, 0.4408)
         std = (0.2675, 0.2565, 0.2761)
@@ -651,13 +613,13 @@ class CIFAR100DataModule(pl.LightningDataModule):
         self.train_ds = datasets.CIFAR100(
             root=self.data_dir,
             train=True,
-            download=False,
+            download=True,
             transform=train_tf,
         )
         self.val_ds = datasets.CIFAR100(
             root=self.data_dir,
             train=False,
-            download=False,
+            download=True,
             transform=val_tf,
         )
 
@@ -718,6 +680,7 @@ class CIFAR100DataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=True if self.num_workers > 0 else False,
+            collate_fn=None,
         )
 
 # ----------------------------
@@ -1141,13 +1104,6 @@ class LitBit(pl.LightningModule):
         self.kd = KDLoss(T=config.T)
         self.hint = AdaptiveHintLoss()
 
-
-        if self.teacher is None:
-            self.alpha_kd=0.0
-            self.alpha_hint=0.0
-        else:
-            for p in self.teacher.parameters(): p.requires_grad_(False)
-
         if self.alpha_kd<=0:
             self.kd = None
         if self.alpha_hint<=0:
@@ -1156,46 +1112,180 @@ class LitBit(pl.LightningModule):
         if self.alpha_kd<=0 and self.alpha_hint<=0:
             self.teacher=None
 
+        if self.teacher is None:
+            self.alpha_kd = 0.0
+            self.alpha_hint = 0.0
+            self.teacher_params_snap, self.teacher_bufs_snap = None, None
+        else:
+            for p in self.teacher.parameters():
+                p.requires_grad_(False)
+            # take teacher snapshot (on CPU)
+            self.teacher_params_snap, self.teacher_bufs_snap = snap_model(self.teacher)
+
         self.hint_points = config.hint_points
         self._ternary_snapshot = None
         self._t_feats = {}
         self._s_feats = {}
         self._t_handles = []
         self._s_handles = []
-        self.t_acc_fp = None
+        self.t_acc_fps = {}
         self.lr = config.lr
         self.wd = config.wd
         self.epochs = config.epochs
+        
+        self.teacher_params_snap,self.teacher_bufs_snap = snap_model(self.teacher)
+        # --- register hint projections here ---
+        if self.hint is not None and self.teacher is not None and len(self.hint_points) > 0:
+            self.init_hint()
 
+    def init_hint(self):
+        s_mods = dict(self.student.named_modules())
+        t_mods = dict(self.teacher.named_modules())
+
+        for n in self.hint_points:
+            # n can be "name" or ("student_name", "teacher_name")
+            if isinstance(n, tuple):
+                sn, tn = n
+            else:
+                sn, tn = n, n
+
+            if sn not in s_mods:
+                raise ValueError(f"Student hint point '{sn}' not found in student.named_modules().")
+            if tn not in t_mods:
+                raise ValueError(f"Teacher hint point '{tn}' not found in teacher.named_modules().")
+
+            s_m = s_mods[sn]
+            t_m = t_mods[tn]
+
+            c_s = infer_out_channels(s_m)
+            c_t = infer_out_channels(t_m)
+
+            if c_s is None or c_t is None:
+                raise ValueError(
+                    f"Cannot infer channels for hint point {n}. "
+                    f"Student module: {type(s_m)}, teacher module: {type(t_m)}"
+                )
+            
+            self.hint.register_pair(sn, c_s, c_t)
+
+    def diff_from_init(self, tag: str, strict=False):
+        if self.teacher is None:return
+        cur_p, cur_b = snap_model(self.teacher)
+        changed_p = [k for k in self.teacher_params_snap
+                    if not torch.equal(self.teacher_params_snap[k], cur_p[k])]
+        changed_b = [k for k in self.teacher_bufs_snap
+                    if not torch.equal(self.teacher_bufs_snap[k], cur_b[k])]
+        if changed_p or changed_b:
+            if strict:
+                raise ValueError(f"[{tag}] Teacher changed!")
+            # print(f"[{tag}] Teacher changed!")
+            # print("  changed PARAMS:", changed_p[:5], "..." if len(changed_p) > 5 else "")
+            # print("  changed BUFFERS:", changed_b[:5], "..." if len(changed_b) > 5 else "")
+            recover_snap(self.teacher,self.teacher_params_snap,self.teacher_bufs_snap)
+        else:
+            pass
+            # recover_snap(self.teacher,self.teacher_params_snap,self.teacher_bufs_snap)
+            # print(f"[{tag}] Teacher identical to init.")
+            
+    @torch.no_grad()
     def setup(self, stage=None):
-        if self.teacher:
-            self.teacher = self.teacher.to(self.device)
-            if self.alpha_hint>0:
-                self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats, 0)
-                self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, 1)
+        # --- move & freeze teacher, register hooks ---
+        if self.teacher is not None:
+            self.teacher = self.teacher.to(self.device).eval()
+            for p in self.teacher.parameters():
+                p.requires_grad_(False)
 
-    def teardown(self, stage=None):
-        for h in getattr(self, "_t_handles", []):
-            try: h.remove()
-            except: pass
-        for h in getattr(self, "_s_handles", []):
-            try: h.remove()
-            except: pass
+            if self.alpha_hint > 0 and len(self.hint_points) > 0:
+                self._s_handles = make_feature_hooks(
+                    self.student, self.hint_points, self._s_feats, idx=0
+                )
+                self._t_handles = make_feature_hooks(
+                    self.teacher, self.hint_points, self._t_feats, idx=1
+                )
 
-    def forward(self, x):
-        return self.student(x)
-
-    def on_fit_start(self):
-        n_params = sum(p.numel() for p in self.student.parameters())
+        # --- accelerator / device info ---
         acc_name = self.trainer.accelerator.__class__.__name__
         strategy_name = self.trainer.strategy.__class__.__name__
         num_devices = getattr(self.trainer, "num_devices", None) or len(self.trainer.devices or [])
         dev_str = str(self.device)
         cuda_name = ""
         if torch.cuda.is_available() and "cuda" in dev_str:
-            try: cuda_name = f" | CUDA: {torch.cuda.get_device_name(self.device.index or 0)}"
+            try:
+                cuda_name = f" | CUDA: {torch.cuda.get_device_name(self.device.index or 0)}"
+            except Exception:
+                pass
+
+        # --- param counts ---
+        def _param_counts(m: nn.Module):
+            total = sum(p.numel() for p in m.parameters())
+            trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
+            frozen = total - trainable
+            return total, trainable, frozen
+        s_total, s_train, s_frozen = _param_counts(self.student)
+        if self.teacher is not None:
+            t_total, t_train, t_frozen = _param_counts(self.teacher)
+        else:
+            t_total = t_train = t_frozen = 0
+
+        # optional: quick teacher checksum for debugging weight changes
+        if self.teacher is not None:
+            teacher_checksum = float(
+                sum(p.float().abs().sum() for p in self.teacher.parameters()).cpu()
+            )
+        else:
+            teacher_checksum = 0.0
+
+        print("=" * 80)
+        print(f"Model params: { (s_total + t_total)/1e6:.2f}M "
+            f"| Accelerator: {acc_name} | Devices: {num_devices}")
+        print(f"Strategy: {strategy_name} | Device: {dev_str}{cuda_name}")
+        print("-" * 80)
+        print(f"Student: {self.student.__class__.__name__}")
+        print(f"  total params    : {s_total/1e6:.2f}M")
+        print(f"  trainable params: {s_train/1e6:.2f}M")
+        print(f"  frozen params   : {s_frozen/1e6:.2f}M")
+        if self.teacher is not None:
+            print(f"Teacher: {self.teacher.__class__.__name__} (frozen)")
+            print(f"  total params    : {t_total/1e6:.2f}M")
+            print(f"  trainable params: {t_train/1e6:.2f}M")
+            print(f"  frozen params   : {t_frozen/1e6:.2f}M")
+            print(f"  checksum(sum|w|): {teacher_checksum:.3e}")
+        else:
+            print("Teacher: None")
+
+        print("-" * 80)
+        print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes}")
+        print(f"KD      : alpha_kd={self.alpha_kd}, T={getattr(self, 'kd', None) and self.kd.T}")
+        print(f"Hint    : alpha_hint={self.alpha_hint}, points={self.hint_points}")
+        print(f"Optim   : lr={self.lr}, wd={self.wd}, epochs={self.epochs}")
+        print("=" * 80)
+
+
+    def teardown(self, stage=None):
+        for h in getattr(self, "_t_handles", [])+getattr(self, "_s_handles", []):
+            try: h.remove()
             except: pass
-        self.print(f"Model params: {n_params/1e6:.2f}M | Accelerator: {acc_name} | Devices: {num_devices} | Strategy: {strategy_name} | Device: {dev_str}{cuda_name}")
+
+    def forward(self, x):
+        return self.student(x)
+    
+    def teacher_forward(self, x):
+        if self.teacher is None:
+            return None
+        self.teacher.eval()
+        with torch.no_grad():
+            y = self.teacher(x).detach()
+        return y
+
+    def on_fit_start(self):
+        self.diff_from_init("on_fit_start")
+
+    def on_train_epoch_start(self):
+        self.diff_from_init("on_train_epoch_start")
+
+    def on_train_batch_start(self, batch, batch_idx, dataloader_idx=0):
+        if batch_idx == 0:
+            self.diff_from_init("on_train_batch_start[0]")
 
     @torch.no_grad()
     def _clone_student(self):
@@ -1206,8 +1296,9 @@ class LitBit(pl.LightningModule):
 
     def on_validation_epoch_start(self):
         print()
+        self.diff_from_init("on_validation_epoch_start")
         self._ternary_snapshot = self._clone_student()
-        
+
     def training_step(self, batch:Tuple[torch.Tensor,torch.Tensor], batch_idx):
         x, y = batch
         # y:
@@ -1215,21 +1306,16 @@ class LitBit(pl.LightningModule):
         #   - FloatTensor [B, num_classes] when MixUp/CutMix (from v2)
 
         z_s = self.student(x)
-        z_t = None
-        if self.teacher:
-            with torch.no_grad():
-                z_t = self.teacher(x)
+        z_t = self.teacher_forward(x)
 
         # --------- classification loss (CE) --------- #
         if y.ndim == 2:
             # soft labels from MixUp/CutMix
             loss_ce = self.ce_soft(z_s, y)
-            y_hard = y.argmax(dim=1)
         else:
             # hard labels (with label smoothing)
             loss_ce = self.ce_hard(z_s, y)
-            y_hard = y
-
+            
         # --------- teacher logits (for KD) --------- #
         alpha_kd = self.alpha_kd
         if z_t is not None and self.alpha_kd > 0:
@@ -1241,10 +1327,10 @@ class LitBit(pl.LightningModule):
         # --------- hint loss --------- #
         loss_hint = 0.0
         if self.teacher and self.alpha_hint > 0 and len(self.hint_points) > 0:
-            for n in self.hint_points:
-                sn = tn = n
-                if isinstance(n, tuple):
-                    sn, tn = n
+            for hint_name in self.hint_points:
+                sn = tn = hint_name
+                if isinstance(hint_name, tuple):
+                    sn, tn = hint_name
                 if sn not in self._s_feats:
                     raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
                 if tn not in self._t_feats:
@@ -1268,36 +1354,28 @@ class LitBit(pl.LightningModule):
         if loss_hint > 0.0:
             logd["train/hint"] = loss_hint
 
-        # optional: training accuracy (using hard labels)
-        with torch.no_grad():
-            preds = z_s.argmax(dim=1)
-            acc = (preds == y_hard).float().mean()
-        logd["train/acc"] = acc
-
         logd["lr"] = self.trainer.optimizers[0].param_groups[0]["lr"]
         self.log_dict(logd, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=x.size(0))
+
         return loss
 
+    @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        def log_val(n,model=None,acc=None,x=x,y=y):            
-            with torch.no_grad():
-                if acc is None and model is not None:
-                    # acc = (model(x).argmax(1)==y).sum()/x.size(0)
-                    acc = MulticlassAccuracy(num_classes=self.num_classes
+        acc_func = lambda x,y:MulticlassAccuracy(num_classes=self.num_classes
                             # average='micro', multidim_average='global', top_k=1
-                        ).to(x.device)(model(x), y)
-                if acc is not None:
-                    self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
-                return acc
-            
-        if self.alpha_kd>0 and self.t_acc_fp is None and self.teacher:
-            self.t_acc_fp = log_val("t_acc_fp", self.teacher)
+                            ).to(x.device)(x,y).item()
         
-        log_val("acc_fp", self.student)
-        log_val("acc_tern", self._ternary_snapshot)
-        if self.t_acc_fp:
-            log_val("t_acc_fp", acc=self.t_acc_fp)
+        if self.alpha_kd>0 and self.t_acc_fps.get(batch_idx) is None and self.teacher:
+            self.t_acc_fps[batch_idx] = acc_func(self.teacher_forward(x),y)
+            # print("acc_func(self.teacher_forward(x),y) : ",self.t_acc_fps[batch_idx])
+            
+        logd = {}
+        if self.t_acc_fps.get(batch_idx) is not None:
+            logd["val/t_acc_fp"] = self.t_acc_fps.get(batch_idx)
+        logd["val/acc_fp"] = acc_func(self.student(x),y)
+        logd["val/acc_tern"] = acc_func(self._ternary_snapshot(x),y)
+        self.log_dict(logd, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
     def configure_optimizer_params(self):
         params = list(self.student.parameters())
@@ -1317,6 +1395,83 @@ class LitBit(pl.LightningModule):
             "optimizer": opt,
             "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
         }
+
+# ----------------------------
+# KD losses & feature hints (unchanged from your pattern)
+# ----------------------------
+class KDLoss(nn.Module):
+    def __init__(self, T=4.0): super().__init__(); self.T=T
+    def forward(self, z_s, z_t):
+        T = self.T
+        return F.kl_div(F.log_softmax(z_s/T,1), F.softmax(z_t/T,1), reduction="batchmean") * (T*T)
+
+class AdaptiveHintLoss(nn.Module):
+    """Learnable 1x1 per hint; auto matches spatial size then SmoothL1."""
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.ModuleDict()
+    
+    @staticmethod
+    def _k(name: str) -> str:
+        # bijective mapping so we never collide with real underscores etc.
+        # U+2027 (Hyphenation Point) is printable and allowed in names.
+        return name.replace('.', '\u2027')
+
+    def register_pair(self, name: str, c_s: int, c_t: int):
+        """Create a 1x1 projection for this hint name."""
+        k = self._k(name)
+        self.proj[k] = nn.Conv2d(c_s, c_t, kernel_size=1, bias=True)
+        # no .to(device) here; Lightning will move the whole module
+
+    def forward(self, name, f_s, f_t):
+        f_s = F.adaptive_avg_pool2d(f_s, f_t.shape[-2:])
+        k = self._k(name)
+        f_s = self.proj[k](f_s)
+        return F.smooth_l1_loss(f_s, f_t.detach())
+
+class SaveOutputHook:
+    """Picklable forward hook that stores outputs into a dict under a given key."""
+    __slots__ = ("store", "key")
+    def __init__(self, store: dict, key: str):
+        self.store = store
+        self.key = key
+    def __call__(self, module, module_in, module_out:torch.Tensor):
+        self.store[self.key] = module_out
+
+def make_feature_hooks(module: nn.Module, names, feats: dict, idx=0):
+    """Register picklable forward hooks; returns list of handles."""
+    handles = []
+    if type(names[0]) == tuple:
+        names = [n[idx] for n in names]
+    name_set = set(names)
+    for n, sub in module.named_modules():
+        for i,ii in enumerate(name_set):
+            if n.endswith(ii):break
+        if n.endswith(ii):
+            handles.append(sub.register_forward_hook(SaveOutputHook(feats, ii)))
+    return handles
+
+def infer_out_channels(module: nn.Module):
+    """Try to infer the number of output channels from a module.
+    
+    Works for Conv2d, BatchNorm2d, Linear, etc.,
+    and recursively searches inside containers (Sequential, blocks, etc.).
+    """
+    # Direct attributes commonly used for "channels"
+    for attr in ("out_channels", "num_features", "out_features"):
+        if hasattr(module, attr):
+            return getattr(module, attr)
+
+    # If it's a container (Sequential, custom block, etc.), 
+    # walk its children (from last to first to approximate "output")
+    children = list(module.children())
+    for child in reversed(children):
+        c = infer_out_channels(child)
+        if c is not None:
+            return c
+
+    # Give up
+    return None
 
 # ----------------------------
 # Common CLI utilities

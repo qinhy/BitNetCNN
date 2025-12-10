@@ -368,26 +368,25 @@ class LitBitResnet(LitBit):
         super().__init__(config)
         self.teacher_stop_epoch = teacher_stop_epoch
 
-    def on_train_epoch_start(self):
-        if self.teacher_stop_epoch>0 and self.current_epoch == self.teacher_stop_epoch:
-            # Log a message so you see it in Lightning logs
-            self.print(f"[KD] Disabling teacher & distillation at epoch {self.current_epoch}")
-            self.alpha_kd = 0.0
-            self.alpha_hint = 0.0
-            self.kd = None
-            self.hint = None
-            for h in getattr(self, "_t_handles", [])+getattr(self, "_s_handles", []):
-                try:
-                    h.remove()
-                except:
-                    pass
-            self._t_handles = []
-            self._s_handles = []
-            self._t_feats = {}
-            self._s_feats = {}
-            self.teacher = None
-
-        return super().on_train_epoch_start()
+    # def on_train_epoch_start(self):
+    #     if self.teacher_stop_epoch>0 and self.current_epoch == self.teacher_stop_epoch:
+    #         # Log a message so you see it in Lightning logs
+    #         self.print(f"[KD] Disabling teacher & distillation at epoch {self.current_epoch}")
+    #         self.alpha_kd = 0.0
+    #         self.alpha_hint = 0.0
+    #         self.kd = None
+    #         self.hint = None
+    #         for h in getattr(self, "_t_handles", [])+getattr(self, "_s_handles", []):
+    #             try:
+    #                 h.remove()
+    #             except:
+    #                 pass
+    #         self._t_handles = []
+    #         self._s_handles = []
+    #         self._t_feats = {}
+    #         self._s_feats = {}
+    #         self.teacher = None
+        # return super().on_train_epoch_start()
     
 class Config(CommonTrainConfig):
     dataset_name: str = "c100"
@@ -402,7 +401,7 @@ class Config(CommonTrainConfig):
     num_workers: int = 1
 
     batch_size:int = 512
-    epochs:int = 400
+    epochs:int = 1
 
     mixup: bool = True
     cutmix: bool = True
