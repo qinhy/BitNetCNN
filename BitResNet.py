@@ -363,6 +363,32 @@ def _build_teacher(
         return teachers[dataset_name](device=device, epochs=timnet_teacher_epochs)
     raise ValueError(f"Unsupported dataset key for teachers: {dataset_name}")
 
+class LitBitResnet(LitBit):
+    def __init__(self, config, teacher_stop_epoch):
+        super().__init__(config)
+        self.teacher_stop_epoch = teacher_stop_epoch
+
+    def on_train_epoch_start(self):
+        if self.teacher_stop_epoch>0 and self.current_epoch == self.teacher_stop_epoch:
+            # Log a message so you see it in Lightning logs
+            self.print(f"[KD] Disabling teacher & distillation at epoch {self.current_epoch}")
+            self.alpha_kd = 0.0
+            self.alpha_hint = 0.0
+            self.kd = None
+            self.hint = None
+            for h in getattr(self, "_t_handles", [])+getattr(self, "_s_handles", []):
+                try:
+                    h.remove()
+                except:
+                    pass
+            self._t_handles = []
+            self._s_handles = []
+            self._t_feats = {}
+            self._s_feats = {}
+            self.teacher = None
+
+        return super().on_train_epoch_start()
+    
 class Config(CommonTrainConfig):
     dataset_name: str = "c100"
     model_size: Literal["18", "50"] = Field(
@@ -384,6 +410,8 @@ class Config(CommonTrainConfig):
     lr: float = 0.2
     alpha_kd: float = 0.3
     alpha_hint: float = 0.05
+
+    teacher_stop_epoch:int = 10
 # ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------
@@ -391,31 +419,31 @@ def main() -> None:
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
     dm = DataModuleConfig.model_validate(args.model_dump())
-    config = LitBitConfig.model_validate({**args.model_dump(), **dm.model_dump()})
+    config = LitBitConfig.model_validate(args.model_dump())
+    config.dataset = dm.model_copy()
+    config.export_dir = args.export_dir = f"./ckpt_{config.dataset.dataset_name}_rn{config.model_size}"
 
     config.model_size = str(config.model_size)
     if config.model_size not in ("18", "50"):
         raise ValueError(f"Unsupported model_size: {config.model_size}")
 
     small_stem = True
-    config.export_dir = args.export_dir = f"./ckpt_{config.dataset_name}_rn{config.model_size}"  
-
     config.student = _build_student(
         model_size=config.model_size,
-        num_classes=config.num_classes,
+        num_classes=config.dataset.num_classes,
         scale_op=config.scale_op,
         small_stem=small_stem,
     )
     config.teacher = _build_teacher(
         model_size=config.model_size,
-        dataset_name=config.dataset_name,
+        dataset_name=config.dataset.dataset_name,
         device="cpu",
         timnet_teacher_epochs=200,
     )
     config.model_name="resnet"
     config.hint_points=["layer1", "layer2", "layer3", "layer4"]
     
-    lit = LitBit(config)
+    lit = LitBitResnet(config,args.teacher_stop_epoch)
     dm = dm.build()
     trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)

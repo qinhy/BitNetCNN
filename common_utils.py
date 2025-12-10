@@ -585,6 +585,7 @@ class DataModuleConfig(BaseModel):
         return super().model_post_init(context)
 
     def build(self):
+        print(f"[Dataset]: use {self.dataset_name}, {self.num_classes} classes.")
         return self._datasets[self.dataset_name](
             **self.model_dump(exclude=['dataset_name','num_classes'])
         )
@@ -599,9 +600,6 @@ class CIFAR100DataModule(pl.LightningDataModule):
       - RandAugment + Cutout in train transforms
       - Optional MixUp / CutMix at collate-time (v2.MixUp / v2.CutMix)
     """
-
-    num_classes: int = 100
-
     def __init__(
         self,
         data_dir: str,
@@ -625,6 +623,8 @@ class CIFAR100DataModule(pl.LightningDataModule):
         self.train_ds = None
         self.val_ds = None
 
+        self.num_classes = 100
+
     def prepare_data(self) -> None:
         # Download if needed
         datasets.CIFAR100(root=self.data_dir, train=True, download=True)
@@ -638,37 +638,28 @@ class CIFAR100DataModule(pl.LightningDataModule):
             v2.RandomCrop(32, padding=4),
             v2.RandomHorizontalFlip(),
             v2.RandAugment(num_ops=2, magnitude=9),
-            v2.ToImage(), v2.ToDtype(torch.float32, scale=True), # v2.ToTensor(),
+            transforms.ToTensor(),
             Cutout(size=(8,8)),          # Cutout after ToTensor
             v2.Normalize(mean, std),
         ])
 
         val_tf = v2.Compose([
-            v2.ToImage(), v2.ToDtype(torch.float32, scale=True), # v2.ToTensor(),
+            transforms.ToTensor(),
             v2.Normalize(mean, std),
         ])
 
-        if stage is None or stage == "fit":
-            self.train_ds = datasets.CIFAR100(
-                root=self.data_dir,
-                train=True,
-                download=False,
-                transform=train_tf,
-            )
-            self.val_ds = datasets.CIFAR100(
-                root=self.data_dir,
-                train=False,
-                download=False,
-                transform=val_tf,
-            )
-
-        if stage == "validate" and self.val_ds is None:
-            self.val_ds = datasets.CIFAR100(
-                root=self.data_dir,
-                train=False,
-                download=False,
-                transform=val_tf,
-            )
+        self.train_ds = datasets.CIFAR100(
+            root=self.data_dir,
+            train=True,
+            download=False,
+            transform=train_tf,
+        )
+        self.val_ds = datasets.CIFAR100(
+            root=self.data_dir,
+            train=False,
+            download=False,
+            transform=val_tf,
+        )
 
         # Build collate-time MixUp/CutMix transform (no nested function)
         self._build_collate_transform()
@@ -1098,6 +1089,8 @@ class CommonTrainConfig(BaseModel):
     strategy: Literal["auto", "ddp", "ddp_spawn", "fsdp"] = "auto"
 
 class LitBitConfig(BaseModel):
+    dataset:Optional[DataModuleConfig] = None
+    
     lr: float
     wd: float
     epochs: int
@@ -1115,12 +1108,10 @@ class LitBitConfig(BaseModel):
     student: Optional[Any] = None
     teacher: Optional[Any] = None
 
-    dataset_name: str = ""
     model_name: str = ""
     model_size: str = ""
 
     hint_points: List[str|Tuple] = Field(default_factory=list)
-    num_classes: int = -1
 
 class LitBit(pl.LightningModule):
     def __init__(self, config:LitBitConfig):
@@ -1133,15 +1124,20 @@ class LitBit(pl.LightningModule):
         self.scale_op = config.scale_op
         self.student:nn.Module = config.student
         self.teacher:nn.Module = config.teacher
-        self.dataset_name = config.dataset_name
+        self.dataset_name = config.dataset.dataset_name
         self.model_name = config.model_name
         self.model_size = config.model_size
-        self.num_classes = config.num_classes
+        self.num_classes = config.dataset.num_classes
         self.alpha_kd = config.alpha_kd
         self.alpha_hint = config.alpha_hint
         
-        self.ce_hard = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-        self.ce_soft = SoftTargetCrossEntropy()
+        if not (config.dataset.mixup or config.dataset.cutmix):
+            self.ce_hard = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+            self.ce_soft = None
+        else:
+            self.ce_hard = None
+            self.ce_soft = SoftTargetCrossEntropy()
+
         self.kd = KDLoss(T=config.T)
         self.hint = AdaptiveHintLoss()
 
@@ -1220,6 +1216,9 @@ class LitBit(pl.LightningModule):
 
         z_s = self.student(x)
         z_t = None
+        if self.teacher:
+            with torch.no_grad():
+                z_t = self.teacher(x)
 
         # --------- classification loss (CE) --------- #
         if y.ndim == 2:
@@ -1232,17 +1231,16 @@ class LitBit(pl.LightningModule):
             y_hard = y
 
         # --------- teacher logits (for KD) --------- #
-        if self.teacher:
-            with torch.no_grad():
-                z_t = self.teacher(x)
-
-        loss_kd = 0.0
+        alpha_kd = self.alpha_kd
         if z_t is not None and self.alpha_kd > 0:
             loss_kd = self.kd(z_s.float(), z_t.float())
+        else:            
+            alpha_kd = 0.0
+            loss_kd = 0.0
 
         # --------- hint loss --------- #
         loss_hint = 0.0
-        if self.alpha_hint > 0 and len(self.hint_points) > 0:
+        if self.teacher and self.alpha_hint > 0 and len(self.hint_points) > 0:
             for n in self.hint_points:
                 sn = tn = n
                 if isinstance(n, tuple):
@@ -1258,7 +1256,7 @@ class LitBit(pl.LightningModule):
                 )
 
         # --------- total loss --------- #
-        loss = (1.0 - self.alpha_kd) * loss_ce + self.alpha_kd * loss_kd + self.alpha_hint * loss_hint
+        loss = (1.0 - alpha_kd) * loss_ce + alpha_kd * loss_kd + self.alpha_hint * loss_hint
 
         # --------- logging --------- #
         logd = {}
@@ -1292,14 +1290,14 @@ class LitBit(pl.LightningModule):
                 if acc is not None:
                     self.log(f"val/{n}", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
                 return acc
+            
+        if self.alpha_kd>0 and self.t_acc_fp is None and self.teacher:
+            self.t_acc_fp = log_val("t_acc_fp", self.teacher)
         
-        acc_fp = log_val("acc_fp", self.student)
-        acc_t = log_val("acc_tern", self._ternary_snapshot)
-        if self.alpha_kd>0:
-            if self.t_acc_fp is None and self.teacher:
-                self.t_acc_fp = log_val("t_acc_fp", self.teacher)
-            else:
-                log_val("t_acc_fp", acc=self.t_acc_fp)
+        log_val("acc_fp", self.student)
+        log_val("acc_tern", self._ternary_snapshot)
+        if self.t_acc_fp:
+            log_val("t_acc_fp", acc=self.t_acc_fp)
 
     def configure_optimizer_params(self):
         params = list(self.student.parameters())
