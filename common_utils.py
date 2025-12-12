@@ -3,6 +3,7 @@ Common utilities for BitNetCNN implementations.
 This module contains shared components used across different BitNet model implementations.
 """
 
+import datetime
 from functools import partial
 import os
 import math
@@ -17,7 +18,7 @@ from PIL import Image, ImageTk
 import random
 from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, Type, Union
 from matplotlib import pyplot as plt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 import torch
 
 from bitlayers.bit import Bit
@@ -1066,12 +1067,12 @@ class AccelLightningModule(nn.Module):
       - configure_optimizers() -> (optimizer, scheduler or None, scheduler_interval: "epoch"|"step")
     """
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> 'AccelTrainer.Metrics':
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> 'Metrics':
         raise NotImplementedError
 
     @torch.no_grad()
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> 'AccelTrainer.Metrics':
-        return AccelTrainer.Metrics()
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> 'Metrics':
+        return Metrics()
 
     def configure_optimizers(self):
         raise NotImplementedError
@@ -1083,27 +1084,128 @@ class AccelLightningModule(nn.Module):
     def on_validation_epoch_start(self, epoch: int): ...
     def on_validation_epoch_end(self, epoch: int): ...
 
+class EpochMetricsTracer(BaseModel):
+    stage: Literal["train", "val"]
+    key: str
+    best: Optional[float] = None
+    mode: Literal["max", "min"] = "max"  # optional but useful
+    callback: Optional[Callable[[], None]] = Field(default=None, exclude=True)
+
+    def is_better(self, val: float) -> bool:
+        if self.best is None:
+            return True
+        return (val > self.best) if self.mode == "max" else (val < self.best)
+
+    def compare(self, val: Optional[float]) -> bool:
+        if val is None:
+            return False
+        if isinstance(val, float) and math.isnan(val):
+            return False
+        if self.is_better(val):
+            self.best = float(val)
+            if self.callback is not None:
+                self.callback()
+            return True
+        return False
+
+class Metrics(BaseModel):
+    stage: Literal["train", "val"] = "train"
+    epoch: int = -1
+    step: int = -1
+    batch_size: int = -1
+
+    loss: Optional[Any] = Field(default=None, exclude=True)
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+
+    def log(self, key: str, value: float) -> None:
+        self.metrics[key] = float(value)
+
+    def get(self, key: str, default: Optional[float] = None) -> Optional[float]:
+        return self.metrics.get(key, default)
+    
+    def to_dict(self):
+        res = {}
+        res[f"{self.stage}/loss"] = self.loss
+        res.update(self.metrics)
+        res = {k:(v if not hasattr(v,'cpu') else v.cpu().item()) for k,v in res.items()}
+        return res
+
+
+class MetricsManager(BaseModel):
+
+    metrics_list: List[Metrics] = Field(default_factory=list)
+    epoch_metric_tracers: List[EpochMetricsTracer] = Field(default_factory=list)
+    _last_epoch_by_stage: Dict[str, int] = PrivateAttr(
+        default_factory=lambda: {"train": -1, "val": -1}
+    )
+
+    def _fmt_float(self, x: Optional[float]) -> str:
+        if x is None:
+            return "—"
+        if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
+            return str(x)
+        return f"{x:.6g}"
+
+    def _pretty_print(self, m: "Metrics") -> None:
+        # loss (only if it’s a scalar tensor)
+        loss_str = "—"
+        if m.loss is not None:
+            try:
+                loss_str = self._fmt_float(float(m.loss.detach().cpu().item()))
+            except Exception:
+                loss_str = "<non-scalar>"
+
+        # stable, readable ordering
+        items = sorted((m.metrics or {}).items(), key=lambda kv: kv[0])
+        key_w = max([len("loss")] + [len(k) for k, _ in items]) if items else len("loss")
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        header = f"[{ts}] {m.stage.upper()}  epoch={m.epoch} step={m.step} bs={m.batch_size}"
+        print(header)
+        print("-" * len(header))
+
+        print(f"{'loss':<{key_w}} : {loss_str}")
+        for k, v in items:
+            print(f"{k:<{key_w}} : {self._fmt_float(v)}")
+        print()  # blank line
+    
+    def log(self, metrics: "Metrics") -> None:
+        self.metrics_list.append(metrics)
+
+        last_epoch = self._last_epoch_by_stage.get(metrics.stage, -1)
+        if metrics.epoch > last_epoch:
+            self._last_epoch_by_stage[metrics.stage] = metrics.epoch
+
+            for t in self.epoch_metric_tracers:
+                if t.stage == metrics.stage:
+                    t.compare(metrics.get(t.key))
+    
+    def last_epoch_mean(
+        self,
+        stage: str = "train",
+    ) -> Dict[str, float]:
+        last_epoch = self._last_epoch_by_stage.get(stage, -1)
+        if last_epoch < 0:
+            return {}
+
+        rows = [m for m in self.metrics_list if m.stage == stage and m.epoch == last_epoch]
+        if not rows:
+            return {}
+
+        keys = [t.key for t in self.epoch_metric_tracers if t.stage == stage]
+        if not keys:  # fallback to whatever exists in that epoch
+            keys = sorted({k for m in rows for k in m.metrics.keys()})
+
+        out: Dict[str, float] = {}
+        for k in keys:
+            vals = [m.get(k) for m in rows]
+            vals = [v for v in vals if v is not None]
+            if vals:
+                out[k] = sum(vals) / len(vals)
+        return out
+
+                    
 class AccelTrainer:
-
-    class MetricsTracer(BaseModel):
-        key:str        
-        val:float
-        best:float
-        callback:Optional[Callable] = Field(None,exclude=True)
-    
-        def is_better(self,val:float):
-            res = self.best<val
-            if res:self.best=val
-            return res
-    
-    class Metrics(BaseModel):
-        loss:Optional[torch.Tensor] = Field(None,exclude=True)
-        metrics:Dict[str,float] = {}
-        metric_tracers:'AccelTrainer.MetricsTracer' = Field(default_factory=list)
-    
-        def log_train_record(step,key,val): ...
-        def log_val_record(step,key,val): ...
-
     def __init__(
         self,
         max_epochs: int,
@@ -1111,6 +1213,8 @@ class AccelTrainer:
         gradient_accumulation_steps: int = 1,
         max_grad_norm: Optional[float] = None,
         show_progress_bar: bool = True,
+        metrics_manager = MetricsManager(),
+        log_every_n_steps=10,
     ):
         self.max_epochs = int(max_epochs)
         self.accelerator = Accelerator(
@@ -1124,6 +1228,8 @@ class AccelTrainer:
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
         self.scheduler_interval: str = "epoch"
+        self.metrics_manager = metrics_manager
+        self.log_every_n_steps = log_every_n_steps
 
     # -----------------------------
     # Public API
@@ -1152,50 +1258,11 @@ class AccelTrainer:
 
         self._call_hook(model, "on_fit_start", self.accelerator)
 
-        last = {}
         for epoch in range(self.max_epochs):
-            train_metrics = self._train_one_epoch(epoch, train_dataloader)
-            last.update(train_metrics)
-
+            self._train_one_epoch(epoch, train_dataloader)
             if val_dataloader is not None:
-                val_metrics = self._validate_one_epoch(epoch, val_dataloader)
-                last.update(val_metrics)
-
+                self._validate_one_epoch(epoch, val_dataloader)
             self._maybe_step_scheduler_epoch_end()
-
-        return last
-    
-
-    def log(self, metrics: Dict[str, float], *, stage: str, weight: float = 1.0) -> None:
-        """
-        Log scalar metrics for later aggregation (weighted mean).
-        Call this inside loops. Nothing is printed here.
-        """        
-        @dataclass
-        class _MeanMeter:
-            wsum: float = 0.0
-            w: float = 0.0
-
-            def update(self, value: float, weight: float) -> None:
-                self.wsum += float(value) * float(weight)
-                self.w += float(weight)
-
-            def reset(self) -> None:
-                self.wsum = 0.0
-                self.w = 0.0
-
-        if stage not in self._meters:
-            self._meters[stage] = {}
-
-        for name, val in metrics.items():
-            v = self._to_float(val)
-            if v is None:
-                continue
-            meter = self._meters[stage].get(name)
-            if meter is None:
-                meter = _MeanMeter()
-                self._meters[stage][name] = meter
-            meter.update(v, weight)
 
     # -----------------------------
     # Fit helpers
@@ -1267,38 +1334,54 @@ class AccelTrainer:
     # -----------------------------
     # Training / Validation
     # -----------------------------
-    def _train_one_epoch(self, epoch: int, train_loader: DataLoader) -> Dict[str, float]:
-        assert self.model is not None and self.optimizer is not None
+    
+    def _train_one_epoch(self, epoch: int, train_loader):
+        self._call_hook(self.model, "on_train_epoch_start", epoch)
+
         model = self.model
         model.train()
-        self._call_hook(model, "on_train_epoch_start", epoch)
+        
+        is_main = self.accelerator.is_local_main_process
+        pbar = tqdm(train_loader, desc=f"train {epoch+1}", leave=False, dynamic_ncols=True) if (
+            self.show_progress_bar and is_main
+        ) else train_loader
 
-        it = train_loader
-        if self.show_progress_bar and self.accelerator.is_local_main_process:
-            it = tqdm(train_loader, desc=f"train {epoch+1}", leave=False)
-
-        for step, batch in enumerate(it):
+        for step, batch in enumerate(pbar):
             with self.accelerator.accumulate(model):
-                out,train_metrics = model.training_step(batch, step)
+                train_metrics = model.training_step(batch, step)
 
-                # support either `loss` or `(loss, anything)`
-                loss = out[0] if isinstance(out, (tuple, list)) else out
+                m = train_metrics.model_copy(update=dict(
+                    stage="train", epoch=epoch, step=step,
+                    batch_size=self._infer_batch_size(batch)
+                ))
 
+                # --- 1) update bar postfix (recommended) ---
+                if is_main and hasattr(pbar, "set_postfix"):
+                    # pick the few keys you care about
+                    postfix = m.to_dict()
+                    pbar.set_postfix(postfix, refresh=False)
+
+                # --- 2) occasional textual log line (won't break bar) ---
+                if is_main and step % self.log_every_n_steps == 0:
+                    tqdm.write(f"[train] epoch={epoch} step={step} {postfix}")
+
+                self.metrics_manager.log(m)
+
+                loss = train_metrics.loss
                 self.accelerator.backward(loss)
 
-                # Only update (and clip) on real optimizer steps under accumulation
                 if self.accelerator.sync_gradients:
                     if self.max_grad_norm is not None:
                         self.accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm)
-
                     self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
 
                     if self.scheduler is not None and self.scheduler_interval == "step":
                         self.scheduler.step()
 
+        if is_main:
+            tqdm.write(f"finished train epoch {epoch}")
         self._call_hook(model, "on_train_epoch_end", epoch)
-        self.log(train_metrics)
 
     @torch.no_grad()
     def _validate_one_epoch(self, epoch: int, val_loader: DataLoader) -> Dict[str, float]:
@@ -1308,13 +1391,26 @@ class AccelTrainer:
 
         self._call_hook(model, "on_validation_epoch_start", epoch)
 
-        it = val_loader
-        if self.show_progress_bar and self.accelerator.is_local_main_process:
-            it = tqdm(val_loader, desc=f"val {epoch+1}", leave=False)
-
-        for step, batch in enumerate(it):
+        is_main = self.accelerator.is_local_main_process
+        pbar = tqdm(val_loader, desc=f"val {epoch+1}", leave=False, dynamic_ncols=True) if (
+            self.show_progress_bar and is_main
+        ) else val_loader
+        
+        for step, batch in enumerate(pbar):
             val_metrics = model.validation_step(batch, step)
-            self.log(val_metrics)
+            self.metrics_manager.log(val_metrics.model_copy(
+                            update=dict(stage='val',epoch=epoch,step=step,batch_size=self._infer_batch_size(batch))))
+
+
+        # --- 1) update bar postfix (recommended) ---
+        if is_main and hasattr(pbar, "set_postfix"):
+            # pick the few keys you care about
+            postfix = self.metrics_manager.last_epoch_mean()
+            pbar.set_postfix(postfix, refresh=False)
+
+        # --- 2) occasional textual log line (won't break bar) ---
+        if is_main and step % self.log_every_n_steps == 0:
+            tqdm.write(f"[train] epoch={epoch} step={step} {postfix}")
 
         self._call_hook(model, "on_validation_epoch_end", epoch)        
 
@@ -1334,15 +1430,6 @@ class AccelTrainer:
                 if hasattr(v, "size"):
                     return int(v.size(0))
         return 1
-
-    def _reduce_weighted_mean(self, weighted_sum_local: float, count_local: int) -> float:
-        ws = torch.tensor(weighted_sum_local, device=self.accelerator.device, dtype=torch.float32)
-        ct = torch.tensor(count_local, device=self.accelerator.device, dtype=torch.float32)
-
-        ws = self.accelerator.reduce(ws, reduction="sum")
-        ct = self.accelerator.reduce(ct, reduction="sum")
-
-        return float((ws / ct.clamp_min(1.0)).item())
     
 class ExportBestTernary:
     def __init__(self, out_dir: str, monitor: str = "val/acc_tern", mode: str = "max"):
@@ -1414,50 +1501,6 @@ class CommonTrainConfig(BaseModel):
     )
     strategy: Literal["auto", "ddp", "ddp_spawn", "fsdp"] = "auto"
 
-class LitCE(AccelLightningModule):
-    def __init__(self, config):
-        super().__init__()
-        self.student = config.student
-        self.criterion = nn.CrossEntropyLoss()
-        self.lr, self.wd, self.epochs = float(config.lr), float(config.wd), int(config.epochs)
-        self.momentum, self.nesterov = float(0.9), bool(True)
-
-    def forward(self, x):
-        return self.student(x)
-
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
-        x, y = batch
-        logits = self(x)
-        loss = self.criterion(logits, y)  # same as your loop
-
-        # optional train acc (works for y=[B] or y=[B,C])
-        y_idx = y.argmax(dim=1) if y.ndim == 2 else y
-        acc = (logits.argmax(dim=1) == y_idx).float().mean()
-
-        return loss, {"train/acc": acc}
-
-    @torch.no_grad()
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
-        x, y = batch
-        logits = self(x)
-        loss = self.criterion(logits, y)
-
-        y_idx = y.argmax(dim=1) if y.ndim == 2 else y
-        pred = logits.argmax(dim=1)
-
-        return {"val/loss": loss, "val/pred": pred, "val/target": y_idx}
-
-    def configure_optimizers(self):
-        opt = torch.optim.SGD(
-            self.student.parameters(),
-            lr=self.lr,
-            momentum=self.momentum,
-            weight_decay=self.wd,
-            nesterov=self.nesterov,
-        )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
-        return opt, sched, "epoch" 
-    
 class LitBitConfig(BaseModel):
     dataset: Optional[Any] = None  # DataModuleConfig
     lr: float
@@ -1599,12 +1642,12 @@ class LitBit(AccelLightningModule):
             accelerator.print(f"Optim   : lr={self.lr} wd={self.wd} epochs={self.epochs}")
             accelerator.print("=" * 80)
 
-    def on_train_epoch_start(self, epoch: int):
-        self.diff_from_init(f"on_train_epoch_start[{epoch}]")
-        self.student.train()
+    # def on_train_epoch_start(self, epoch: int):
+    #     self.diff_from_init(f"on_train_epoch_start[{epoch}]")
+    #     self.student.train()
 
     def on_validation_epoch_start(self, epoch: int):
-        self.diff_from_init(f"on_validation_epoch_start[{epoch}]")
+        # self.diff_from_init(f"on_validation_epoch_start[{epoch}]")
         self._ternary_snapshot = self._clone_student()
 
     # optional cleanup
@@ -1716,7 +1759,7 @@ class LitBit(AccelLightningModule):
         acc = (logits.argmax(dim=1) == y_idx).float().mean()
         logd["train/acc"] = acc.detach()
 
-        return loss, logd
+        return Metrics(loss=loss,metrics=logd)
 
     @torch.no_grad()
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
@@ -1755,7 +1798,7 @@ class LitBit(AccelLightningModule):
                 self.t_acc_fps[batch_idx] = float(t_acc.item())
             out["val/t_acc_fp"] = torch.tensor(self.t_acc_fps[batch_idx], device=z_fp.device)
 
-        return out
+        return Metrics(loss=vloss,metrics=out)
 
     # -------------------- optimizer --------------------
 
