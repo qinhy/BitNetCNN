@@ -401,7 +401,7 @@ class Config(CommonTrainConfig):
     num_workers: int = 1
 
     batch_size:int = 512
-    epochs:int = 1
+    epochs:int = 10
 
     mixup: bool = True
     cutmix: bool = True
@@ -427,14 +427,13 @@ def main() -> None:
         raise ValueError(f"Unsupported model_size: {config.model_size}")
 
     small_stem = True
-    config.student = student = _build_student(
+    config.student = _build_student(
         model_size=config.model_size,
         num_classes=config.dataset.num_classes,
         scale_op=config.scale_op,
         small_stem=small_stem,
     )
-    config.teacher = None
-    _build_teacher(
+    config.teacher = _build_teacher(
         model_size=config.model_size,
         dataset_name=config.dataset.dataset_name,
         device="cpu",
@@ -445,7 +444,7 @@ def main() -> None:
     
     lit = LitBit(config)
     dm = dm.build()
-    # trainer = setup_trainer(args,'val/acc')
+    
     trainer = AccelTrainer(
         max_epochs=args.epochs,
         mixed_precision="no",                 # start with "no" to debug

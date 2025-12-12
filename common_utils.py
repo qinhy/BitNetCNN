@@ -937,6 +937,7 @@ class MNISTDataModule(DataSetModule):
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.num_classes = 10
 
     def setup(self, stage=None):
         train_tfm = transforms.Compose([
@@ -1084,7 +1085,7 @@ class AccelLightningModule(nn.Module):
     def on_validation_epoch_start(self, epoch: int): ...
     def on_validation_epoch_end(self, epoch: int): ...
 
-class EpochMetricsTracer(BaseModel):
+class MetricsTracer(BaseModel):
     stage: Literal["train", "val"]
     key: str
     best: Optional[float] = None
@@ -1103,21 +1104,19 @@ class EpochMetricsTracer(BaseModel):
             return False
         if self.is_better(val):
             self.best = float(val)
-            if self.callback is not None:
-                self.callback()
             return True
         return False
 
 class Metrics(BaseModel):
     stage: Literal["train", "val"] = "train"
     epoch: int = -1
-    step: int = -1
-    batch_size: int = -1
+    step: Optional[int] = None
+    batch_size: Optional[int] = None
 
     loss: Optional[Any] = Field(default=None, exclude=True)
     metrics: Dict[str, Any] = Field(default_factory=dict)
 
-    def log(self, key: str, value: float) -> None:
+    def set(self, key: str, value: float) -> None:
         self.metrics[key] = float(value)
 
     def get(self, key: str, default: Optional[float] = None) -> Optional[float]:
@@ -1134,77 +1133,71 @@ class Metrics(BaseModel):
 class MetricsManager(BaseModel):
 
     metrics_list: List[Metrics] = Field(default_factory=list)
-    epoch_metric_tracers: List[EpochMetricsTracer] = Field(default_factory=list)
+    epoch_metric_tracers: List[MetricsTracer] = Field(default_factory=list)
     _last_epoch_by_stage: Dict[str, int] = PrivateAttr(
         default_factory=lambda: {"train": -1, "val": -1}
     )
 
-    def _fmt_float(self, x: Optional[float]) -> str:
-        if x is None:
-            return "—"
-        if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-            return str(x)
-        return f"{x:.6g}"
-
-    def _pretty_print(self, m: "Metrics") -> None:
-        # loss (only if it’s a scalar tensor)
-        loss_str = "—"
-        if m.loss is not None:
-            try:
-                loss_str = self._fmt_float(float(m.loss.detach().cpu().item()))
-            except Exception:
-                loss_str = "<non-scalar>"
-
-        # stable, readable ordering
-        items = sorted((m.metrics or {}).items(), key=lambda kv: kv[0])
-        key_w = max([len("loss")] + [len(k) for k, _ in items]) if items else len("loss")
-
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        header = f"[{ts}] {m.stage.upper()}  epoch={m.epoch} step={m.step} bs={m.batch_size}"
-        print(header)
-        print("-" * len(header))
-
-        print(f"{'loss':<{key_w}} : {loss_str}")
-        for k, v in items:
-            print(f"{k:<{key_w}} : {self._fmt_float(v)}")
-        print()  # blank line
-    
-    def log(self, metrics: "Metrics") -> None:
+    def log(self, metrics: "Metrics",
+                trainer:'AccelTrainer'=None,
+                model:'LitBit'=None) -> None:
         self.metrics_list.append(metrics)
 
         last_epoch = self._last_epoch_by_stage.get(metrics.stage, -1)
         if metrics.epoch > last_epoch:
             self._last_epoch_by_stage[metrics.stage] = metrics.epoch
 
-            for t in self.epoch_metric_tracers:
-                if t.stage == metrics.stage:
-                    t.compare(metrics.get(t.key))
+        for t in self.epoch_metric_tracers:
+            val = metrics.get(t.key)
+            if val is None:continue
+            if t.stage == metrics.stage and t.compare(val):
+                if t.callback is not None:
+                    t.callback(metrics=metrics,trainer=trainer,model=model)
     
     def last_epoch_mean(
         self,
         stage: str = "train",
-    ) -> Dict[str, float]:
+        epoch = -1
+    ) -> Metrics:
         last_epoch = self._last_epoch_by_stage.get(stage, -1)
-        if last_epoch < 0:
-            return {}
-
+        if last_epoch < 0: return {}
         rows = [m for m in self.metrics_list if m.stage == stage and m.epoch == last_epoch]
-        if not rows:
-            return {}
-
-        keys = [t.key for t in self.epoch_metric_tracers if t.stage == stage]
-        if not keys:  # fallback to whatever exists in that epoch
-            keys = sorted({k for m in rows for k in m.metrics.keys()})
-
-        out: Dict[str, float] = {}
+        if not rows: return {}
+        rows = [r.to_dict() for r in rows]
+        keys = sorted({k for m in rows for k in m.keys()})
+        mean_metrics: Dict[str, float] = {}
         for k in keys:
             vals = [m.get(k) for m in rows]
             vals = [v for v in vals if v is not None]
             if vals:
-                out[k] = sum(vals) / len(vals)
-        return out
-
-                    
+                try:
+                    mean_metrics[f'{k}_mean'] = sum(vals) / len(vals)
+                except Exception as e:
+                    pass
+        mean_metrics = {k:(v if not hasattr(v,'cpu') else v.cpu().item()) for k,v in mean_metrics.items()}
+        return Metrics(stage=stage,epoch=epoch,loss=None,metrics=mean_metrics)
+   
+class ExportBestTernary:
+    def __call__(self, metrics:Metrics,trainer:'AccelTrainer',model:'LitBit'):
+        config = model.config
+        export_dir = config.export_dir
+        dataset_name = config.dataset.dataset_name
+        model_name = config.model_name
+        model_size = config.model_size
+        acc_tern = metrics.get("val/acc_tern_mean")        
+        os.makedirs(export_dir, exist_ok=True)
+        # save FP student
+        best_fp = copy.deepcopy(model.student).cpu()
+        fp_path = os.path.join(export_dir, f"bit_{model_name}_{model_size}_{dataset_name}_best_fp.pt")
+        torch.save({"model": best_fp.state_dict(), "acc_tern": acc_tern}, fp_path)
+        trainer.print(f"[OK] saved {fp_path} (val/acc_tern={acc_tern*100:.2f}%)")
+        # save ternary PoT export
+        tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu()
+        tern_path = os.path.join(export_dir,
+                f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_acc@{acc_tern*100:.2f}.pt")
+        torch.save({"model": tern.state_dict(), "acc_tern": acc_tern}, tern_path)
+        trainer.print(f"[OK] exported ternary PoT -> {tern_path}")
+                 
 class AccelTrainer:
     def __init__(
         self,
@@ -1213,7 +1206,14 @@ class AccelTrainer:
         gradient_accumulation_steps: int = 1,
         max_grad_norm: Optional[float] = None,
         show_progress_bar: bool = True,
-        metrics_manager = MetricsManager(),
+        metrics_manager = MetricsManager(
+            epoch_metric_tracers=[MetricsTracer(
+                stage='val',
+                key='val/acc_tern_mean',
+                mode='max',
+                callback=ExportBestTernary()
+            )]
+        ),
         log_every_n_steps=10,
     ):
         self.max_epochs = int(max_epochs)
@@ -1363,9 +1363,8 @@ class AccelTrainer:
 
                 # --- 2) occasional textual log line (won't break bar) ---
                 if is_main and step % self.log_every_n_steps == 0:
-                    tqdm.write(f"[train] epoch={epoch} step={step} {postfix}")
-
-                self.metrics_manager.log(m)
+                    self.print(f"[train] epoch={epoch} step={step} {postfix}")
+                    self.metrics_manager.log(m,self,model)
 
                 loss = train_metrics.loss
                 self.accelerator.backward(loss)
@@ -1379,8 +1378,6 @@ class AccelTrainer:
                     if self.scheduler is not None and self.scheduler_interval == "step":
                         self.scheduler.step()
 
-        if is_main:
-            tqdm.write(f"finished train epoch {epoch}")
         self._call_hook(model, "on_train_epoch_end", epoch)
 
     @torch.no_grad()
@@ -1398,21 +1395,22 @@ class AccelTrainer:
         
         for step, batch in enumerate(pbar):
             val_metrics = model.validation_step(batch, step)
-            self.metrics_manager.log(val_metrics.model_copy(
-                            update=dict(stage='val',epoch=epoch,step=step,batch_size=self._infer_batch_size(batch))))
+            m = val_metrics.model_copy(update=dict(
+                stage="val", epoch=epoch, step=step,
+                batch_size=self._infer_batch_size(batch)
+            ))
+            self.metrics_manager.log(m,self,model)
 
-
-        # --- 1) update bar postfix (recommended) ---
         if is_main and hasattr(pbar, "set_postfix"):
-            # pick the few keys you care about
-            postfix = self.metrics_manager.last_epoch_mean()
-            pbar.set_postfix(postfix, refresh=False)
-
-        # --- 2) occasional textual log line (won't break bar) ---
-        if is_main and step % self.log_every_n_steps == 0:
-            tqdm.write(f"[train] epoch={epoch} step={step} {postfix}")
+            mean_metrics = self.metrics_manager.last_epoch_mean("val",epoch)
+            self.metrics_manager.log(mean_metrics,self,model)
+            self.print(f"[val] epoch={epoch} {mean_metrics.to_dict()}")
 
         self._call_hook(model, "on_validation_epoch_end", epoch)        
+
+    def print(self,msg):        
+        if self.accelerator.is_local_main_process:
+            tqdm.write(msg)
 
     # -----------------------------
     # Utilities
@@ -1431,38 +1429,6 @@ class AccelTrainer:
                     return int(v.size(0))
         return 1
     
-class ExportBestTernary:
-    def __init__(self, out_dir: str, monitor: str = "val/acc_tern", mode: str = "max"):
-        super().__init__()
-        self.out_dir, self.monitor, self.mode = out_dir, monitor, mode
-        self.best = None
-        os.makedirs(out_dir, exist_ok=True)
-
-    def _is_better(self, current, best):
-        if best is None: return True
-        return (current > best) if self.mode == "max" else (current < best)
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        metrics = trainer.callback_metrics
-        if self.monitor not in metrics: return
-        current = metrics[self.monitor].item()
-        dataset_name = pl_module.dataset_name if hasattr(pl_module,'dataset_name') else ''
-        model_name = pl_module.model_name if hasattr(pl_module,'model_name') else ''
-        model_size = pl_module.model_size if hasattr(pl_module,'model_size') else ''
-        if self._is_better(current, self.best):
-            self.best = current
-            # save FP student
-            best_fp = copy.deepcopy(pl_module.student).cpu()
-            fp_path = os.path.join(self.out_dir, f"bit_{model_name}_{model_size}_{dataset_name}_best_fp.pt")
-            torch.save({"model": best_fp.state_dict(), "acc_tern": current}, fp_path)
-            pl_module.print(f"[OK] saved {fp_path} (val/acc_tern={current*100:.2f}%)")
-            # save ternary PoT export
-            tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu()
-            tern_path = os.path.join(self.out_dir,
-                                     f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_acc@{current*100:.2f}.pt")
-            torch.save({"model": tern.state_dict(), "acc_tern": current}, tern_path)
-            pl_module.print(f"[OK] exported ternary PoT -> {tern_path}")
-
 # ----------------------------
 # KD + hints + ternary eval/export
 # ----------------------------
@@ -1502,7 +1468,7 @@ class CommonTrainConfig(BaseModel):
     strategy: Literal["auto", "ddp", "ddp_spawn", "fsdp"] = "auto"
 
 class LitBitConfig(BaseModel):
-    dataset: Optional[Any] = None  # DataModuleConfig
+    dataset: Optional[DataModuleConfig] = None  # DataModuleConfig
     lr: float
     wd: float
     epochs: int
@@ -1530,7 +1496,7 @@ class LitBit(AccelLightningModule):
         super().__init__()
         if type(config) is not dict:
             config = config.model_dump()
-        config = LitBitConfig.model_validate(config)
+        self.config = config = LitBitConfig.model_validate(config)
 
         # --- core ---
         self.scale_op = config.scale_op
@@ -1539,10 +1505,10 @@ class LitBit(AccelLightningModule):
         self.has_teacher = True if config.teacher is not None else False
 
         # --- metadata ---
-        self.dataset_name = getattr(config.dataset, "dataset_name", "")
+        self.dataset_name = config.dataset.dataset_name
         self.model_name = config.model_name
         self.model_size = config.model_size
-        self.num_classes = getattr(config.dataset, "num_classes", 0)
+        self.num_classes = config.dataset.num_classes
 
         self.alpha_kd = float(config.alpha_kd)
         self.alpha_hint = float(config.alpha_hint)
@@ -1626,20 +1592,28 @@ class LitBit(AccelLightningModule):
                 self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats, idx=0)
                 self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, idx=1)
 
+        class_name = lambda c:c.__class__.__name__
+
         # print model summary on main proc
         if accelerator.is_main_process:
             s_total = sum(p.numel() for p in self.student.parameters())
             s_train = sum(p.numel() for p in self.student.parameters() if p.requires_grad)
             t_total = sum(p.numel() for p in self.teacher.parameters()) if self.has_teacher and self.teacher else 0
+            t_train = sum(p.numel() for p in self.teacher.parameters() if p.requires_grad)
             accelerator.print("=" * 80)
             accelerator.print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes}")
-            accelerator.print(f"Student : {self.student.__class__.__name__} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
-            if self.has_teacher and self.teacher:
-                accelerator.print(f"Teacher : {self.teacher.__class__.__name__} | params {t_total/1e6:.2f}M (frozen)")
-            else:
-                accelerator.print("Teacher : None")
-            accelerator.print(f"KD      : alpha_kd={self.alpha_kd} | Hint: alpha_hint={self.alpha_hint} | points={self.hint_points}")
-            accelerator.print(f"Optim   : lr={self.lr} wd={self.wd} epochs={self.epochs}")
+            accelerator.print(f"Student : {class_name(self.student)} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
+            if self.has_teacher:
+                accelerator.print(f"Teacher : {class_name(self.teacher)} | params {t_total/1e6:.2f}M ({'frozen' if t_train==0 else t_train})")
+            if self.ce_hard is not None:
+                accelerator.print(f"ce_hard : enable")
+            if self.ce_soft is not None:
+                accelerator.print(f"ce_soft : enable")
+            if self.kd is not None:
+                accelerator.print(f"KD      : alpha_kd={self.alpha_kd}")
+            if self.hint is not None:
+                accelerator.print(f"Hint    : alpha_hint={self.alpha_hint} | points={self.hint_points}")
+            accelerator.print(f"Optim({class_name(self.configure_optimizers()[0])}): lr={self.lr} wd={self.wd} epochs={self.epochs}")
             accelerator.print("=" * 80)
 
     # def on_train_epoch_start(self, epoch: int):
@@ -1766,10 +1740,6 @@ class LitBit(AccelLightningModule):
         x, y = batch
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y
 
-        # snapshot must exist
-        if self._ternary_snapshot is None:
-            self._ternary_snapshot = self._clone_student()
-
         z_fp = self.student(x)
         z_tern = self._ternary_snapshot(x)
 
@@ -1779,16 +1749,7 @@ class LitBit(AccelLightningModule):
         acc_fp = (z_fp.argmax(dim=1) == y_idx).float().mean()
         acc_tern = (z_tern.argmax(dim=1) == y_idx).float().mean()
 
-        out = {
-            # what AccelTrainer uses
-            "val/loss": vloss,
-            "val/pred": z_fp.argmax(dim=1),
-            "val/target": y_idx.long(),
-
-            # extras (you can print/reduce if you want)
-            "val/acc_fp": acc_fp,
-            "val/acc_tern": acc_tern,
-        }
+        metrics = {"val/acc_fp": acc_fp,"val/acc_tern": acc_tern,}
 
         if self.has_teacher and self.teacher is not None and self.alpha_kd > 0:
             # optional teacher fp acc (cache per batch_idx like your old code)
@@ -1796,9 +1757,9 @@ class LitBit(AccelLightningModule):
                 z_t = self.teacher_forward(x)
                 t_acc = (z_t.argmax(dim=1) == y_idx).float().mean()
                 self.t_acc_fps[batch_idx] = float(t_acc.item())
-            out["val/t_acc_fp"] = torch.tensor(self.t_acc_fps[batch_idx], device=z_fp.device)
+            metrics["val/t_acc_fp"] = torch.tensor(self.t_acc_fps[batch_idx], device=z_fp.device)
 
-        return Metrics(loss=vloss,metrics=out)
+        return Metrics(loss=vloss,metrics=metrics)
 
     # -------------------- optimizer --------------------
 

@@ -109,19 +109,7 @@ class NetCNN(nn.Module):
 # ----------------------------
 # LightningModule wrapper using LitBit
 # ----------------------------
-class LitNetCNNKD(LitBit):
-    def __init__(self, config):
-        # No teacher, no KD for MNIST (simple model)
-        student = NetCNN(in_channels=1, num_classes=10, expand_ratio=5, scale_op=config.scale_op)
-        config.dataset_name='mnist'
-        config = dict(**config.model_dump(),
-            model_name='netcnn',
-            model_size='small',
-            student=student,
-            num_classes=10,
-        )
-        super().__init__(config)
-        
+class LitNetCNN(LitBit):        
     def configure_optimizers(self):
         # Use AdamW for MNIST instead of SGD
         opt = torch.optim.AdamW(
@@ -136,6 +124,7 @@ class LitNetCNNKD(LitBit):
 # ----------------------------
 class Config(CommonTrainConfig):
     data:str="./data"
+    dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_mnist"
     epochs:int=50
     batch_size:int=512
@@ -146,17 +135,23 @@ class Config(CommonTrainConfig):
 def main():
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
-    lit = LitNetCNNKD(args)
-    # Override datamodule with MNIST
-    dm = DataModuleConfig.model_validate(args.model_dump()).build()
     
+    dm = DataModuleConfig.model_validate(args.model_dump())
+    config = LitBitConfig.model_validate(args.model_dump())
+    config.dataset = dm.model_copy()    
+    config.student = NetCNN(in_channels=1, num_classes=dm.num_classes,
+                            expand_ratio=5, scale_op=config.scale_op)    
+    config.model_name='netcnn'
+    config.model_size='small'
+    lit = LitNetCNN(config)
+
     trainer = AccelTrainer(
         max_epochs=args.epochs,
         mixed_precision="no",                 # start with "no" to debug
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
     )
-    trainer.fit(lit, datamodule=dm)
+    trainer.fit(lit, datamodule=dm.build())
 
 
 if __name__ == "__main__":
