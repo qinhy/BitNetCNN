@@ -129,10 +129,7 @@ class LitNetCNNKD(LitBit):
             lr=self.lr, weight_decay=self.wd
         )
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs, eta_min=self.lr*0.01)
-        return {
-            "optimizer": opt,
-            "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
-        }
+        return opt, sched, "epoch"
 
 # ----------------------------
 # CLI / main
@@ -152,7 +149,13 @@ def main():
     lit = LitNetCNNKD(args)
     # Override datamodule with MNIST
     dm = DataModuleConfig.model_validate(args.model_dump()).build()
-    trainer = setup_trainer(args)
+    
+    trainer = AccelTrainer(
+        max_epochs=args.epochs,
+        mixed_precision="no",                 # start with "no" to debug
+        gradient_accumulation_steps=1,
+        log_every_n_steps=10,
+    )
     trainer.fit(lit, datamodule=dm)
 
 

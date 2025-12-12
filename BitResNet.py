@@ -443,7 +443,7 @@ def main() -> None:
     config.model_name="resnet"
     config.hint_points=["layer1", "layer2", "layer3", "layer4"]
     
-    lit = LitCE(config)
+    lit = LitBit(config)
     dm = dm.build()
     # trainer = setup_trainer(args,'val/acc')
     trainer = AccelTrainer(
@@ -453,8 +453,6 @@ def main() -> None:
         log_every_n_steps=10,
     )
     trainer.fit(lit, datamodule=dm)
-
-
 
 if __name__ == "__main__":
     main()
