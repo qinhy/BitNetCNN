@@ -16,6 +16,7 @@ from PIL import Image, ImageTk
 
 import random
 from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, Type, Union
+from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field
 import torch
 
@@ -96,17 +97,7 @@ class Cutout(nn.Module):
 
         img[:, y1:y2, x1:x2] = 0.0
         return img
-
-class SoftTargetCrossEntropy(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, logits, targets):
-        # targets: [B, num_classes] of probabilities (MixUp/CutMix)
-        log_probs = F.log_softmax(logits, dim=1)
-        loss = -(targets * log_probs).sum(dim=1).mean()
-        return loss
-
+    
 # Constants
 EPS = 1e-12
 
@@ -204,244 +195,244 @@ def convert_to_ternary_p2(module: nn.Module) -> nn.Module:
 # ----------------------------
 # Bit Quantization Classes
 # ----------------------------
-class Bit:
-    """
-    Collection of classes for bit-level quantization of neural networks.
-    Includes fake-quant building blocks, inference modules, and training modules.
-    """
-    # ----------------------------
-    # Fake-quant building blocks (QAT) — activation quantization removed
-    # ----------------------------
-    class Bit1p58Weight(nn.Module):
-        """1.58-bit (ternary) weight quantizer with per-out-channel scaling."""
-        def __init__(self, dim=0, scale_op="median"):
-            super().__init__()
-            self.dim = dim
-            self.scale_op = scale_op
+# class Bit:
+#     """
+#     Collection of classes for bit-level quantization of neural networks.
+#     Includes fake-quant building blocks, inference modules, and training modules.
+#     """
+#     # ----------------------------
+#     # Fake-quant building blocks (QAT) — activation quantization removed
+#     # ----------------------------
+#     class Bit1p58Weight(nn.Module):
+#         """1.58-bit (ternary) weight quantizer with per-out-channel scaling."""
+#         def __init__(self, dim=0, scale_op="median"):
+#             super().__init__()
+#             self.dim = dim
+#             self.scale_op = scale_op
 
-        def forward(self, w):
-            s = _reduce_abs(w, keep_dim=self.dim, op=self.scale_op)
-            w_bar = (w / s).detach()
-            w_q = torch.round(w_bar).clamp_(-1, 1)
-            dw = (w_q * s - w).detach()
-            return w + dw
+#         def forward(self, w):
+#             s = _reduce_abs(w, keep_dim=self.dim, op=self.scale_op)
+#             w_bar = (w / s).detach()
+#             w_q = torch.round(w_bar).clamp_(-1, 1)
+#             dw = (w_q * s - w).detach()
+#             return w + dw
 
-    # ----------------------------
-    # Inference (frozen) ternary modules — no activation quantization
-    # ----------------------------
-    class Conv2dInfer(nn.Module):
-        """
-        Frozen ternary conv:
-        y = (Conv(x, Wq) * s_per_out) + b
-        Wq in {-1,0,+1} stored as int8. s is float per output channel.
-        """
-        def __init__(self, w_q, s, bias, stride, padding, dilation, groups):
-            super().__init__()
-            # Make them Parameters so param counters include them (but keep frozen)
-            self.w_q  = nn.Parameter(w_q.to(torch.int8), requires_grad=False)   # [out,in,kh,kw]
-            self.s    = nn.Parameter(s,                  requires_grad=False) # [out,1,1]
-            if bias is None:
-                self.register_parameter("bias", None)
-            else:
-                self.bias = nn.Parameter(bias, requires_grad=False)
+#     # ----------------------------
+#     # Inference (frozen) ternary modules — no activation quantization
+#     # ----------------------------
+#     class Conv2dInfer(nn.Module):
+#         """
+#         Frozen ternary conv:
+#         y = (Conv(x, Wq) * s_per_out) + b
+#         Wq in {-1,0,+1} stored as int8. s is float per output channel.
+#         """
+#         def __init__(self, w_q, s, bias, stride, padding, dilation, groups):
+#             super().__init__()
+#             # Make them Parameters so param counters include them (but keep frozen)
+#             self.w_q  = nn.Parameter(w_q.to(torch.int8), requires_grad=False)   # [out,in,kh,kw]
+#             self.s    = nn.Parameter(s,                  requires_grad=False) # [out,1,1]
+#             if bias is None:
+#                 self.register_parameter("bias", None)
+#             else:
+#                 self.bias = nn.Parameter(bias, requires_grad=False)
 
-            self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
-            # Optional cache for the float view (not in state_dict, not counted as param)
-            self.register_buffer("_w_q_float", None, persistent=False)
+#             self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
+#             # Optional cache for the float view (not in state_dict, not counted as param)
+#             self.register_buffer("_w_q_float", None, persistent=False)
 
-        def _weight(self, dtype, device):
-            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
-                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
-            return self._w_q_float
+#         def _weight(self, dtype, device):
+#             if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+#                 self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+#             return self._w_q_float
 
-        def forward(self, x):
-            w = self._weight(x.dtype, x.device)
-            y = F.conv2d(x, w, None, self.stride, self.padding, self.dilation, self.groups)
-            y = y * self.s.to(dtype=y.dtype, device=y.device)
-            if self.bias is not None:
-                y = y + self.bias.to(dtype=y.dtype, device=y.device).view(1, -1, 1, 1)
-            return y
+#         def forward(self, x):
+#             w = self._weight(x.dtype, x.device)
+#             y = F.conv2d(x, w, None, self.stride, self.padding, self.dilation, self.groups)
+#             y = y * self.s.to(dtype=y.dtype, device=y.device)
+#             if self.bias is not None:
+#                 y = y + self.bias.to(dtype=y.dtype, device=y.device).view(1, -1, 1, 1)
+#             return y
 
-    class LinearInfer(nn.Module):
-        """Frozen ternary linear: y = (x @ Wq^T) * s + b"""
-        def __init__(self, w_q, s, bias):
-            super().__init__()
-            self.w_q = nn.Parameter(w_q.to(torch.int8), requires_grad=False)   # [out,in]
-            self.s   = nn.Parameter(s,                    requires_grad=False)  # [out]
-            if bias is None:
-                self.register_parameter("bias", None)
-            else:
-                self.bias = nn.Parameter(bias, requires_grad=False)
+#     class LinearInfer(nn.Module):
+#         """Frozen ternary linear: y = (x @ Wq^T) * s + b"""
+#         def __init__(self, w_q, s, bias):
+#             super().__init__()
+#             self.w_q = nn.Parameter(w_q.to(torch.int8), requires_grad=False)   # [out,in]
+#             self.s   = nn.Parameter(s,                    requires_grad=False)  # [out]
+#             if bias is None:
+#                 self.register_parameter("bias", None)
+#             else:
+#                 self.bias = nn.Parameter(bias, requires_grad=False)
 
-            self.register_buffer("_w_q_float", None, persistent=False)
+#             self.register_buffer("_w_q_float", None, persistent=False)
 
-        def _weight(self, dtype, device):
-            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
-                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
-            return self._w_q_float
+#         def _weight(self, dtype, device):
+#             if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+#                 self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+#             return self._w_q_float
 
-        def forward(self, x):
-            w = self._weight(x.dtype, x.device)
-            y = F.linear(x, w, bias=None)
-            y = y * self.s.to(dtype=y.dtype, device=y.device)
-            if self.bias is not None:
-                y = y + self.bias.to(dtype=y.dtype, device=y.device)
-            return y
+#         def forward(self, x):
+#             w = self._weight(x.dtype, x.device)
+#             y = F.linear(x, w, bias=None)
+#             y = y * self.s.to(dtype=y.dtype, device=y.device)
+#             if self.bias is not None:
+#                 y = y + self.bias.to(dtype=y.dtype, device=y.device)
+#             return y
         
-    class Conv2dInferP2(nn.Module):
-        """
-        Ternary conv with power-of-two scales:
-        y = Conv(x, Wq) * 2^{s_exp} + b
-        Wq in {-1,0,+1} as int8. s_exp is per-out exponent [out,1,1].
-        """
-        def __init__(self, w_q, s_exp, bias, stride, padding, dilation, groups):
-            super().__init__()
-            # Counted as params but frozen
-            self.w_q  = nn.Parameter(w_q.to(torch.int8), requires_grad=False)      # [out,in,kh,kw]
-            self.s_exp = nn.Parameter(s_exp.to(torch.int8), requires_grad=False)   # [out,1,1]
-            if bias is None:
-                self.register_parameter("bias", None)
-            else:
-                self.bias = nn.Parameter(bias, requires_grad=False)                # [out]
+#     class Conv2dInferP2(nn.Module):
+#         """
+#         Ternary conv with power-of-two scales:
+#         y = Conv(x, Wq) * 2^{s_exp} + b
+#         Wq in {-1,0,+1} as int8. s_exp is per-out exponent [out,1,1].
+#         """
+#         def __init__(self, w_q, s_exp, bias, stride, padding, dilation, groups):
+#             super().__init__()
+#             # Counted as params but frozen
+#             self.w_q  = nn.Parameter(w_q.to(torch.int8), requires_grad=False)      # [out,in,kh,kw]
+#             self.s_exp = nn.Parameter(s_exp.to(torch.int8), requires_grad=False)   # [out,1,1]
+#             if bias is None:
+#                 self.register_parameter("bias", None)
+#             else:
+#                 self.bias = nn.Parameter(bias, requires_grad=False)                # [out]
 
-            self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
-            # Cache float weights per (device,dtype); not saved, not counted
-            self.register_buffer("_w_q_float", None, persistent=False)
+#             self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
+#             # Cache float weights per (device,dtype); not saved, not counted
+#             self.register_buffer("_w_q_float", None, persistent=False)
 
-        def _weight(self, dtype, device):
-            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
-                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
-            return self._w_q_float
+#         def _weight(self, dtype, device):
+#             if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+#                 self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+#             return self._w_q_float
 
-        def forward(self, x):
-            w = self._weight(x.dtype, x.device)
-            y = F.conv2d(x, w, None, self.stride, self.padding, self.dilation, self.groups)
-            y = torch.ldexp(y, self.s_exp.to(torch.int32, device=y.device))  # broadcast [out,1,1]
-            if self.bias is not None:
-                y = y + self.bias.to(dtype=y.dtype, device=y.device).view(1, -1, 1, 1)
-            return y
+#         def forward(self, x):
+#             w = self._weight(x.dtype, x.device)
+#             y = F.conv2d(x, w, None, self.stride, self.padding, self.dilation, self.groups)
+#             y = torch.ldexp(y, self.s_exp.to(torch.int32, device=y.device))  # broadcast [out,1,1]
+#             if self.bias is not None:
+#                 y = y + self.bias.to(dtype=y.dtype, device=y.device).view(1, -1, 1, 1)
+#             return y
 
-    class LinearInferP2(nn.Module):
-        """Ternary linear with power-of-two output scales: y = (x @ Wq^T) * 2^{s_exp} + b"""
-        def __init__(self, w_q, s_exp, bias):
-            super().__init__()
-            self.w_q   = nn.Parameter(w_q.to(torch.int8), requires_grad=False)     # [out,in]
-            self.s_exp = nn.Parameter(s_exp.to(torch.int8), requires_grad=False)   # [out]
-            if bias is None:
-                self.register_parameter("bias", None)
-            else:
-                self.bias = nn.Parameter(bias, requires_grad=False)                # [out]
-            self.register_buffer("_w_q_float", None, persistent=False)
+#     class LinearInferP2(nn.Module):
+#         """Ternary linear with power-of-two output scales: y = (x @ Wq^T) * 2^{s_exp} + b"""
+#         def __init__(self, w_q, s_exp, bias):
+#             super().__init__()
+#             self.w_q   = nn.Parameter(w_q.to(torch.int8), requires_grad=False)     # [out,in]
+#             self.s_exp = nn.Parameter(s_exp.to(torch.int8), requires_grad=False)   # [out]
+#             if bias is None:
+#                 self.register_parameter("bias", None)
+#             else:
+#                 self.bias = nn.Parameter(bias, requires_grad=False)                # [out]
+#             self.register_buffer("_w_q_float", None, persistent=False)
 
-        def _weight(self, dtype, device):
-            if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
-                self._w_q_float = self.w_q.to(device=device, dtype=dtype)
-            return self._w_q_float
+#         def _weight(self, dtype, device):
+#             if self._w_q_float is None or self._w_q_float.dtype != dtype or self._w_q_float.device != device:
+#                 self._w_q_float = self.w_q.to(device=device, dtype=dtype)
+#             return self._w_q_float
 
-        def forward(self, x):
-            w = self._weight(x.dtype, x.device)
-            y = F.linear(x, w, bias=None)
-            y = torch.ldexp(y, self.s_exp.to(torch.int32, device=y.device))  # broadcast [out]
-            if self.bias is not None:
-                y = y + self.bias.to(dtype=y.dtype, device=y.device)
-            return y
+#         def forward(self, x):
+#             w = self._weight(x.dtype, x.device)
+#             y = F.linear(x, w, bias=None)
+#             y = torch.ldexp(y, self.s_exp.to(torch.int32, device=y.device))  # broadcast [out]
+#             if self.bias is not None:
+#                 y = y + self.bias.to(dtype=y.dtype, device=y.device)
+#             return y
 
-    # ----------------------------
-    # Train-time modules (no BatchNorm), activation quantization removed
-    # ----------------------------
-    class Conv2d(nn.Module):
-        """
-        Conv2d with ternary weights (fake-quant for training).
-        No BatchNorm inside. Add your own nonlinearity outside if desired.
-        """
-        def __init__(self, in_c, out_c, kernel_size, stride=1, padding=0, dilation=1, groups=1,
-                    bias=True, scale_op="median"):
-            super().__init__()
-            if isinstance(kernel_size, int):
-                kh = kw = kernel_size
-            else:
-                kh, kw = kernel_size
-            self.weight = nn.Parameter(torch.empty(out_c, in_c // groups, kh, kw))
-            nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
-            self.bias = nn.Parameter(torch.zeros(out_c)) if bias else None
-            self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
-            self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
-            self.scale_op = scale_op
+#     # ----------------------------
+#     # Train-time modules (no BatchNorm), activation quantization removed
+#     # ----------------------------
+#     class Conv2d(nn.Module):
+#         """
+#         Conv2d with ternary weights (fake-quant for training).
+#         No BatchNorm inside. Add your own nonlinearity outside if desired.
+#         """
+#         def __init__(self, in_c, out_c, kernel_size, stride=1, padding=0, dilation=1, groups=1,
+#                     bias=True, scale_op="median"):
+#             super().__init__()
+#             if isinstance(kernel_size, int):
+#                 kh = kw = kernel_size
+#             else:
+#                 kh, kw = kernel_size
+#             self.weight = nn.Parameter(torch.empty(out_c, in_c // groups, kh, kw))
+#             nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
+#             self.bias = nn.Parameter(torch.zeros(out_c)) if bias else None
+#             self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
+#             self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
+#             self.scale_op = scale_op
 
-        def forward(self, x):
-            wq = self.w_q(self.weight)
-            return F.conv2d(x, wq, self.bias, self.stride, self.padding, self.dilation, self.groups)
+#         def forward(self, x):
+#             wq = self.w_q(self.weight)
+#             return F.conv2d(x, wq, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
-        @torch.no_grad()
-        def to_ternary(self):
-            """
-            Convert this layer into a frozen Bit.Conv2dInfer, carrying over:
-            - per-out-channel weight scale s and Wq in {-1,0,+1}
-            """
-            w = self.weight.data
-            s_vec = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()   # [out]
-            s = s_vec.view(-1, 1, 1)                                         # [out,1,1] for conv broadcast
-            w_bar = w / s_vec.view(-1, 1, 1, 1)
-            w_q = torch.round(w_bar).clamp_(-1, 1).to(w.dtype)
+#         @torch.no_grad()
+#         def to_ternary(self):
+#             """
+#             Convert this layer into a frozen Bit.Conv2dInfer, carrying over:
+#             - per-out-channel weight scale s and Wq in {-1,0,+1}
+#             """
+#             w = self.weight.data
+#             s_vec = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()   # [out]
+#             s = s_vec.view(-1, 1, 1)                                         # [out,1,1] for conv broadcast
+#             w_bar = w / s_vec.view(-1, 1, 1, 1)
+#             w_q = torch.round(w_bar).clamp_(-1, 1).to(w.dtype)
 
-            return Bit.Conv2dInfer(
-                w_q=w_q, s=s,
-                bias=(None if self.bias is None else self.bias.data.clone()),
-                stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups
-            )
+#             return Bit.Conv2dInfer(
+#                 w_q=w_q, s=s,
+#                 bias=(None if self.bias is None else self.bias.data.clone()),
+#                 stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups
+#             )
 
-        @torch.no_grad()
-        def to_ternary_p2(self):
-            # Per-out-channel scale from your chosen op
-            w = self.weight.data
-            s_vec = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()  # [out]
-            w_bar = w / s_vec.view(-1,1,1,1)
-            w_q = torch.round(w_bar).clamp_(-1, 1).to(w.dtype)
+#         @torch.no_grad()
+#         def to_ternary_p2(self):
+#             # Per-out-channel scale from your chosen op
+#             w = self.weight.data
+#             s_vec = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()  # [out]
+#             w_bar = w / s_vec.view(-1,1,1,1)
+#             w_q = torch.round(w_bar).clamp_(-1, 1).to(w.dtype)
 
-            # Quantize weight scale to power-of-two (save exponents)
-            _, s_exp = _pow2_quantize_scale(s_vec)           # int8 exponents
-            s_exp = s_exp.view(-1, 1, 1)
+#             # Quantize weight scale to power-of-two (save exponents)
+#             _, s_exp = _pow2_quantize_scale(s_vec)           # int8 exponents
+#             s_exp = s_exp.view(-1, 1, 1)
 
-            return Bit.Conv2dInferP2(
-                w_q=w_q,
-                s_exp=s_exp,
-                bias=(None if self.bias is None else self.bias.data.clone()),
-                stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups
-            )
+#             return Bit.Conv2dInferP2(
+#                 w_q=w_q,
+#                 s_exp=s_exp,
+#                 bias=(None if self.bias is None else self.bias.data.clone()),
+#                 stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups
+#             )
 
-    class Linear(nn.Module):
-        def __init__(self, in_f, out_f, bias=True, scale_op="median"):
-            super().__init__()
-            self.weight = nn.Parameter(torch.empty(out_f, in_f))
-            nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-            self.bias = nn.Parameter(torch.zeros(out_f)) if bias else None
-            self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
-            self.scale_op = scale_op
+#     class Linear(nn.Module):
+#         def __init__(self, in_f, out_f, bias=True, scale_op="median"):
+#             super().__init__()
+#             self.weight = nn.Parameter(torch.empty(out_f, in_f))
+#             nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+#             self.bias = nn.Parameter(torch.zeros(out_f)) if bias else None
+#             self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
+#             self.scale_op = scale_op
 
-        def forward(self, x):
-            wq = self.w_q(self.weight)
-            return F.linear(x, wq, self.bias)
+#         def forward(self, x):
+#             wq = self.w_q(self.weight)
+#             return F.linear(x, wq, self.bias)
 
-        @torch.no_grad()
-        def to_ternary(self):
-            w = self.weight.data
-            s = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()  # [out]
-            w_q = torch.round(w / s.view(-1,1)).clamp_(-1, 1).to(w.dtype)
-            return Bit.LinearInfer(
-                w_q=w_q, s=s, bias=(None if self.bias is None else self.bias.data.clone())
-            )
+#         @torch.no_grad()
+#         def to_ternary(self):
+#             w = self.weight.data
+#             s = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()  # [out]
+#             w_q = torch.round(w / s.view(-1,1)).clamp_(-1, 1).to(w.dtype)
+#             return Bit.LinearInfer(
+#                 w_q=w_q, s=s, bias=(None if self.bias is None else self.bias.data.clone())
+#             )
 
-        @torch.no_grad()
-        def to_ternary_p2(self):
-            w = self.weight.data
-            s = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()   # [out]
-            w_q = torch.round((w / s.view(-1,1))).clamp_(-1, 1).to(w.dtype)
+#         @torch.no_grad()
+#         def to_ternary_p2(self):
+#             w = self.weight.data
+#             s = _reduce_abs(w, keep_dim=0, op=self.scale_op).squeeze()   # [out]
+#             w_q = torch.round((w / s.view(-1,1))).clamp_(-1, 1).to(w.dtype)
 
-            # Quantize to power-of-two
-            _, s_exp = _pow2_quantize_scale(s)   # [out] int8
-            return Bit.LinearInferP2(
-                w_q=w_q, s_exp=s_exp, bias=(None if self.bias is None else self.bias.data.clone())
-            )
+#             # Quantize to power-of-two
+#             _, s_exp = _pow2_quantize_scale(s)   # [out] int8
+#             return Bit.LinearInferP2(
+#                 w_q=w_q, s_exp=s_exp, bias=(None if self.bias is None else self.bias.data.clone())
+#             )
 
 
 def replace_all2Bit(model: nn.Module, scale_op: str = "median", wrap_same: bool = True) -> Tuple[int, int]:
@@ -557,11 +548,84 @@ class DataModuleConfig(BaseModel):
             **self.model_dump(exclude=['dataset_name','num_classes'])
         )
         
+
+class LightningDataModule(pl.LightningDataModule):
+
+    @torch.no_grad()
+    def show_examples(
+        self,
+        n: int = 16,
+        split: str = "train",
+        cols: int = 8,
+        seed: Optional[int] = None,
+        figsize=(12, 6),
+    ):
+        """
+        Randomly show examples from train/val.
+        - split: "train" or "val"
+        - with_mix: if True (train only), samples a batch from train_dataloader()
+                    so MixUp/CutMix is applied (soft labels shown).
+        """
+        assert split in {"train", "val"}, "split must be 'train' or 'val'"
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        ds = self.train_ds if split == "train" else self.val_ds
+        assert ds is not None, "Call setup() before show_random_examples()"
+
+        # --- get a batch of images/targets ---
+        if split == "train":
+            # Use the real train dataloader so MixUp/CutMix happens in collate_fn
+            loader = self.train_dataloader()
+        else:
+            loader = self.val_dataloader()
         
+        x, y = next(iter(loader))
+        x = x[:n].cpu()
+        y = y[:n].cpu()
+
+        # --- denormalize for display ---
+        mean = torch.tensor(self.mean, dtype=x.dtype, device=x.device).view(1, 3, 1, 1)
+        std = torch.tensor(self.std, dtype=x.dtype, device=x.device).view(1, 3, 1, 1)
+        x_vis = (x * std + mean).clamp(0, 1).cpu()
+
+        # class names
+        class_names = getattr(ds, "classes", None)
+
+        def label_to_text(target):
+            # target can be int tensor, or soft one-hot (MixUp/CutMix)
+            if torch.is_tensor(target):
+                if target.ndim == 0:
+                    idx = int(target.item())
+                    return class_names[idx] if class_names else str(idx)
+                if target.ndim == 1:  # soft labels
+                    topv, topi = torch.topk(target, k=min(2, target.numel()))
+                    parts = []
+                    for v, i in zip(topv, topi):
+                        if float(v) <= 1e-3:
+                            continue
+                        name = class_names[int(i)] if class_names else str(int(i))
+                        parts.append(f"{name}:{float(v):.2f}")
+                    return " | ".join(parts) if parts else "mixed"
+            return str(target)
+
+        # --- plot grid ---
+        cols = max(1, min(cols, n))
+        rows = math.ceil(n / cols)
+        plt.figure(figsize=figsize)
+        for i in range(n):
+            plt.subplot(rows, cols, i + 1)
+            img = x_vis[i].permute(1, 2, 0).numpy()
+            plt.imshow(img)
+            plt.axis("off")
+            plt.title(label_to_text(y[i]), fontsize=8)
+        plt.tight_layout()
+        plt.show()
+        return x,y
 # ----------------------------
 # CIFAR-100 DataModule (mixup/cutmix optional)
 # ----------------------------
-class CIFAR100DataModule(pl.LightningDataModule):
+class CIFAR100DataModule(LightningDataModule):
     """
     CIFAR-100 DataModule with:
       - RandAugment + Cutout in train transforms
@@ -575,12 +639,10 @@ class CIFAR100DataModule(pl.LightningDataModule):
         mixup: bool = False,
         cutmix: bool = False,
         mix_alpha: float = 1.0,
-        val_batch_size: Optional[int] = 256,
     ):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
-        self.val_batch_size = val_batch_size or batch_size
         self.num_workers = num_workers
 
         self.mixup = mixup
@@ -593,8 +655,8 @@ class CIFAR100DataModule(pl.LightningDataModule):
         self.num_classes = 100
         
     def setup(self, stage: Optional[str] = None) -> None:
-        mean = (0.5071, 0.4867, 0.4408)
-        std = (0.2675, 0.2565, 0.2761)
+        self.mean = mean = (0.5071, 0.4867, 0.4408)
+        self.std = std = (0.2675, 0.2565, 0.2761)
 
         train_tf = v2.Compose([
             v2.RandomCrop(32, padding=4),
@@ -675,7 +737,7 @@ class CIFAR100DataModule(pl.LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.val_ds,
-            batch_size=self.val_batch_size,
+            batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
@@ -797,7 +859,7 @@ class TinyImageNetDataset(VisionDataset):
 # ----------------------------
 # TinyImageNet DataModule
 # ----------------------------
-class TinyImageNetDataModule(pl.LightningDataModule):
+class TinyImageNetDataModule(LightningDataModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
                  mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
@@ -809,8 +871,8 @@ class TinyImageNetDataModule(pl.LightningDataModule):
         self.mix_alpha = mix_alpha
 
     def setup(self, stage=None):
-        mean = (0.4802, 0.4481, 0.3975)
-        std  = (0.2302, 0.2265, 0.2262)
+        self.mean = mean = (0.4802, 0.4481, 0.3975)
+        self.std  = std = (0.2302, 0.2265, 0.2262)
 
         train_tfm = transforms.Compose([
             transforms.RandomHorizontalFlip(),
@@ -853,7 +915,7 @@ class TinyImageNetDataModule(pl.LightningDataModule):
 # ----------------------------
 # MNIST DataModule
 # ----------------------------
-class MNISTDataModule(pl.LightningDataModule):
+class MNISTDataModule(LightningDataModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
                  mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
@@ -891,7 +953,7 @@ class MNISTDataModule(pl.LightningDataModule):
 # ----------------------------
 # ImageNet DataModule
 # ----------------------------
-class ImageNetDataModule(pl.LightningDataModule):
+class ImageNetDataModule(LightningDataModule):
     """
     <data_dir>/
     train/
@@ -1017,7 +1079,7 @@ class ExportBestTernary(Callback):
 # LightningModule: KD + hints + ternary eval/export
 # ----------------------------
 class CommonTrainConfig(BaseModel):
-    data_dir: str = "./data"
+    data_dir: str = "./data"    
     export_dir:Optional[str]=''
     dataset_name: Literal["c100", "imnet", "timnet"] = Field(
         default="c100",
@@ -1087,6 +1149,9 @@ class LitBit(pl.LightningModule):
         self.scale_op = config.scale_op
         self.student:nn.Module = config.student
         self.teacher:nn.Module = config.teacher
+        self.has_teacher = True if config.teacher else False
+
+        # self.teacher:nn.Module = config.teacher
         self.dataset_name = config.dataset.dataset_name
         self.model_name = config.model_name
         self.model_size = config.model_size
@@ -1099,28 +1164,19 @@ class LitBit(pl.LightningModule):
             self.ce_soft = None
         else:
             self.ce_hard = None
-            self.ce_soft = SoftTargetCrossEntropy()
+            self.ce_soft = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
 
         self.kd = KDLoss(T=config.T)
         self.hint = AdaptiveHintLoss()
 
-        if self.alpha_kd<=0:
+        if not (self.alpha_kd>0 and self.has_teacher):
             self.kd = None
-        if self.alpha_hint<=0:
+            
+        if not (self.alpha_hint>0 and self.has_teacher):
             self.hint = None
 
-        if self.alpha_kd<=0 and self.alpha_hint<=0:
-            self.teacher=None
-
-        if self.teacher is None:
-            self.alpha_kd = 0.0
-            self.alpha_hint = 0.0
-            self.teacher_params_snap, self.teacher_bufs_snap = None, None
-        else:
-            for p in self.teacher.parameters():
-                p.requires_grad_(False)
-            # take teacher snapshot (on CPU)
-            self.teacher_params_snap, self.teacher_bufs_snap = snap_model(self.teacher)
+        if self.kd is None and self.hint is None:
+            self.has_teacher=False
 
         self.hint_points = config.hint_points
         self._ternary_snapshot = None
@@ -1133,10 +1189,21 @@ class LitBit(pl.LightningModule):
         self.wd = config.wd
         self.epochs = config.epochs
         
-        self.teacher_params_snap,self.teacher_bufs_snap = snap_model(self.teacher)
         # --- register hint projections here ---
-        if self.hint is not None and self.teacher is not None and len(self.hint_points) > 0:
-            self.init_hint()
+        if self.has_teacher:
+            if self.hint is not None and len(self.hint_points) > 0:
+                self.init_hint()
+            for p in self.teacher.parameters():
+                p.requires_grad_(False)
+            self.teacher_params_snap, self.teacher_bufs_snap = snap_model(self.teacher)
+
+        if not self.has_teacher:
+            self.teacher = None
+            self.kd = None
+            self.hint = None
+            self.alpha_kd = 0.0
+            self.alpha_hint = 0.0
+            self.teacher_params_snap, self.teacher_bufs_snap = None, None
 
     def init_hint(self):
         s_mods = dict(self.student.named_modules())
@@ -1168,8 +1235,25 @@ class LitBit(pl.LightningModule):
             
             self.hint.register_pair(sn, c_s, c_t)
 
+    def get_loss_hint(self):        
+        loss_hint = 0.0
+        for hint_name in self.hint_points:
+            sn = tn = hint_name
+            if isinstance(hint_name, tuple):
+                sn, tn = hint_name
+            if sn not in self._s_feats:
+                raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
+            if tn not in self._t_feats:
+                raise ValueError(f"Hint point {tn} not found in teacher features of {self._t_feats}.")
+            loss_hint = loss_hint + self.hint(
+                sn,
+                self._s_feats[sn].float(),
+                self._t_feats[tn].float().detach(),
+            )
+        return loss_hint
+
     def diff_from_init(self, tag: str, strict=False):
-        if self.teacher is None:return
+        if not self.has_teacher:return
         cur_p, cur_b = snap_model(self.teacher)
         changed_p = [k for k in self.teacher_params_snap
                     if not torch.equal(self.teacher_params_snap[k], cur_p[k])]
@@ -1186,15 +1270,12 @@ class LitBit(pl.LightningModule):
             pass
             # recover_snap(self.teacher,self.teacher_params_snap,self.teacher_bufs_snap)
             # print(f"[{tag}] Teacher identical to init.")
-            
+  
     @torch.no_grad()
     def setup(self, stage=None):
         # --- move & freeze teacher, register hooks ---
-        if self.teacher is not None:
-            self.teacher = self.teacher.to(self.device).eval()
-            for p in self.teacher.parameters():
-                p.requires_grad_(False)
-
+        if self.has_teacher:
+            self.teacher.to(self.device).eval()
             if self.alpha_hint > 0 and len(self.hint_points) > 0:
                 self._s_handles = make_feature_hooks(
                     self.student, self.hint_points, self._s_feats, idx=0
@@ -1222,13 +1303,13 @@ class LitBit(pl.LightningModule):
             frozen = total - trainable
             return total, trainable, frozen
         s_total, s_train, s_frozen = _param_counts(self.student)
-        if self.teacher is not None:
+        if self.has_teacher:
             t_total, t_train, t_frozen = _param_counts(self.teacher)
         else:
             t_total = t_train = t_frozen = 0
 
         # optional: quick teacher checksum for debugging weight changes
-        if self.teacher is not None:
+        if self.has_teacher:
             teacher_checksum = float(
                 sum(p.float().abs().sum() for p in self.teacher.parameters()).cpu()
             )
@@ -1244,7 +1325,7 @@ class LitBit(pl.LightningModule):
         print(f"  total params    : {s_total/1e6:.2f}M")
         print(f"  trainable params: {s_train/1e6:.2f}M")
         print(f"  frozen params   : {s_frozen/1e6:.2f}M")
-        if self.teacher is not None:
+        if self.has_teacher:
             print(f"Teacher: {self.teacher.__class__.__name__} (frozen)")
             print(f"  total params    : {t_total/1e6:.2f}M")
             print(f"  trainable params: {t_train/1e6:.2f}M")
@@ -1260,7 +1341,6 @@ class LitBit(pl.LightningModule):
         print(f"Optim   : lr={self.lr}, wd={self.wd}, epochs={self.epochs}")
         print("=" * 80)
 
-
     def teardown(self, stage=None):
         for h in getattr(self, "_t_handles", [])+getattr(self, "_s_handles", []):
             try: h.remove()
@@ -1270,7 +1350,7 @@ class LitBit(pl.LightningModule):
         return self.student(x)
     
     def teacher_forward(self, x):
-        if self.teacher is None:
+        if not self.has_teacher:
             return None
         self.teacher.eval()
         with torch.no_grad():
@@ -1286,23 +1366,11 @@ class LitBit(pl.LightningModule):
     def on_train_batch_start(self, batch, batch_idx, dataloader_idx=0):
         if batch_idx == 0:
             self.diff_from_init("on_train_batch_start[0]")
-
-    @torch.no_grad()
-    def _clone_student(self):
-        clone:nn.Module = self.student.clone()
-        clone.load_state_dict(self.student.state_dict(), strict=True)
-        clone = convert_to_ternary(clone)
-        return clone.to(self.device)
-
-    def on_validation_epoch_start(self):
-        print()
-        self.diff_from_init("on_validation_epoch_start")
-        self._ternary_snapshot = self._clone_student()
-
+            
     def training_step(self, batch:Tuple[torch.Tensor,torch.Tensor], batch_idx):
         x, y = batch
         # y:
-        #   - LongTensor [B] when no MixUp/CutMix
+        #   - LongTensor [B] when NOT MixUp/CutMix
         #   - FloatTensor [B, num_classes] when MixUp/CutMix (from v2)
 
         z_s = self.student(x)
@@ -1318,28 +1386,10 @@ class LitBit(pl.LightningModule):
             
         # --------- teacher logits (for KD) --------- #
         alpha_kd = self.alpha_kd
-        if z_t is not None and self.alpha_kd > 0:
-            loss_kd = self.kd(z_s.float(), z_t.float())
-        else:            
-            alpha_kd = 0.0
-            loss_kd = 0.0
+        loss_kd = self.kd(z_s.float(), z_t.float()) if self.kd  is not None else 0.0
 
         # --------- hint loss --------- #
-        loss_hint = 0.0
-        if self.teacher and self.alpha_hint > 0 and len(self.hint_points) > 0:
-            for hint_name in self.hint_points:
-                sn = tn = hint_name
-                if isinstance(hint_name, tuple):
-                    sn, tn = hint_name
-                if sn not in self._s_feats:
-                    raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
-                if tn not in self._t_feats:
-                    raise ValueError(f"Hint point {tn} not found in teacher features of {self._t_feats}.")
-                loss_hint = loss_hint + self.hint(
-                    sn,
-                    self._s_feats[sn].float(),
-                    self._t_feats[tn].float(),
-                )
+        loss_hint = self.get_loss_hint() if self.hint is not None else 0.0
 
         # --------- total loss --------- #
         loss = (1.0 - alpha_kd) * loss_ce + alpha_kd * loss_kd + self.alpha_hint * loss_hint
@@ -1360,13 +1410,25 @@ class LitBit(pl.LightningModule):
         return loss
 
     @torch.no_grad()
+    def _clone_student(self):
+        clone:nn.Module = self.student.clone()
+        clone.load_state_dict(self.student.state_dict(), strict=True)
+        clone = convert_to_ternary(clone)
+        return clone.to(self.device)
+
+    def on_validation_epoch_start(self):
+        print()
+        self.diff_from_init("on_validation_epoch_start")
+        self._ternary_snapshot = self._clone_student()
+
+    @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         x, y = batch
         acc_func = lambda x,y:MulticlassAccuracy(num_classes=self.num_classes
                             # average='micro', multidim_average='global', top_k=1
                             ).to(x.device)(x,y).item()
         
-        if self.alpha_kd>0 and self.t_acc_fps.get(batch_idx) is None and self.teacher:
+        if self.alpha_kd>0 and self.t_acc_fps.get(batch_idx) is None and self.has_teacher:
             self.t_acc_fps[batch_idx] = acc_func(self.teacher_forward(x),y)
             # print("acc_func(self.teacher_forward(x),y) : ",self.t_acc_fps[batch_idx])
             
@@ -1427,7 +1489,7 @@ class AdaptiveHintLoss(nn.Module):
         f_s = F.adaptive_avg_pool2d(f_s, f_t.shape[-2:])
         k = self._k(name)
         f_s = self.proj[k](f_s)
-        return F.smooth_l1_loss(f_s, f_t.detach())
+        return F.smooth_l1_loss(f_s, f_t)
 
 class SaveOutputHook:
     """Picklable forward hook that stores outputs into a dict under a given key."""
