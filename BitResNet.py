@@ -427,13 +427,14 @@ def main() -> None:
         raise ValueError(f"Unsupported model_size: {config.model_size}")
 
     small_stem = True
-    config.student = _build_student(
+    config.student = student = _build_student(
         model_size=config.model_size,
         num_classes=config.dataset.num_classes,
         scale_op=config.scale_op,
         small_stem=small_stem,
     )
-    config.teacher = _build_teacher(
+    config.teacher = None
+    _build_teacher(
         model_size=config.model_size,
         dataset_name=config.dataset.dataset_name,
         device="cpu",
@@ -442,9 +443,15 @@ def main() -> None:
     config.model_name="resnet"
     config.hint_points=["layer1", "layer2", "layer3", "layer4"]
     
-    lit = LitBitResnet(config,args.teacher_stop_epoch)
+    lit = LitCE(config)
     dm = dm.build()
-    trainer = setup_trainer(args)
+    # trainer = setup_trainer(args,'val/acc')
+    trainer = AccelTrainer(
+        max_epochs=args.epochs,
+        mixed_precision="no",                 # start with "no" to debug
+        gradient_accumulation_steps=1,
+        log_every_n_steps=10,
+    )
     trainer.fit(lit, datamodule=dm)
 
 

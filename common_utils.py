@@ -37,6 +37,16 @@ from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import extract_archive, check_integrity, download_url, verify_str_arg
 
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple, Union
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+from accelerate import Accelerator
+from tqdm.auto import tqdm
+
 def snap_model(model):
     def snapshot_params(m):
         return {k: v.detach().clone().cpu() for k, v in m.named_parameters()}
@@ -1113,9 +1123,285 @@ class CommonTrainConfig(BaseModel):
     )
     strategy: Literal["auto", "ddp", "ddp_spawn", "fsdp"] = "auto"
 
-class LitBitConfig(BaseModel):
-    dataset:Optional[DataModuleConfig] = None
+class AccelLightningModule(nn.Module):
+    """
+    Lightning-like interface:
+      - forward(x)
+      - training_step(batch, batch_idx) -> (loss, logs)
+      - validation_step(batch, batch_idx) -> logs
+      - configure_optimizers() -> (optimizer, scheduler or None, scheduler_interval: "epoch"|"step")
+    """
+
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Dict[str, Any]:
+        return {}
+
+    def configure_optimizers(self):
+        raise NotImplementedError
+
+    # optional hooks
+    def on_fit_start(self, accelerator: Accelerator): ...
+    def on_train_epoch_start(self, epoch: int): ...
+    def on_train_epoch_end(self, epoch: int): ...
+    def on_validation_epoch_start(self, epoch: int): ...
+    def on_validation_epoch_end(self, epoch: int): ...
+
+
+@dataclass
+class FitResult:
+    train_loss: float
+    train_acc: Optional[float] = None
+    val_loss: Optional[float] = None
+    val_acc: Optional[float] = None
+
+
+class AccelTrainer:
+    def __init__(
+        self,
+        max_epochs: int,
+        mixed_precision: str = "no",              # "no" | "fp16" | "bf16"
+        gradient_accumulation_steps: int = 1,
+        log_every_n_steps: int = 10,
+        max_grad_norm: Optional[float] = None,
+        show_progress_bar: bool = True,
+    ):
+        self.max_epochs = int(max_epochs)
+        self.accelerator = Accelerator(
+            mixed_precision=mixed_precision,
+            gradient_accumulation_steps=int(gradient_accumulation_steps),
+        )
+        self.log_every_n_steps = int(log_every_n_steps)
+        self.max_grad_norm = max_grad_norm
+        self.show_progress_bar = show_progress_bar
+
+        self.model: Optional[AccelLightningModule] = None
+        self.optimizer = None
+        self.scheduler = None
+        self.scheduler_interval = "epoch"
+
+    def fit(
+        self,
+        model: AccelLightningModule,
+        datamodule: Optional[Any] = None,
+        train_dataloader: Optional[DataLoader] = None,
+        val_dataloader: Optional[DataLoader] = None,
+    ) -> FitResult:
+        # --- dataloaders (LightningDataModule-compatible) ---
+        if datamodule is not None:
+            if hasattr(datamodule, "setup"):
+                try:
+                    datamodule.setup("fit")
+                except TypeError:
+                    datamodule.setup()
+            if train_dataloader is None:
+                train_dataloader = datamodule.train_dataloader()
+            if val_dataloader is None and hasattr(datamodule, "val_dataloader"):
+                val_dataloader = datamodule.val_dataloader()
+
+        assert train_dataloader is not None, "Need train_dataloader or datamodule"
+
+        # --- optimizers/schedulers ---
+        optimizer, scheduler, interval = model.configure_optimizers()
+        self.scheduler_interval = interval or "epoch"
+
+        # --- prepare everything (device/DDP/etc) ---
+        if scheduler is None:
+            model, optimizer, train_dataloader = self.accelerator.prepare(model, optimizer, train_dataloader)
+            if val_dataloader is not None:
+                val_dataloader = self.accelerator.prepare(val_dataloader)
+        else:
+            if val_dataloader is None:
+                model, optimizer, train_dataloader, scheduler = self.accelerator.prepare(
+                    model, optimizer, train_dataloader, scheduler
+                )
+            else:
+                model, optimizer, train_dataloader, val_dataloader, scheduler = self.accelerator.prepare(
+                    model, optimizer, train_dataloader, val_dataloader, scheduler
+                )
+
+        self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+
+        # --- hooks ---
+        if hasattr(model, "on_fit_start"):
+            model.on_fit_start(self.accelerator)
+
+        last = FitResult(train_loss=float("nan"))
+
+        for epoch in range(self.max_epochs):
+            last = self._train_one_epoch(epoch, train_dataloader)
+            if val_dataloader is not None:
+                vloss, vacc = self._validate(epoch, val_dataloader)
+                last.val_loss, last.val_acc = vloss, vacc
+
+            # epoch scheduler step (like your working loop)
+            if self.scheduler is not None and self.scheduler_interval == "epoch":
+                self.scheduler.step()
+
+            if self.accelerator.is_main_process:
+                msg = f"[epoch {epoch+1}] train_loss={last.train_loss:.4f}"
+                if last.train_acc is not None:
+                    msg += f" train_acc={last.train_acc:.4f}"
+                if last.val_loss is not None:
+                    msg += f" val_loss={last.val_loss:.4f}"
+                if last.val_acc is not None:
+                    msg += f" val_acc={last.val_acc:.4f}"
+                self.accelerator.print(msg)
+
+        return last
+
+    def _train_one_epoch(self, epoch: int, train_loader: DataLoader) -> FitResult:
+        assert self.model is not None
+        model = self.model
+        model.train()
+        if hasattr(model, "on_train_epoch_start"):
+            model.on_train_epoch_start(epoch)
+
+        loss_sum = 0.0
+        n_sum = 0
+        correct_sum = 0
+        has_acc = False
+
+        it = train_loader
+        if self.show_progress_bar and self.accelerator.is_local_main_process:
+            it = tqdm(train_loader, desc=f"train {epoch+1}", leave=False)
+
+        for step, batch in enumerate(it):
+            with self.accelerator.accumulate(model):  # automatic loss scaling + grad sync handling :contentReference[oaicite:1]{index=1}
+                loss, logs = model.training_step(batch, step)
+                self.accelerator.backward(loss)        # preferred over loss.backward() :contentReference[oaicite:2]{index=2}
+
+                if self.max_grad_norm is not None:
+                    self.accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm) # :contentReference[oaicite:3]{index=3}
+
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
+
+                if self.scheduler is not None and self.scheduler_interval == "step":
+                    self.scheduler.step()
+
+            # ---- cheap logging (mean loss across processes) ----
+            bs = int(batch[0].size(0))
+            loss_mean = self.accelerator.reduce(loss.detach(), reduction="mean")  # :contentReference[oaicite:4]{index=4}
+            loss_sum += float(loss_mean.item()) * bs
+            n_sum += bs
+
+            # optional acc if module provides it
+            if "train/acc" in logs:
+                has_acc = True
+                # logs['train/acc'] should be a scalar tensor/float for THIS batch
+                acc_val = logs["train/acc"]
+                if isinstance(acc_val, torch.Tensor):
+                    acc_val = float(self.accelerator.reduce(acc_val.detach(), reduction="mean").item())
+                correct_sum += int(round(acc_val * bs))
+
+            if self.accelerator.is_main_process and self.log_every_n_steps > 0 and step % self.log_every_n_steps == 0:
+                self.accelerator.print(f"epoch {epoch+1} step {step} loss {float(loss_mean.item()):.4f}")
+
+        if hasattr(model, "on_train_epoch_end"):
+            model.on_train_epoch_end(epoch)
+
+        train_loss = loss_sum / max(n_sum, 1)
+        train_acc = (correct_sum / max(n_sum, 1)) if has_acc else None
+        return FitResult(train_loss=train_loss, train_acc=train_acc)
+
+    @torch.no_grad()
+    def _validate(self, epoch: int, val_loader: DataLoader) -> Tuple[float, float]:
+        assert self.model is not None
+        model = self.model
+        model.eval()
+        if hasattr(model, "on_validation_epoch_start"):
+            model.on_validation_epoch_start(epoch)
+
+        loss_sum = 0.0
+        n_sum = 0
+        correct = 0
+        total = 0
+
+        it = val_loader
+        if self.show_progress_bar and self.accelerator.is_local_main_process:
+            it = tqdm(val_loader, desc=f"val {epoch+1}", leave=False)
+
+        for step, batch in enumerate(it):
+            logs = model.validation_step(batch, step)
+
+            # expect logs to include:
+            #   "val/loss": scalar tensor
+            #   "val/pred": LongTensor [B]
+            #   "val/target": LongTensor [B]
+            vloss = logs.get("val/loss", None)
+            pred = logs.get("val/pred", None)
+            target = logs.get("val/target", None)
+
+            if vloss is not None:
+                bs = int(batch[0].size(0))
+                vloss_mean = self.accelerator.reduce(vloss.detach(), reduction="mean")
+                loss_sum += float(vloss_mean.item()) * bs
+                n_sum += bs
+
+            if pred is not None and target is not None:
+                # gather_for_metrics drops duplicates in the last batch on distributed setups :contentReference[oaicite:5]{index=5}
+                pred_g, tgt_g = self.accelerator.gather_for_metrics((pred, target))
+                correct += int((pred_g == tgt_g).sum().item())
+                total += int(tgt_g.numel())
+
+        if hasattr(model, "on_validation_epoch_end"):
+            model.on_validation_epoch_end(epoch)
+
+        val_loss = loss_sum / max(n_sum, 1)
+        val_acc = correct / max(total, 1)
+        return val_loss, val_acc
+
+class LitCE(AccelLightningModule):
+    def __init__(self, config):
+        super().__init__()
+        self.student = config.student
+        self.criterion = nn.CrossEntropyLoss()
+        self.lr, self.wd, self.epochs = float(config.lr), float(config.wd), int(config.epochs)
+        self.momentum, self.nesterov = float(0.9), bool(True)
+
+    def forward(self, x):
+        return self.student(x)
+
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        x, y = batch
+        logits = self(x)
+        loss = self.criterion(logits, y)  # same as your loop
+
+        # optional train acc (works for y=[B] or y=[B,C])
+        y_idx = y.argmax(dim=1) if y.ndim == 2 else y
+        acc = (logits.argmax(dim=1) == y_idx).float().mean()
+
+        return loss, {"train/acc": acc}
+
+    @torch.no_grad()
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        x, y = batch
+        logits = self(x)
+        loss = self.criterion(logits, y)
+
+        y_idx = y.argmax(dim=1) if y.ndim == 2 else y
+        pred = logits.argmax(dim=1)
+
+        return {"val/loss": loss, "val/pred": pred, "val/target": y_idx}
+
+    def configure_optimizers(self):
+        opt = torch.optim.SGD(
+            self.student.parameters(),
+            lr=self.lr,
+            momentum=self.momentum,
+            weight_decay=self.wd,
+            nesterov=self.nesterov,
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
+        return opt, sched, "epoch"   # step scheduler once per epoch (like your loop)
     
+class LitBitConfig(BaseModel):
+    dataset: Optional[Any] = None  # DataModuleConfig
     lr: float
     wd: float
     epochs: int
@@ -1136,68 +1422,81 @@ class LitBitConfig(BaseModel):
     model_name: str = ""
     model_size: str = ""
 
-    hint_points: List[str|Tuple] = Field(default_factory=list)
+    hint_points: List[Union[str, Tuple]] = Field(default_factory=list)
 
-class LitBit(pl.LightningModule):
-    def __init__(self, config:LitBitConfig):
+
+class LitBit(AccelLightningModule):
+    def __init__(self, config: LitBitConfig):
         super().__init__()
         if type(config) is not dict:
             config = config.model_dump()
         config = LitBitConfig.model_validate(config)
-        self.save_hyperparameters(ignore=['student','teacher','_t_feats','_s_feats',
-                                          '_t_handles','_s_handles','_ternary_snapshot'])
-        self.scale_op = config.scale_op
-        self.student:nn.Module = config.student
-        self.teacher:nn.Module = config.teacher
-        self.has_teacher = True if config.teacher else False
 
-        # self.teacher:nn.Module = config.teacher
-        self.dataset_name = config.dataset.dataset_name
+        # --- core ---
+        self.scale_op = config.scale_op
+        self.student: nn.Module = config.student
+        self.teacher: Optional[nn.Module] = config.teacher
+        self.has_teacher = True if config.teacher is not None else False
+
+        # --- metadata ---
+        self.dataset_name = getattr(config.dataset, "dataset_name", "")
         self.model_name = config.model_name
         self.model_size = config.model_size
-        self.num_classes = config.dataset.num_classes
-        self.alpha_kd = config.alpha_kd
-        self.alpha_hint = config.alpha_hint
-        
-        if not (config.dataset.mixup or config.dataset.cutmix):
-            self.ce_hard = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+        self.num_classes = getattr(config.dataset, "num_classes", 0)
+
+        self.alpha_kd = float(config.alpha_kd)
+        self.alpha_hint = float(config.alpha_hint)
+
+        # --- CE selection (hard vs soft labels) ---
+        mixup = bool(getattr(config.dataset, "mixup", False)) if config.dataset is not None else False
+        cutmix = bool(getattr(config.dataset, "cutmix", False)) if config.dataset is not None else False
+
+        if not (mixup or cutmix):
+            self.ce_hard = nn.CrossEntropyLoss(label_smoothing=float(config.label_smoothing))
             self.ce_soft = None
         else:
             self.ce_hard = None
-            self.ce_soft = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+            self.ce_soft = nn.CrossEntropyLoss()
 
-        self.kd = KDLoss(T=config.T)
+        # --- KD / Hint ---
+        self.kd = KDLoss(T=float(config.T))
         self.hint = AdaptiveHintLoss()
 
-        if not (self.alpha_kd>0 and self.has_teacher):
+        if not (self.alpha_kd > 0 and self.has_teacher):
             self.kd = None
-            
-        if not (self.alpha_hint>0 and self.has_teacher):
+        if not (self.alpha_hint > 0 and self.has_teacher):
             self.hint = None
-
         if self.kd is None and self.hint is None:
-            self.has_teacher=False
+            self.has_teacher = False
 
-        self.hint_points = config.hint_points
-        self._ternary_snapshot = None
-        self._t_feats = {}
-        self._s_feats = {}
+        # --- hint plumbing ---
+        self.hint_points = list(config.hint_points)
+        self._t_feats: Dict[str, torch.Tensor] = {}
+        self._s_feats: Dict[str, torch.Tensor] = {}
         self._t_handles = []
         self._s_handles = []
-        self.t_acc_fps = {}
-        self.lr = config.lr
-        self.wd = config.wd
-        self.epochs = config.epochs
-        
-        # --- register hint projections here ---
+
+        # --- ternary snapshot & teacher acc cache ---
+        self._ternary_snapshot: Optional[nn.Module] = None
+        self.t_acc_fps: Dict[int, float] = {}
+
+        # --- optim ---
+        self.lr = float(config.lr)
+        self.wd = float(config.wd)
+        self.epochs = int(config.epochs)
+
+        # --- teacher freeze / hint init / teacher snapshot ---
         if self.has_teacher:
             if self.hint is not None and len(self.hint_points) > 0:
                 self.init_hint()
             for p in self.teacher.parameters():
                 p.requires_grad_(False)
-            self.teacher_params_snap, self.teacher_bufs_snap = snap_model(self.teacher)
 
-        if not self.has_teacher:
+            # snapshot teacher on CPU to avoid device-mismatch headaches later
+            self.teacher_params_snap, self.teacher_bufs_snap = snap_model(self.teacher)
+            self.teacher_params_snap = {k: v.detach().cpu().clone() for k, v in self.teacher_params_snap.items()}
+            self.teacher_bufs_snap = {k: v.detach().cpu().clone() for k, v in self.teacher_bufs_snap.items()}
+        else:
             self.teacher = None
             self.kd = None
             self.hint = None
@@ -1205,12 +1504,64 @@ class LitBit(pl.LightningModule):
             self.alpha_hint = 0.0
             self.teacher_params_snap, self.teacher_bufs_snap = None, None
 
+        self._accel = None  # set in on_fit_start
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.student(x)
+
+    @torch.no_grad()
+    def on_fit_start(self, accelerator):
+        self._accel = accelerator
+
+        # NOTE: accelerate.prepare(model, ...) will already .to(device) the whole module,
+        # including teacher if it is a registered submodule.
+        # Still ensure eval/freeze status:
+        if self.has_teacher and self.teacher is not None:
+            self.teacher.eval()
+            for p in self.teacher.parameters():
+                p.requires_grad_(False)
+
+            if self.alpha_hint > 0 and len(self.hint_points) > 0:
+                # register feature hooks once
+                self._s_handles = make_feature_hooks(self.student, self.hint_points, self._s_feats, idx=0)
+                self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, idx=1)
+
+        # print model summary on main proc
+        if accelerator.is_main_process:
+            s_total = sum(p.numel() for p in self.student.parameters())
+            s_train = sum(p.numel() for p in self.student.parameters() if p.requires_grad)
+            t_total = sum(p.numel() for p in self.teacher.parameters()) if self.has_teacher and self.teacher else 0
+            accelerator.print("=" * 80)
+            accelerator.print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes}")
+            accelerator.print(f"Student : {self.student.__class__.__name__} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
+            if self.has_teacher and self.teacher:
+                accelerator.print(f"Teacher : {self.teacher.__class__.__name__} | params {t_total/1e6:.2f}M (frozen)")
+            else:
+                accelerator.print("Teacher : None")
+            accelerator.print(f"KD      : alpha_kd={self.alpha_kd} | Hint: alpha_hint={self.alpha_hint} | points={self.hint_points}")
+            accelerator.print(f"Optim   : lr={self.lr} wd={self.wd} epochs={self.epochs}")
+            accelerator.print("=" * 80)
+
+    def on_train_epoch_start(self, epoch: int):
+        self.diff_from_init(f"on_train_epoch_start[{epoch}]")
+        self.student.train()
+
+    def on_validation_epoch_start(self, epoch: int):
+        self.diff_from_init(f"on_validation_epoch_start[{epoch}]")
+        self._ternary_snapshot = self._clone_student()
+
+    # optional cleanup
+    def on_validation_epoch_end(self, epoch: int):
+        # keep hooks if you want; comment out if you prefer to remove each epoch
+        pass
+
+    # -------------------- hint / teacher utilities --------------------
+
     def init_hint(self):
         s_mods = dict(self.student.named_modules())
         t_mods = dict(self.teacher.named_modules())
 
         for n in self.hint_points:
-            # n can be "name" or ("student_name", "teacher_name")
             if isinstance(n, tuple):
                 sn, tn = n
             else:
@@ -1232,19 +1583,21 @@ class LitBit(pl.LightningModule):
                     f"Cannot infer channels for hint point {n}. "
                     f"Student module: {type(s_m)}, teacher module: {type(t_m)}"
                 )
-            
+
             self.hint.register_pair(sn, c_s, c_t)
 
-    def get_loss_hint(self):        
+    def get_loss_hint(self) -> torch.Tensor:
         loss_hint = 0.0
         for hint_name in self.hint_points:
             sn = tn = hint_name
             if isinstance(hint_name, tuple):
                 sn, tn = hint_name
+
             if sn not in self._s_feats:
-                raise ValueError(f"Hint point {sn} not found in student features of {self._s_feats}.")
+                raise ValueError(f"Hint point {sn} not found in student features keys: {list(self._s_feats.keys())}")
             if tn not in self._t_feats:
-                raise ValueError(f"Hint point {tn} not found in teacher features of {self._t_feats}.")
+                raise ValueError(f"Hint point {tn} not found in teacher features keys: {list(self._t_feats.keys())}")
+
             loss_hint = loss_hint + self.hint(
                 sn,
                 self._s_feats[sn].float(),
@@ -1252,211 +1605,121 @@ class LitBit(pl.LightningModule):
             )
         return loss_hint
 
-    def diff_from_init(self, tag: str, strict=False):
-        if not self.has_teacher:return
-        cur_p, cur_b = snap_model(self.teacher)
-        changed_p = [k for k in self.teacher_params_snap
-                    if not torch.equal(self.teacher_params_snap[k], cur_p[k])]
-        changed_b = [k for k in self.teacher_bufs_snap
-                    if not torch.equal(self.teacher_bufs_snap[k], cur_b[k])]
-        if changed_p or changed_b:
-            if strict:
-                raise ValueError(f"[{tag}] Teacher changed!")
-            # print(f"[{tag}] Teacher changed!")
-            # print("  changed PARAMS:", changed_p[:5], "..." if len(changed_p) > 5 else "")
-            # print("  changed BUFFERS:", changed_b[:5], "..." if len(changed_b) > 5 else "")
-            recover_snap(self.teacher,self.teacher_params_snap,self.teacher_bufs_snap)
-        else:
-            pass
-            # recover_snap(self.teacher,self.teacher_params_snap,self.teacher_bufs_snap)
-            # print(f"[{tag}] Teacher identical to init.")
-  
-    @torch.no_grad()
-    def setup(self, stage=None):
-        # --- move & freeze teacher, register hooks ---
-        if self.has_teacher:
-            self.teacher.to(self.device).eval()
-            if self.alpha_hint > 0 and len(self.hint_points) > 0:
-                self._s_handles = make_feature_hooks(
-                    self.student, self.hint_points, self._s_feats, idx=0
-                )
-                self._t_handles = make_feature_hooks(
-                    self.teacher, self.hint_points, self._t_feats, idx=1
-                )
-
-        # --- accelerator / device info ---
-        acc_name = self.trainer.accelerator.__class__.__name__
-        strategy_name = self.trainer.strategy.__class__.__name__
-        num_devices = getattr(self.trainer, "num_devices", None) or len(self.trainer.devices or [])
-        dev_str = str(self.device)
-        cuda_name = ""
-        if torch.cuda.is_available() and "cuda" in dev_str:
-            try:
-                cuda_name = f" | CUDA: {torch.cuda.get_device_name(self.device.index or 0)}"
-            except Exception:
-                pass
-
-        # --- param counts ---
-        def _param_counts(m: nn.Module):
-            total = sum(p.numel() for p in m.parameters())
-            trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
-            frozen = total - trainable
-            return total, trainable, frozen
-        s_total, s_train, s_frozen = _param_counts(self.student)
-        if self.has_teacher:
-            t_total, t_train, t_frozen = _param_counts(self.teacher)
-        else:
-            t_total = t_train = t_frozen = 0
-
-        # optional: quick teacher checksum for debugging weight changes
-        if self.has_teacher:
-            teacher_checksum = float(
-                sum(p.float().abs().sum() for p in self.teacher.parameters()).cpu()
-            )
-        else:
-            teacher_checksum = 0.0
-
-        print("=" * 80)
-        print(f"Model params: { (s_total + t_total)/1e6:.2f}M "
-            f"| Accelerator: {acc_name} | Devices: {num_devices}")
-        print(f"Strategy: {strategy_name} | Device: {dev_str}{cuda_name}")
-        print("-" * 80)
-        print(f"Student: {self.student.__class__.__name__}")
-        print(f"  total params    : {s_total/1e6:.2f}M")
-        print(f"  trainable params: {s_train/1e6:.2f}M")
-        print(f"  frozen params   : {s_frozen/1e6:.2f}M")
-        if self.has_teacher:
-            print(f"Teacher: {self.teacher.__class__.__name__} (frozen)")
-            print(f"  total params    : {t_total/1e6:.2f}M")
-            print(f"  trainable params: {t_train/1e6:.2f}M")
-            print(f"  frozen params   : {t_frozen/1e6:.2f}M")
-            print(f"  checksum(sum|w|): {teacher_checksum:.3e}")
-        else:
-            print("Teacher: None")
-
-        print("-" * 80)
-        print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes}")
-        print(f"KD      : alpha_kd={self.alpha_kd}, T={getattr(self, 'kd', None) and self.kd.T}")
-        print(f"Hint    : alpha_hint={self.alpha_hint}, points={self.hint_points}")
-        print(f"Optim   : lr={self.lr}, wd={self.wd}, epochs={self.epochs}")
-        print("=" * 80)
-
-    def teardown(self, stage=None):
-        for h in getattr(self, "_t_handles", [])+getattr(self, "_s_handles", []):
-            try: h.remove()
-            except: pass
-
-    def forward(self, x):
-        return self.student(x)
-    
-    def teacher_forward(self, x):
-        if not self.has_teacher:
+    def teacher_forward(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        if not self.has_teacher or self.teacher is None:
             return None
-        self.teacher.eval()
         with torch.no_grad():
-            y = self.teacher(x).detach()
-        return y
-
-    def on_fit_start(self):
-        self.diff_from_init("on_fit_start")
-
-    def on_train_epoch_start(self):
-        self.diff_from_init("on_train_epoch_start")
-
-    def on_train_batch_start(self, batch, batch_idx, dataloader_idx=0):
-        if batch_idx == 0:
-            self.diff_from_init("on_train_batch_start[0]")
-            
-    def training_step(self, batch:Tuple[torch.Tensor,torch.Tensor], batch_idx):
-        x, y = batch
-        # y:
-        #   - LongTensor [B] when NOT MixUp/CutMix
-        #   - FloatTensor [B, num_classes] when MixUp/CutMix (from v2)
-
-        z_s = self.student(x)
-        z_t = self.teacher_forward(x)
-
-        # --------- classification loss (CE) --------- #
-        if y.ndim == 2:
-            # soft labels from MixUp/CutMix
-            loss_ce = self.ce_soft(z_s, y)
-        else:
-            # hard labels (with label smoothing)
-            loss_ce = self.ce_hard(z_s, y)
-            
-        # --------- teacher logits (for KD) --------- #
-        alpha_kd = self.alpha_kd
-        loss_kd = self.kd(z_s.float(), z_t.float()) if self.kd  is not None else 0.0
-
-        # --------- hint loss --------- #
-        loss_hint = self.get_loss_hint() if self.hint is not None else 0.0
-
-        # --------- total loss --------- #
-        loss = (1.0 - alpha_kd) * loss_ce + alpha_kd * loss_kd + self.alpha_hint * loss_hint
-
-        # --------- logging --------- #
-        logd = {}
-        logd["train/loss"] = loss
-        if loss_ce > 0.0:
-            logd["train/ce"] = loss_ce
-        if loss_kd > 0.0:
-            logd["train/kd"] = loss_kd
-        if loss_hint > 0.0:
-            logd["train/hint"] = loss_hint
-
-        logd["lr"] = self.trainer.optimizers[0].param_groups[0]["lr"]
-        self.log_dict(logd, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=x.size(0))
-
-        return loss
+            return self.teacher.eval()(x).detach()
 
     @torch.no_grad()
-    def _clone_student(self):
-        clone:nn.Module = self.student.clone()
+    def _clone_student(self) -> nn.Module:
+        clone: nn.Module = self.student.clone()
         clone.load_state_dict(self.student.state_dict(), strict=True)
         clone = convert_to_ternary(clone)
-        return clone.to(self.device)
+        # device from actual params (works under accelerate/ddp)
+        dev = next(self.student.parameters()).device
+        return clone.to(dev)
 
-    def on_validation_epoch_start(self):
-        print()
-        self.diff_from_init("on_validation_epoch_start")
-        self._ternary_snapshot = self._clone_student()
+    # -------------------- training / validation --------------------
+
+    def _ce_training_step(self, x: torch.Tensor, y: torch.Tensor):
+        logits = self.student(x)
+        ce = self.ce_hard if self.ce_hard is not None else self.ce_soft
+        loss = ce(logits, y)
+        return loss, {"train/ce": loss.detach()}, logits
+
+    def _ce_kd_training_step(self, x: torch.Tensor, y: torch.Tensor):
+        z_t = self.teacher_forward(x)
+        loss_ce, logd, logits = self._ce_training_step(x, y)
+        alpha_kd = self.alpha_kd
+        loss_kd = self.kd(logits.float(), z_t.float())
+        loss = (1.0 - alpha_kd) * loss_ce + alpha_kd * loss_kd
+        logd = {**logd, "train/kd": loss_kd.detach()}
+        return loss, logd, logits
+
+    def _ce_kd_hint_training_step(self, x: torch.Tensor, y: torch.Tensor):
+        loss, logd, logits = self._ce_kd_training_step(x, y)
+        loss_hint = self.get_loss_hint()
+        loss = loss + loss_hint
+        logd = {**logd, "train/hint": loss_hint.detach()}
+        return loss, logd, logits
+
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
+        x, y = batch
+
+        if self.kd is not None and self.hint is not None:
+            loss, logd, logits = self._ce_kd_hint_training_step(x, y)
+        elif self.kd is not None:
+            loss, logd, logits = self._ce_kd_training_step(x, y)
+        else:
+            loss, logd, logits = self._ce_training_step(x, y)
+
+        # optional acc (helps the AccelTrainer compute train_acc if you want)
+        y_idx = y.argmax(dim=1) if y.ndim == 2 else y
+        acc = (logits.argmax(dim=1) == y_idx).float().mean()
+        logd["train/acc"] = acc.detach()
+
+        return loss, logd
 
     @torch.no_grad()
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         x, y = batch
-        acc_func = lambda x,y:MulticlassAccuracy(num_classes=self.num_classes
-                            # average='micro', multidim_average='global', top_k=1
-                            ).to(x.device)(x,y).item()
-        
-        if self.alpha_kd>0 and self.t_acc_fps.get(batch_idx) is None and self.has_teacher:
-            self.t_acc_fps[batch_idx] = acc_func(self.teacher_forward(x),y)
-            # print("acc_func(self.teacher_forward(x),y) : ",self.t_acc_fps[batch_idx])
-            
-        logd = {}
-        if self.t_acc_fps.get(batch_idx) is not None:
-            logd["val/t_acc_fp"] = self.t_acc_fps.get(batch_idx)
-        logd["val/acc_fp"] = acc_func(self.student(x),y)
-        logd["val/acc_tern"] = acc_func(self._ternary_snapshot(x),y)
-        self.log_dict(logd, on_step=False, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+        y_idx = y.argmax(dim=1) if y.ndim == 2 else y
+
+        # snapshot must exist
+        if self._ternary_snapshot is None:
+            self._ternary_snapshot = self._clone_student()
+
+        z_fp = self.student(x)
+        z_tern = self._ternary_snapshot(x)
+
+        # define val loss as CE(fp, y_idx) (hard labels)
+        vloss = nn.functional.cross_entropy(z_fp, y_idx.long())
+
+        acc_fp = (z_fp.argmax(dim=1) == y_idx).float().mean()
+        acc_tern = (z_tern.argmax(dim=1) == y_idx).float().mean()
+
+        out = {
+            # what AccelTrainer uses
+            "val/loss": vloss,
+            "val/pred": z_fp.argmax(dim=1),
+            "val/target": y_idx.long(),
+
+            # extras (you can print/reduce if you want)
+            "val/acc_fp": acc_fp,
+            "val/acc_tern": acc_tern,
+        }
+
+        if self.has_teacher and self.teacher is not None and self.alpha_kd > 0:
+            # optional teacher fp acc (cache per batch_idx like your old code)
+            if self.t_acc_fps.get(batch_idx) is None:
+                z_t = self.teacher_forward(x)
+                t_acc = (z_t.argmax(dim=1) == y_idx).float().mean()
+                self.t_acc_fps[batch_idx] = float(t_acc.item())
+            out["val/t_acc_fp"] = torch.tensor(self.t_acc_fps[batch_idx], device=z_fp.device)
+
+        return out
+
+    # -------------------- optimizer --------------------
 
     def configure_optimizer_params(self):
         params = list(self.student.parameters())
-        if self.hint:
+        if self.hint is not None:
             params += list(self.hint.parameters())
-        if self.kd:
+        if self.kd is not None:
             params += list(self.kd.parameters())
         return params
-    
+
     def configure_optimizers(self):
         opt = torch.optim.SGD(
             self.configure_optimizer_params(),
-            lr=self.lr, momentum=0.9, weight_decay=self.wd, nesterov=True
+            lr=self.lr,
+            momentum=0.9,
+            weight_decay=self.wd,
+            nesterov=True,
         )
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
-        return {
-            "optimizer": opt,
-            "lr_scheduler": {"scheduler": sched, "interval": "epoch", "monitor": "val/acc_tern"},
-        }
+        return opt, sched, "epoch"
 
 # ----------------------------
 # KD losses & feature hints (unchanged from your pattern)
@@ -1538,7 +1801,7 @@ def infer_out_channels(module: nn.Module):
 # ----------------------------
 # Common CLI utilities
 # ----------------------------
-def setup_trainer(args:CommonTrainConfig):
+def setup_trainer(args:CommonTrainConfig, monitor="val/acc_tern"):
     """
     Setup common PyTorch Lightning training components.
 
@@ -1552,9 +1815,9 @@ def setup_trainer(args:CommonTrainConfig):
     pl.seed_everything(args.seed, workers=True)
     os.makedirs(args.export_dir, exist_ok=True)
     logger = CSVLogger(save_dir=args.export_dir, name="logs")
-    ckpt_cb = ModelCheckpoint(monitor="val/acc_tern", mode="max", save_top_k=1, save_last=True)
+    ckpt_cb = ModelCheckpoint(monitor=monitor, mode="max", save_top_k=1, save_last=True)
     lr_cb = LearningRateMonitor(logging_interval="epoch")
-    export_cb = ExportBestTernary(args.export_dir, monitor="val/acc_tern", mode="max")
+    export_cb = ExportBestTernary(args.export_dir, monitor=monitor, mode="max")
     callbacks = [ckpt_cb, lr_cb, export_cb]
 
     accelerator = "cpu" if args.cpu else "auto"
