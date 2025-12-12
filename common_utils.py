@@ -20,6 +20,8 @@ from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field
 import torch
 
+from bitlayers.bit import Bit
+
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,10 +29,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.transforms import v2
 from torch.utils.data import default_collate
-import pytorch_lightning as pl
-from pytorch_lightning import Callback
-from pytorch_lightning.loggers import CSVLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torchvision.transforms import InterpolationMode
 from torchmetrics.classification import MulticlassAccuracy
 from torchvision.datasets import VisionDataset
@@ -43,7 +41,6 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-
 from accelerate import Accelerator
 from tqdm.auto import tqdm
 
@@ -559,8 +556,15 @@ class DataModuleConfig(BaseModel):
         )
         
 
-class LightningDataModule(pl.LightningDataModule):
+class DataSetModule:
 
+    def setup(self, stage: Optional[str] = None):
+        raise NotImplementedError
+    def train_dataloader(self) -> DataLoader:
+        raise NotImplementedError
+    def val_dataloader(self) -> DataLoader:
+        raise NotImplementedError
+    
     @torch.no_grad()
     def show_examples(
         self,
@@ -635,7 +639,7 @@ class LightningDataModule(pl.LightningDataModule):
 # ----------------------------
 # CIFAR-100 DataModule (mixup/cutmix optional)
 # ----------------------------
-class CIFAR100DataModule(LightningDataModule):
+class CIFAR100DataModule(DataSetModule):
     """
     CIFAR-100 DataModule with:
       - RandAugment + Cutout in train transforms
@@ -869,7 +873,7 @@ class TinyImageNetDataset(VisionDataset):
 # ----------------------------
 # TinyImageNet DataModule
 # ----------------------------
-class TinyImageNetDataModule(LightningDataModule):
+class TinyImageNetDataModule(DataSetModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
                  mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
@@ -925,7 +929,7 @@ class TinyImageNetDataModule(LightningDataModule):
 # ----------------------------
 # MNIST DataModule
 # ----------------------------
-class MNISTDataModule(LightningDataModule):
+class MNISTDataModule(DataSetModule):
     def __init__(self, data_dir: str, batch_size: int, num_workers: int = 1,
                  mixup: bool = False, cutmix: bool = False, mix_alpha: float = 1.0):
         super().__init__()
@@ -963,7 +967,7 @@ class MNISTDataModule(LightningDataModule):
 # ----------------------------
 # ImageNet DataModule
 # ----------------------------
-class ImageNetDataModule(LightningDataModule):
+class ImageNetDataModule(DataSetModule):
     """
     <data_dir>/
     train/
@@ -1051,9 +1055,296 @@ class ImageNetDataModule(LightningDataModule):
         )
 
 # ----------------------------
-# Export callback (save best FP & ternary)
+# AccelLightningModule
 # ----------------------------
-class ExportBestTernary(Callback):
+class AccelLightningModule(nn.Module):
+    """
+    Lightning-like interface:
+      - forward(x)
+      - training_step(batch, batch_idx) -> (loss, logs)
+      - validation_step(batch, batch_idx) -> logs
+      - configure_optimizers() -> (optimizer, scheduler or None, scheduler_interval: "epoch"|"step")
+    """
+
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> 'AccelTrainer.Metrics':
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> 'AccelTrainer.Metrics':
+        return AccelTrainer.Metrics()
+
+    def configure_optimizers(self):
+        raise NotImplementedError
+
+    # optional hooks
+    def on_fit_start(self, accelerator: Accelerator): ...
+    def on_train_epoch_start(self, epoch: int): ...
+    def on_train_epoch_end(self, epoch: int): ...
+    def on_validation_epoch_start(self, epoch: int): ...
+    def on_validation_epoch_end(self, epoch: int): ...
+
+class AccelTrainer:
+
+    class MetricsTracer(BaseModel):
+        key:str        
+        val:float
+        best:float
+        callback:Optional[Callable] = Field(None,exclude=True)
+    
+        def is_better(self,val:float):
+            res = self.best<val
+            if res:self.best=val
+            return res
+    
+    class Metrics(BaseModel):
+        loss:Optional[torch.Tensor] = Field(None,exclude=True)
+        metrics:Dict[str,float] = {}
+        metric_tracers:'AccelTrainer.MetricsTracer' = Field(default_factory=list)
+    
+        def log_train_record(step,key,val): ...
+        def log_val_record(step,key,val): ...
+
+    def __init__(
+        self,
+        max_epochs: int,
+        mixed_precision: str = "no",              # "no" | "fp16" | "bf16"
+        gradient_accumulation_steps: int = 1,
+        max_grad_norm: Optional[float] = None,
+        show_progress_bar: bool = True,
+    ):
+        self.max_epochs = int(max_epochs)
+        self.accelerator = Accelerator(
+            mixed_precision=mixed_precision,
+            gradient_accumulation_steps=int(gradient_accumulation_steps),
+        )
+        self.max_grad_norm = max_grad_norm
+        self.show_progress_bar = show_progress_bar
+
+        self.model: Optional["AccelLightningModule"] = None
+        self.optimizer: Optional[torch.optim.Optimizer] = None
+        self.scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
+        self.scheduler_interval: str = "epoch"
+
+    # -----------------------------
+    # Public API
+    # -----------------------------
+    def fit(
+        self,
+        model: "AccelLightningModule",
+        datamodule: Optional["DataSetModule"] = None,
+        train_dataloader: Optional[DataLoader] = None,
+        val_dataloader: Optional[DataLoader] = None,
+    ) -> Dict[str, float]:
+        train_dataloader, val_dataloader = self._resolve_dataloaders(
+            datamodule, train_dataloader, val_dataloader
+        )
+
+        optimizer, scheduler, interval = self._configure_optimizers(model)
+        self.scheduler_interval = interval or "epoch"
+
+        model, optimizer, train_dataloader, val_dataloader, scheduler = self._prepare(
+            model, optimizer, train_dataloader, val_dataloader, scheduler
+        )
+
+        self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+
+        self._call_hook(model, "on_fit_start", self.accelerator)
+
+        last = {}
+        for epoch in range(self.max_epochs):
+            train_metrics = self._train_one_epoch(epoch, train_dataloader)
+            last.update(train_metrics)
+
+            if val_dataloader is not None:
+                val_metrics = self._validate_one_epoch(epoch, val_dataloader)
+                last.update(val_metrics)
+
+            self._maybe_step_scheduler_epoch_end()
+
+        return last
+    
+
+    def log(self, metrics: Dict[str, float], *, stage: str, weight: float = 1.0) -> None:
+        """
+        Log scalar metrics for later aggregation (weighted mean).
+        Call this inside loops. Nothing is printed here.
+        """        
+        @dataclass
+        class _MeanMeter:
+            wsum: float = 0.0
+            w: float = 0.0
+
+            def update(self, value: float, weight: float) -> None:
+                self.wsum += float(value) * float(weight)
+                self.w += float(weight)
+
+            def reset(self) -> None:
+                self.wsum = 0.0
+                self.w = 0.0
+
+        if stage not in self._meters:
+            self._meters[stage] = {}
+
+        for name, val in metrics.items():
+            v = self._to_float(val)
+            if v is None:
+                continue
+            meter = self._meters[stage].get(name)
+            if meter is None:
+                meter = _MeanMeter()
+                self._meters[stage][name] = meter
+            meter.update(v, weight)
+
+    # -----------------------------
+    # Fit helpers
+    # -----------------------------
+    def _resolve_dataloaders(
+        self,
+        datamodule: Optional["DataSetModule"],
+        train_dataloader: Optional[DataLoader],
+        val_dataloader: Optional[DataLoader],
+    ) -> Tuple[DataLoader, Optional[DataLoader]]:
+        if datamodule is not None:
+            datamodule.setup("fit")
+            train_dataloader = datamodule.train_dataloader()
+            val_dataloader = datamodule.val_dataloader()
+
+        if train_dataloader is None:
+            raise ValueError("Need train_dataloader or datamodule")
+
+        return train_dataloader, val_dataloader
+
+    def _configure_optimizers(
+        self,
+        model: "AccelLightningModule",
+    ) -> Tuple[torch.optim.Optimizer, Optional[torch.optim.lr_scheduler._LRScheduler], str]:
+        optimizer, scheduler, interval = model.configure_optimizers()
+        if optimizer is None:
+            raise ValueError("model.configure_optimizers() must return an optimizer")
+        return optimizer, scheduler, (interval or "epoch")
+
+    def _prepare(
+        self,
+        model: "AccelLightningModule",
+        optimizer: torch.optim.Optimizer,
+        train_dataloader: DataLoader,
+        val_dataloader: Optional[DataLoader],
+        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    ):
+        objs = [model, optimizer, train_dataloader]
+        has_val = val_dataloader is not None
+        has_sched = scheduler is not None
+
+        if has_val:
+            objs.append(val_dataloader)
+        if has_sched:
+            objs.append(scheduler)
+
+        prepared = self.accelerator.prepare(*objs)
+
+        # Unpack by shape
+        idx = 0
+        model_p = prepared[idx]; idx += 1
+        optim_p = prepared[idx]; idx += 1
+        train_p = prepared[idx]; idx += 1
+
+        val_p = None
+        if has_val:
+            val_p = prepared[idx]; idx += 1
+
+        sched_p = None
+        if has_sched:
+            sched_p = prepared[idx]; idx += 1
+
+        return model_p, optim_p, train_p, val_p, sched_p
+
+    def _maybe_step_scheduler_epoch_end(self) -> None:
+        if self.scheduler is not None and self.scheduler_interval == "epoch":
+            self.scheduler.step()
+
+    # -----------------------------
+    # Training / Validation
+    # -----------------------------
+    def _train_one_epoch(self, epoch: int, train_loader: DataLoader) -> Dict[str, float]:
+        assert self.model is not None and self.optimizer is not None
+        model = self.model
+        model.train()
+        self._call_hook(model, "on_train_epoch_start", epoch)
+
+        it = train_loader
+        if self.show_progress_bar and self.accelerator.is_local_main_process:
+            it = tqdm(train_loader, desc=f"train {epoch+1}", leave=False)
+
+        for step, batch in enumerate(it):
+            with self.accelerator.accumulate(model):
+                out,train_metrics = model.training_step(batch, step)
+
+                # support either `loss` or `(loss, anything)`
+                loss = out[0] if isinstance(out, (tuple, list)) else out
+
+                self.accelerator.backward(loss)
+
+                # Only update (and clip) on real optimizer steps under accumulation
+                if self.accelerator.sync_gradients:
+                    if self.max_grad_norm is not None:
+                        self.accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+
+                    self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+
+                    if self.scheduler is not None and self.scheduler_interval == "step":
+                        self.scheduler.step()
+
+        self._call_hook(model, "on_train_epoch_end", epoch)
+        self.log(train_metrics)
+
+    @torch.no_grad()
+    def _validate_one_epoch(self, epoch: int, val_loader: DataLoader) -> Dict[str, float]:
+        assert self.model is not None
+        model = self.model
+        model.eval()
+
+        self._call_hook(model, "on_validation_epoch_start", epoch)
+
+        it = val_loader
+        if self.show_progress_bar and self.accelerator.is_local_main_process:
+            it = tqdm(val_loader, desc=f"val {epoch+1}", leave=False)
+
+        for step, batch in enumerate(it):
+            val_metrics = model.validation_step(batch, step)
+            self.log(val_metrics)
+
+        self._call_hook(model, "on_validation_epoch_end", epoch)        
+
+    # -----------------------------
+    # Utilities
+    # -----------------------------
+    def _call_hook(self, model: Any, name: str, *args, **kwargs) -> None:
+        fn = getattr(model, name, None)
+        if callable(fn):
+            fn(*args, **kwargs)
+
+    def _infer_batch_size(self, batch: Any) -> int:
+        if isinstance(batch, (tuple, list)) and len(batch) > 0 and hasattr(batch[0], "size"):
+            return int(batch[0].size(0))
+        if isinstance(batch, dict):
+            for v in batch.values():
+                if hasattr(v, "size"):
+                    return int(v.size(0))
+        return 1
+
+    def _reduce_weighted_mean(self, weighted_sum_local: float, count_local: int) -> float:
+        ws = torch.tensor(weighted_sum_local, device=self.accelerator.device, dtype=torch.float32)
+        ct = torch.tensor(count_local, device=self.accelerator.device, dtype=torch.float32)
+
+        ws = self.accelerator.reduce(ws, reduction="sum")
+        ct = self.accelerator.reduce(ct, reduction="sum")
+
+        return float((ws / ct.clamp_min(1.0)).item())
+    
+class ExportBestTernary:
     def __init__(self, out_dir: str, monitor: str = "val/acc_tern", mode: str = "max"):
         super().__init__()
         self.out_dir, self.monitor, self.mode = out_dir, monitor, mode
@@ -1064,7 +1355,7 @@ class ExportBestTernary(Callback):
         if best is None: return True
         return (current > best) if self.mode == "max" else (current < best)
 
-    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module):
+    def on_validation_epoch_end(self, trainer, pl_module):
         metrics = trainer.callback_metrics
         if self.monitor not in metrics: return
         current = metrics[self.monitor].item()
@@ -1086,7 +1377,7 @@ class ExportBestTernary(Callback):
             pl_module.print(f"[OK] exported ternary PoT -> {tern_path}")
 
 # ----------------------------
-# LightningModule: KD + hints + ternary eval/export
+# KD + hints + ternary eval/export
 # ----------------------------
 class CommonTrainConfig(BaseModel):
     data_dir: str = "./data"    
@@ -1122,239 +1413,6 @@ class CommonTrainConfig(BaseModel):
         description="Number of GPUs to use (1 = default, -1 = all available)",
     )
     strategy: Literal["auto", "ddp", "ddp_spawn", "fsdp"] = "auto"
-
-class AccelLightningModule(nn.Module):
-    """
-    Lightning-like interface:
-      - forward(x)
-      - training_step(batch, batch_idx) -> (loss, logs)
-      - validation_step(batch, batch_idx) -> logs
-      - configure_optimizers() -> (optimizer, scheduler or None, scheduler_interval: "epoch"|"step")
-    """
-
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        raise NotImplementedError
-
-    @torch.no_grad()
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Dict[str, Any]:
-        return {}
-
-    def configure_optimizers(self):
-        raise NotImplementedError
-
-    # optional hooks
-    def on_fit_start(self, accelerator: Accelerator): ...
-    def on_train_epoch_start(self, epoch: int): ...
-    def on_train_epoch_end(self, epoch: int): ...
-    def on_validation_epoch_start(self, epoch: int): ...
-    def on_validation_epoch_end(self, epoch: int): ...
-
-
-@dataclass
-class FitResult:
-    train_loss: float
-    train_acc: Optional[float] = None
-    val_loss: Optional[float] = None
-    val_acc: Optional[float] = None
-
-
-class AccelTrainer:
-    def __init__(
-        self,
-        max_epochs: int,
-        mixed_precision: str = "no",              # "no" | "fp16" | "bf16"
-        gradient_accumulation_steps: int = 1,
-        log_every_n_steps: int = 10,
-        max_grad_norm: Optional[float] = None,
-        show_progress_bar: bool = True,
-    ):
-        self.max_epochs = int(max_epochs)
-        self.accelerator = Accelerator(
-            mixed_precision=mixed_precision,
-            gradient_accumulation_steps=int(gradient_accumulation_steps),
-        )
-        self.log_every_n_steps = int(log_every_n_steps)
-        self.max_grad_norm = max_grad_norm
-        self.show_progress_bar = show_progress_bar
-
-        self.model: Optional[AccelLightningModule] = None
-        self.optimizer = None
-        self.scheduler = None
-        self.scheduler_interval = "epoch"
-
-    def fit(
-        self,
-        model: AccelLightningModule,
-        datamodule: Optional[Any] = None,
-        train_dataloader: Optional[DataLoader] = None,
-        val_dataloader: Optional[DataLoader] = None,
-    ) -> FitResult:
-        # --- dataloaders (LightningDataModule-compatible) ---
-        if datamodule is not None:
-            if hasattr(datamodule, "setup"):
-                try:
-                    datamodule.setup("fit")
-                except TypeError:
-                    datamodule.setup()
-            if train_dataloader is None:
-                train_dataloader = datamodule.train_dataloader()
-            if val_dataloader is None and hasattr(datamodule, "val_dataloader"):
-                val_dataloader = datamodule.val_dataloader()
-
-        assert train_dataloader is not None, "Need train_dataloader or datamodule"
-
-        # --- optimizers/schedulers ---
-        optimizer, scheduler, interval = model.configure_optimizers()
-        self.scheduler_interval = interval or "epoch"
-
-        # --- prepare everything (device/DDP/etc) ---
-        if scheduler is None:
-            model, optimizer, train_dataloader = self.accelerator.prepare(model, optimizer, train_dataloader)
-            if val_dataloader is not None:
-                val_dataloader = self.accelerator.prepare(val_dataloader)
-        else:
-            if val_dataloader is None:
-                model, optimizer, train_dataloader, scheduler = self.accelerator.prepare(
-                    model, optimizer, train_dataloader, scheduler
-                )
-            else:
-                model, optimizer, train_dataloader, val_dataloader, scheduler = self.accelerator.prepare(
-                    model, optimizer, train_dataloader, val_dataloader, scheduler
-                )
-
-        self.model = model
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-
-        # --- hooks ---
-        if hasattr(model, "on_fit_start"):
-            model.on_fit_start(self.accelerator)
-
-        last = FitResult(train_loss=float("nan"))
-
-        for epoch in range(self.max_epochs):
-            last = self._train_one_epoch(epoch, train_dataloader)
-            if val_dataloader is not None:
-                vloss, vacc = self._validate(epoch, val_dataloader)
-                last.val_loss, last.val_acc = vloss, vacc
-
-            # epoch scheduler step (like your working loop)
-            if self.scheduler is not None and self.scheduler_interval == "epoch":
-                self.scheduler.step()
-
-            if self.accelerator.is_main_process:
-                msg = f"[epoch {epoch+1}] train_loss={last.train_loss:.4f}"
-                if last.train_acc is not None:
-                    msg += f" train_acc={last.train_acc:.4f}"
-                if last.val_loss is not None:
-                    msg += f" val_loss={last.val_loss:.4f}"
-                if last.val_acc is not None:
-                    msg += f" val_acc={last.val_acc:.4f}"
-                self.accelerator.print(msg)
-
-        return last
-
-    def _train_one_epoch(self, epoch: int, train_loader: DataLoader) -> FitResult:
-        assert self.model is not None
-        model = self.model
-        model.train()
-        if hasattr(model, "on_train_epoch_start"):
-            model.on_train_epoch_start(epoch)
-
-        loss_sum = 0.0
-        n_sum = 0
-        correct_sum = 0
-        has_acc = False
-
-        it = train_loader
-        if self.show_progress_bar and self.accelerator.is_local_main_process:
-            it = tqdm(train_loader, desc=f"train {epoch+1}", leave=False)
-
-        for step, batch in enumerate(it):
-            with self.accelerator.accumulate(model):  # automatic loss scaling + grad sync handling :contentReference[oaicite:1]{index=1}
-                loss, logs = model.training_step(batch, step)
-                self.accelerator.backward(loss)        # preferred over loss.backward() :contentReference[oaicite:2]{index=2}
-
-                if self.max_grad_norm is not None:
-                    self.accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm) # :contentReference[oaicite:3]{index=3}
-
-                self.optimizer.step()
-                self.optimizer.zero_grad(set_to_none=True)
-
-                if self.scheduler is not None and self.scheduler_interval == "step":
-                    self.scheduler.step()
-
-            # ---- cheap logging (mean loss across processes) ----
-            bs = int(batch[0].size(0))
-            loss_mean = self.accelerator.reduce(loss.detach(), reduction="mean")  # :contentReference[oaicite:4]{index=4}
-            loss_sum += float(loss_mean.item()) * bs
-            n_sum += bs
-
-            # optional acc if module provides it
-            if "train/acc" in logs:
-                has_acc = True
-                # logs['train/acc'] should be a scalar tensor/float for THIS batch
-                acc_val = logs["train/acc"]
-                if isinstance(acc_val, torch.Tensor):
-                    acc_val = float(self.accelerator.reduce(acc_val.detach(), reduction="mean").item())
-                correct_sum += int(round(acc_val * bs))
-
-            if self.accelerator.is_main_process and self.log_every_n_steps > 0 and step % self.log_every_n_steps == 0:
-                self.accelerator.print(f"epoch {epoch+1} step {step} loss {float(loss_mean.item()):.4f}")
-
-        if hasattr(model, "on_train_epoch_end"):
-            model.on_train_epoch_end(epoch)
-
-        train_loss = loss_sum / max(n_sum, 1)
-        train_acc = (correct_sum / max(n_sum, 1)) if has_acc else None
-        return FitResult(train_loss=train_loss, train_acc=train_acc)
-
-    @torch.no_grad()
-    def _validate(self, epoch: int, val_loader: DataLoader) -> Tuple[float, float]:
-        assert self.model is not None
-        model = self.model
-        model.eval()
-        if hasattr(model, "on_validation_epoch_start"):
-            model.on_validation_epoch_start(epoch)
-
-        loss_sum = 0.0
-        n_sum = 0
-        correct = 0
-        total = 0
-
-        it = val_loader
-        if self.show_progress_bar and self.accelerator.is_local_main_process:
-            it = tqdm(val_loader, desc=f"val {epoch+1}", leave=False)
-
-        for step, batch in enumerate(it):
-            logs = model.validation_step(batch, step)
-
-            # expect logs to include:
-            #   "val/loss": scalar tensor
-            #   "val/pred": LongTensor [B]
-            #   "val/target": LongTensor [B]
-            vloss = logs.get("val/loss", None)
-            pred = logs.get("val/pred", None)
-            target = logs.get("val/target", None)
-
-            if vloss is not None:
-                bs = int(batch[0].size(0))
-                vloss_mean = self.accelerator.reduce(vloss.detach(), reduction="mean")
-                loss_sum += float(vloss_mean.item()) * bs
-                n_sum += bs
-
-            if pred is not None and target is not None:
-                # gather_for_metrics drops duplicates in the last batch on distributed setups :contentReference[oaicite:5]{index=5}
-                pred_g, tgt_g = self.accelerator.gather_for_metrics((pred, target))
-                correct += int((pred_g == tgt_g).sum().item())
-                total += int(tgt_g.numel())
-
-        if hasattr(model, "on_validation_epoch_end"):
-            model.on_validation_epoch_end(epoch)
-
-        val_loss = loss_sum / max(n_sum, 1)
-        val_acc = correct / max(total, 1)
-        return val_loss, val_acc
 
 class LitCE(AccelLightningModule):
     def __init__(self, config):
@@ -1398,7 +1456,7 @@ class LitCE(AccelLightningModule):
             nesterov=self.nesterov,
         )
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
-        return opt, sched, "epoch"   # step scheduler once per epoch (like your loop)
+        return opt, sched, "epoch" 
     
 class LitBitConfig(BaseModel):
     dataset: Optional[Any] = None  # DataModuleConfig
@@ -1423,7 +1481,6 @@ class LitBitConfig(BaseModel):
     model_size: str = ""
 
     hint_points: List[Union[str, Tuple]] = Field(default_factory=list)
-
 
 class LitBit(AccelLightningModule):
     def __init__(self, config: LitBitConfig):
@@ -1801,73 +1858,73 @@ def infer_out_channels(module: nn.Module):
 # ----------------------------
 # Common CLI utilities
 # ----------------------------
-def setup_trainer(args:CommonTrainConfig, monitor="val/acc_tern"):
-    """
-    Setup common PyTorch Lightning training components.
+# def setup_trainer(args:CommonTrainConfig, monitor="val/acc_tern"):
+#     """
+#     Setup common PyTorch Lightning training components.
 
-    Args:
-        args: Parsed command-line arguments
-        lit_module: Lightning module to train
+#     Args:
+#         args: Parsed command-line arguments
+#         lit_module: Lightning module to train
 
-    Returns:
-        tuple: (trainer, datamodule)
-    """
-    pl.seed_everything(args.seed, workers=True)
-    os.makedirs(args.export_dir, exist_ok=True)
-    logger = CSVLogger(save_dir=args.export_dir, name="logs")
-    ckpt_cb = ModelCheckpoint(monitor=monitor, mode="max", save_top_k=1, save_last=True)
-    lr_cb = LearningRateMonitor(logging_interval="epoch")
-    export_cb = ExportBestTernary(args.export_dir, monitor=monitor, mode="max")
-    callbacks = [ckpt_cb, lr_cb, export_cb]
+#     Returns:
+#         tuple: (trainer, datamodule)
+#     """
+#     pl.seed_everything(args.seed, workers=True)
+#     os.makedirs(args.export_dir, exist_ok=True)
+#     logger = CSVLogger(save_dir=args.export_dir, name="logs")
+#     ckpt_cb = ModelCheckpoint(monitor=monitor, mode="max", save_top_k=1, save_last=True)
+#     lr_cb = LearningRateMonitor(logging_interval="epoch")
+#     export_cb = ExportBestTernary(args.export_dir, monitor=monitor, mode="max")
+#     callbacks = [ckpt_cb, lr_cb, export_cb]
 
-    accelerator = "cpu" if args.cpu else "auto"
-    precision = "16-mixed" if args.amp else "32-true"
+#     accelerator = "cpu" if args.cpu else "auto"
+#     precision = "16-mixed" if args.amp else "32-true"
 
-    # Multi-GPU setup
-    devices = args.gpus if hasattr(args, 'gpus') else 1
-    strategy = args.strategy if hasattr(args, 'strategy') else "auto"
+#     # Multi-GPU setup
+#     devices = args.gpus if hasattr(args, 'gpus') else 1
+#     strategy = args.strategy if hasattr(args, 'strategy') else "auto"
 
-    # Use appropriate strategy for multi-GPU training
-    import sys
-    if devices > 1 or devices == -1:
-        if strategy == "auto":
-            # Check if NCCL is available (for CUDA GPUs)
-            if sys.platform == "win32":
-                # Windows doesn't support NCCL, must use gloo backend
-                from pytorch_lightning.strategies import DDPStrategy
-                strategy = DDPStrategy(process_group_backend="gloo")
-                print(f"[Multi-GPU] Windows detected, using DDP with gloo backend")
-            else:
-                try:
-                    import torch.distributed
-                    if torch.cuda.is_available() and torch.distributed.is_nccl_available():
-                        strategy = "ddp"
-                    else:
-                        from pytorch_lightning.strategies import DDPStrategy
-                        strategy = DDPStrategy(process_group_backend="gloo")
-                        print(f"[Multi-GPU] NCCL not available, using DDP with gloo backend")
-                except:
-                    from pytorch_lightning.strategies import DDPStrategy
-                    strategy = DDPStrategy(process_group_backend="gloo")
-                    print(f"[Multi-GPU] Using DDP with gloo backend")
+#     # Use appropriate strategy for multi-GPU training
+#     import sys
+#     if devices > 1 or devices == -1:
+#         if strategy == "auto":
+#             # Check if NCCL is available (for CUDA GPUs)
+#             if sys.platform == "win32":
+#                 # Windows doesn't support NCCL, must use gloo backend
+#                 from pytorch_lightning.strategies import DDPStrategy
+#                 strategy = DDPStrategy(process_group_backend="gloo")
+#                 print(f"[Multi-GPU] Windows detected, using DDP with gloo backend")
+#             else:
+#                 try:
+#                     import torch.distributed
+#                     if torch.cuda.is_available() and torch.distributed.is_nccl_available():
+#                         strategy = "ddp"
+#                     else:
+#                         from pytorch_lightning.strategies import DDPStrategy
+#                         strategy = DDPStrategy(process_group_backend="gloo")
+#                         print(f"[Multi-GPU] NCCL not available, using DDP with gloo backend")
+#                 except:
+#                     from pytorch_lightning.strategies import DDPStrategy
+#                     strategy = DDPStrategy(process_group_backend="gloo")
+#                     print(f"[Multi-GPU] Using DDP with gloo backend")
 
-        print(f"[Multi-GPU] Training on {devices if devices > 0 else 'all'} GPUs")
+#         print(f"[Multi-GPU] Training on {devices if devices > 0 else 'all'} GPUs")
 
-    trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        accelerator=accelerator,
-        devices=devices,
-        strategy=strategy,
-        precision=precision,
-        logger=logger,
-        callbacks=callbacks,
-        log_every_n_steps=50,
-        deterministic=False,
-        sync_batchnorm=True if (devices > 1 or devices == -1) else False,
-        num_sanity_val_steps=0
-    )
+#     trainer = pl.Trainer(
+#         max_epochs=args.epochs,
+#         accelerator=accelerator,
+#         devices=devices,
+#         strategy=strategy,
+#         precision=precision,
+#         logger=logger,
+#         callbacks=callbacks,
+#         log_every_n_steps=50,
+#         deterministic=False,
+#         sync_batchnorm=True if (devices > 1 or devices == -1) else False,
+#         num_sanity_val_steps=0
+#     )
 
-    return trainer
+#     return trainer
 
 def GUI_tool(model,
              resize=None,
