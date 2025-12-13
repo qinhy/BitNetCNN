@@ -676,9 +676,9 @@ class CIFAR100DataModule(DataSetModule):
         train_tf = v2.Compose([
             v2.RandomCrop(32, padding=4),
             v2.RandomHorizontalFlip(),
-            v2.RandAugment(num_ops=2, magnitude=9),
+            v2.RandomApply([v2.RandAugment(num_ops=2, magnitude=9)],p=0.5),
             transforms.ToTensor(),
-            Cutout(size=(8,8)),          # Cutout after ToTensor
+            v2.RandomApply([Cutout(size=(8,8))],p=0.5),
             v2.Normalize(mean, std),
         ])
 
@@ -720,9 +720,9 @@ class CIFAR100DataModule(DataSetModule):
             )
 
         if len(transforms_list) == 1:
-            self._collate_transform = transforms_list[0]
+            self._collate_transform = v2.RandomApply([transforms_list[0]],p=0.5)
         else:
-            self._collate_transform = v2.RandomChoice(transforms_list)
+            self._collate_transform = v2.RandomApply([v2.RandomChoice(transforms_list)],p=0.5)
 
     def train_collate_fn(self, batch):
         """
