@@ -38,13 +38,13 @@ def convert_to_ternary(module: nn.Module) -> nn.Module:
 
 
 # ----------------------------
-# AccelLightningModule
+# Lightning-like base
 # ----------------------------
 class AccelLightningModule(nn.Module):
     """
     Lightning-like interface:
       - forward(x)
-      - training_step(batch, batch_idx) -> Metrics
+      - training_step(batch, batch_idx) -> Metrics (must include loss)
       - validation_step(batch, batch_idx) -> Metrics
       - configure_optimizers() -> (optimizer, scheduler or None, scheduler_interval: "epoch"|"step")
     """
@@ -76,6 +76,7 @@ class Metrics(BaseModel):
     step: Optional[int] = None
     batch_size: Optional[int] = None
 
+    # excluded from pydantic serialization; still used in to_dict()
     loss: Optional[Any] = Field(default=None, exclude=True)
     metrics: Dict[str, Any] = Field(default_factory=dict)
 
@@ -86,13 +87,13 @@ class Metrics(BaseModel):
         return self.metrics.get(key, default)
 
     def to_dict(self) -> Dict[str, Any]:
-        res: Dict[str, Any] = {}
-        res[f"{self.stage}/loss"] = self.loss
+        res: Dict[str, Any] = {f"{self.stage}/loss": self.loss}
         res.update(self.metrics)
 
         out: Dict[str, Any] = {}
         for k, v in res.items():
-            if v is None:continue
+            if v is None:
+                continue
             if torch.is_tensor(v):
                 out[k] = float(v.detach().cpu().item())
             else:
@@ -121,7 +122,7 @@ class MetricsTracer(BaseModel):
     mode: Literal["max", "min"] = "max"
     callback: Optional[Callable[..., None]] = Field(default=None, exclude=True)
 
-    def is_better(self, val: float) -> bool:
+    def _is_better(self, val: float) -> bool:
         if self.best is None:
             return True
         return (val > self.best) if self.mode == "max" else (val < self.best)
@@ -130,7 +131,7 @@ class MetricsTracer(BaseModel):
         v = _as_float(val)
         if v is None:
             return False
-        if self.is_better(v):
+        if self._is_better(v):
             self.best = float(v)
             return True
         return False
@@ -141,9 +142,9 @@ class MetricsManager(BaseModel):
     epoch_metric_tracers: List[MetricsTracer] = Field(default_factory=list)
     _last_epoch_by_stage: Dict[str, int] = PrivateAttr(default_factory=lambda: {"train": -1, "val": -1})
 
-    def to_list(self):
+    def to_list(self) -> List[Dict[str, Any]]:
         return [m.to_dict() for m in self.metrics_list]
-    
+
     def log(self, metrics: Metrics, trainer: "AccelTrainer" = None, model: "LitBit" = None) -> None:
         self.metrics_list.append(metrics)
 
@@ -155,11 +156,14 @@ class MetricsManager(BaseModel):
             if t.stage != metrics.stage:
                 continue
             val = metrics.get(t.key)
-            if t.compare(val):
-                if t.callback is not None:
-                    t.callback(metrics=metrics, trainer=trainer, model=model)
+            if t.compare(val) and t.callback is not None:
+                t.callback(metrics=metrics, trainer=trainer, model=model)
 
     def last_epoch_mean(self, stage: str = "train", epoch: int = -1) -> Metrics:
+        """
+        Convenience helper: mean over all logged rows for the latest epoch of a stage.
+        Avoids producing keys like "x_mean_mean".
+        """
         last_epoch = self._last_epoch_by_stage.get(stage, -1)
         if last_epoch < 0:
             return Metrics(stage=stage, epoch=epoch, loss=None, metrics={})
@@ -175,8 +179,12 @@ class MetricsManager(BaseModel):
         for k in keys:
             vals = [_as_float(d.get(k)) for d in dict_rows]
             vals = [v for v in vals if v is not None]
-            if vals:
-                mean_metrics[f"{k}_mean"] = sum(vals) / len(vals)
+            if not vals:
+                continue
+
+            avg = sum(vals) / len(vals)
+            out_key = k if k.endswith("_mean") else f"{k}_mean"
+            mean_metrics[out_key] = avg
 
         return Metrics(stage=stage, epoch=epoch, loss=None, metrics=mean_metrics)
 
@@ -185,19 +193,26 @@ class MetricsManager(BaseModel):
 # Export best ternary checkpoint
 # ----------------------------
 class ExportBestTernary:
+    """
+    Exports:
+      - best FP student checkpoint
+      - best ternary PoT checkpoint (via convert_to_ternary)
+
+    Triggered by MetricsTracer when "val/acc_tern_mean" improves.
+    """
+
     def __call__(self, metrics: Metrics, trainer: "AccelTrainer", model: "LitBit"):
-        # avoid multi-proc races
-        if not trainer.accelerator.is_local_main_process:
+        # IMPORTANT: global main process only (prevents multi-node duplicates/overwrites)
+        if not trainer.accelerator.is_main_process:
             return
 
         acc_tern = _as_float(metrics.get("val/acc_tern_mean"))
         if acc_tern is None:
             return
 
-        # unwrap accelerate wrapper
-        unwrapped:LitBit = trainer.accelerator.unwrap_model(model)
-
+        unwrapped: "LitBit" = trainer.accelerator.unwrap_model(model)
         config = unwrapped.config
+
         export_dir = config.export_dir
         dataset_name = config.dataset.dataset_name
         model_name = config.model_name
@@ -205,25 +220,128 @@ class ExportBestTernary:
 
         os.makedirs(export_dir, exist_ok=True)
 
-        # save FP student
-        best_fp = copy.deepcopy(unwrapped.student).cpu()
+        # ---- save FP state_dict on CPU (cheap & safe) ----
         fp_path = os.path.join(export_dir, f"bit_{model_name}_{model_size}_{dataset_name}_best_fp.pt")
-        torch.save({"model": best_fp.state_dict(), "acc_tern": acc_tern}, fp_path)
+        fp_state = {k: v.detach().cpu() for k, v in unwrapped.student.state_dict().items()}
+        torch.save({"model": fp_state, "acc_tern": acc_tern}, fp_path)
         trainer.print(f"[OK] saved {fp_path} (val/acc_tern={acc_tern*100:.2f}%)")
 
-        # save ternary PoT export
-        tern = convert_to_ternary(copy.deepcopy(best_fp)).cpu()
+        # ---- export ternary PoT (convert CPU copy) ----
+        ternary_model = convert_to_ternary(copy.deepcopy(unwrapped.student).cpu()).cpu()
         tern_path = os.path.join(
             export_dir,
             f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_acc@{acc_tern*100:.2f}.pt",
         )
-        torch.save({"model": tern.state_dict(), "acc_tern": acc_tern}, tern_path)
+        torch.save({"model": ternary_model.state_dict(), "acc_tern": acc_tern}, tern_path)
         trainer.print(f"[OK] exported ternary PoT -> {tern_path}")
 
 
 # ----------------------------
 # AccelTrainer
 # ----------------------------
+class StepMetricsAccumulator:
+    """
+    Accumulates (value * batch_size) and batch_size across micro-steps.
+    On compute: all-reduces numerator/denominator and returns GLOBAL weighted means.
+    """
+
+    def __init__(self, accelerator: Accelerator):
+        self.acc = accelerator
+        self.reset()
+
+    def reset(self) -> None:
+        self.num: Dict[str, torch.Tensor] = {}
+        self.den: torch.Tensor = torch.zeros((), device=self.acc.device)
+
+    def _to_scalar(self, v: Any) -> Optional[torch.Tensor]:
+        if v is None:
+            return None
+        if torch.is_tensor(v):
+            t = v.detach()
+            t = t.float().mean() if t.numel() != 1 else t.float()
+            return t.to(self.acc.device)
+        try:
+            return torch.tensor(float(v), device=self.acc.device, dtype=torch.float32)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _stage_prefix(stage: str, key: str) -> str:
+        # enforce "train/..." or "val/..." unless user already provided a prefix
+        return key if "/" in key else f"{stage}/{key}"
+
+    def update(self, metrics_obj: Any, batch_size: int, stage: str) -> None:
+        bs = torch.tensor(float(batch_size), device=self.acc.device, dtype=torch.float32)
+        self.den = self.den + bs
+
+        # stable loss key
+        loss = getattr(metrics_obj, "loss", None)
+        if loss is not None:
+            t = self._to_scalar(loss)
+            if t is not None:
+                k = f"{stage}/loss"
+                self.num[k] = self.num.get(k, torch.zeros((), device=self.acc.device)) + t * bs
+
+        # arbitrary metric keys (stage-prefixed)
+        for k, v in getattr(metrics_obj, "metrics", {}).items():
+            t = self._to_scalar(v)
+            if t is None:
+                continue
+            k = self._stage_prefix(stage, str(k))
+            self.num[k] = self.num.get(k, torch.zeros((), device=self.acc.device)) + t * bs
+
+    def _union_keys_across_ranks(self, local_keys) -> List[str]:
+        local_keys = list(map(str, list(local_keys)))
+
+        if self.acc.num_processes == 1:
+            return sorted(set(local_keys))
+
+        gathered = gather_object(local_keys)
+
+        if self.acc.is_main_process:
+            if gathered is None:
+                flat = local_keys
+            elif isinstance(gathered, (list, tuple)):
+                if gathered and isinstance(gathered[0], (list, tuple)):
+                    flat = [k for sub in gathered for k in sub]
+                else:
+                    flat = list(gathered)
+            else:
+                flat = [str(gathered)]
+            union = sorted(set(map(str, flat)))
+        else:
+            union = None
+
+        obj = [union]
+        broadcast_object_list(obj, from_process=0)
+        return obj[0]
+
+    def compute_global_means_and_reset(self) -> Dict[str, torch.Tensor]:
+        means, _count = self.compute_global_means_count_and_reset()
+        return means
+
+    def compute_global_means_count_and_reset(self) -> Tuple[Dict[str, torch.Tensor], int]:
+        """
+        IMPORTANT: call on ALL ranks (no main-process guard), otherwise you can deadlock.
+        Returns: (means_dict, global_sample_count)
+        """
+        den_tot = self.acc.reduce(self.den, reduction="sum")
+        if float(den_tot.item()) <= 0:
+            self.reset()
+            return {}, 0
+
+        keys = self._union_keys_across_ranks(self.num.keys())
+        zero = torch.zeros((), device=self.acc.device)
+
+        out: Dict[str, torch.Tensor] = {}
+        for k in keys:
+            num_k = self.num.get(k, zero)
+            num_tot = self.acc.reduce(num_k, reduction="sum")
+            out[k] = (num_tot / den_tot).detach()
+
+        count = int(den_tot.detach().cpu().item())
+        self.reset()
+        return out, count
 
 
 class AccelTrainer:
@@ -244,6 +362,7 @@ class AccelTrainer:
         )
         self.max_grad_norm = max_grad_norm
         self.show_progress_bar = show_progress_bar
+        self.log_every_n_steps = int(log_every_n_steps)
 
         self.model: Optional["AccelLightningModule"] = None
         self.optimizer: Optional[torch.optim.Optimizer] = None
@@ -263,11 +382,6 @@ class AccelTrainer:
                 ]
             )
         self.metrics_manager = metrics_manager
-
-        self.log_every_n_steps = int(log_every_n_steps)
-
-        self.last_train_summary: Optional["Metrics"] = None
-        self.last_val_summary: Optional["Metrics"] = None
 
     # -----------------------------
     # Public API
@@ -295,16 +409,17 @@ class AccelTrainer:
         model.on_fit_start(self.accelerator)
 
         for epoch in range(self.max_epochs):
-            self._train_one_epoch(epoch, train_dataloader)
+            self._run_epoch(stage="train", epoch=epoch, loader=train_dataloader)
             if val_dataloader is not None:
-                self._validate_one_epoch(epoch, val_dataloader)
+                self._run_epoch(stage="val", epoch=epoch, loader=val_dataloader)
+
             if self.scheduler is not None and self.scheduler_interval == "epoch":
                 self.scheduler.step()
 
-        return self.metrics_manager.to_list()
+        return self.metrics_manager.to_list() if self.metrics_manager is not None else []
 
     # -----------------------------
-    # Fit helpers
+    # Setup helpers
     # -----------------------------
     def _resolve_dataloaders(
         self,
@@ -339,13 +454,10 @@ class AccelTrainer:
         val_dataloader: Optional[DataLoader],
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     ):
-        objs = [model, optimizer, train_dataloader]
-        has_val = val_dataloader is not None
-        has_sched = scheduler is not None
-
-        if has_val:
+        objs: List[Any] = [model, optimizer, train_dataloader]
+        if val_dataloader is not None:
             objs.append(val_dataloader)
-        if has_sched:
+        if scheduler is not None:
             objs.append(scheduler)
 
         prepared = self.accelerator.prepare(*objs)
@@ -356,55 +468,48 @@ class AccelTrainer:
         train_p = prepared[idx]; idx += 1
 
         val_p = None
-        if has_val:
+        if val_dataloader is not None:
             val_p = prepared[idx]; idx += 1
 
         sched_p = None
-        if has_sched:
+        if scheduler is not None:
             sched_p = prepared[idx]; idx += 1
 
         return model_p, optim_p, train_p, val_p, sched_p
 
     # -----------------------------
-    # Logging / tqdm
+    # Printing / tqdm / logging
     # -----------------------------
     def print(self, msg: str) -> None:
-        if self.accelerator.is_local_main_process:
+        if self.accelerator.is_main_process:
             tqdm.write(msg)
 
-    def log_step(
-        self,
-        stage: str,
-        epoch: int,
-        step: int,
-        metrics: "Metrics",
-        model,
-        pbar: tqdm,
-        force_print: bool = False,
-    ):
-        if not self.accelerator.is_local_main_process:
+    def _pbar(self, loader: DataLoader, stage: str, epoch: int):
+        if not (self.show_progress_bar and self.accelerator.is_main_process):
+            return loader
+        return tqdm(loader, desc=f"{stage} {epoch+1}", leave=False, dynamic_ncols=True)
+
+    def _log(self, metrics: "Metrics", trainer_model: nn.Module, pbar, *, force_print: bool = False) -> None:
+        # ✅ only main logs (prevents duplicate stdout + duplicate MetricsManager rows)
+        if not self.accelerator.is_main_process:
             return
 
-        self.metrics_manager.log(metrics, self, model)
+        if self.metrics_manager is not None:
+            self.metrics_manager.log(metrics, self, trainer_model)
 
         postfix = metrics.to_dict()
         if hasattr(pbar, "set_postfix"):
             pbar.set_postfix(postfix, refresh=False)
 
+        step = metrics.step or 0
         if (step % self.log_every_n_steps == 0) or force_print:
-            self.print(f"[{stage}] epoch={epoch} step={step} {postfix}")
-
-    def tqdm(self, data_loader, stage: str, epoch: int):
-        is_main = self.accelerator.is_local_main_process
-        return tqdm(data_loader, desc=f"{stage} {epoch+1}", leave=False, dynamic_ncols=True) if (
-            self.show_progress_bar and is_main
-        ) else data_loader
+            self.print(f"[{metrics.stage}] epoch={metrics.epoch} step={step} {postfix}")
 
     # -----------------------------
     # Utilities
     # -----------------------------
     def _infer_batch_size(self, batch: Any) -> int:
-        if isinstance(batch, (tuple, list)) and len(batch) > 0 and hasattr(batch[0], "size"):
+        if isinstance(batch, (tuple, list)) and batch and hasattr(batch[0], "size"):
             return int(batch[0].size(0))
         if isinstance(batch, dict):
             for v in batch.values():
@@ -412,205 +517,131 @@ class AccelTrainer:
                     return int(v.size(0))
         return 1
 
-    def _to_device_scalar(self, v: Any) -> Optional[torch.Tensor]:
-        if v is None:
-            return None
-        if torch.is_tensor(v):
-            t = v.detach()
-            if t.numel() != 1:
-                t = t.float().mean()
-            else:
-                t = t.float()
-            return t.to(self.accelerator.device)
-        try:
-            return torch.tensor(float(v), device=self.accelerator.device, dtype=torch.float32)
-        except Exception:
-            return None
-
-    def _accum_weighted(self, sums: Dict[str, torch.Tensor], metrics: "Metrics", batch_size: int, stage: str) -> torch.Tensor:
-        bs = torch.tensor(float(batch_size), device=self.accelerator.device, dtype=torch.float32)
-
-        if metrics.loss is not None:
-            l = self._to_device_scalar(metrics.loss)
-            if l is not None:
-                k = f"{stage}/loss"
-                sums[k] = sums.get(k, torch.zeros((), device=self.accelerator.device)) + l * bs
-
-        for k, v in metrics.metrics.items():
-            t = self._to_device_scalar(v)
-            if t is None:
-                continue
-            sums[k] = sums.get(k, torch.zeros((), device=self.accelerator.device)) + t * bs
-
-        return bs
-
-    def _union_metric_keys_across_ranks(self, local_keys: List[str]) -> List[str]:
-        """
-        Ensures every rank reduces the same set of metric keys, even if some ranks
-        didn't log certain keys in an epoch.
-        """
-        local_keys = list(local_keys)
-
-        if self.accelerator.num_processes == 1:
-            return sorted(set(local_keys))
-
-        gathered = gather_object(local_keys)
-
-        # accelerate.utils.gather_object() often returns a *flat* list across ranks for lists,
-        # but we defensively handle nested structures too.
-        if gathered is None:
-            gathered_keys: List[str] = local_keys
-        elif isinstance(gathered, (list, tuple)):
-            if len(gathered) > 0 and isinstance(gathered[0], (list, tuple)):
-                gathered_keys = [k for sub in gathered for k in sub]
-            else:
-                gathered_keys = list(gathered)
-        else:
-            gathered_keys = [str(gathered)]
-
-        union = sorted(set(map(str, gathered_keys)))
-
-        # Make ordering identical on all ranks (safe even if union already matches)
-        obj = [union]
-        broadcast_object_list(obj, from_process=0)
-        return obj[0]
-
-    def _reduce_epoch_means(self, stage: str, epoch: int, sums: Dict[str, torch.Tensor], n: torch.Tensor) -> "Metrics":
-        n_tot = self.accelerator.reduce(n, reduction="sum")
-
-        if float(n_tot.item()) <= 0:
-            return Metrics(stage=stage, epoch=epoch, step=None, batch_size=0, loss=None, metrics={})
-
-        # ✅ union keys across processes so we don't "drop" metrics that only appeared on some ranks
-        keys = self._union_metric_keys_across_ranks(list(sums.keys()))
-
-        out: Dict[str, Any] = {}
-        zero = torch.zeros((), device=self.accelerator.device)
-
-        for k in keys:
-            s = sums.get(k, zero)
-            s_tot = self.accelerator.reduce(s, reduction="sum")
-            out[f"{k}_mean"] = (s_tot / n_tot).detach()
-
-        return Metrics(stage=stage, epoch=epoch, step=None, batch_size=int(n_tot.item()), loss=None, metrics=out)
-
     def _maybe_set_dataloader_epoch(self, loader: Any, epoch: int) -> None:
-        """
-        Supports both standard PyTorch DistributedSampler and Accelerate's wrapped dataloaders.
-        """
         if hasattr(loader, "set_epoch"):
             try:
                 loader.set_epoch(epoch)
                 return
             except TypeError:
                 pass
-
         sampler = getattr(loader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
 
     # -----------------------------
-    # Training / Validation
+    # Epoch runner using StepMetricsAccumulator
     # -----------------------------
-    def _train_one_epoch(self, epoch: int, train_loader: DataLoader) -> None:
+    @staticmethod
+    def _mean_key(k: str) -> str:
+        # avoid "_mean_mean"
+        return k if k.endswith("_mean") else f"{k}_mean"
+
+    def _run_epoch(self, stage: Literal["train", "val"], epoch: int, loader: DataLoader) -> "Metrics":
         assert self.model is not None
-        assert self.optimizer is not None
+        if stage == "train":
+            assert self.optimizer is not None
 
-        self.model.on_train_epoch_start(epoch)
+        model = self.model
+        optimizer = self.optimizer
+        accelerator = self.accelerator
 
-        # ✅ correct shuffling for DistributedSampler / wrapped loaders
-        self._maybe_set_dataloader_epoch(train_loader, epoch)
+        # hooks + mode
+        if stage == "train":
+            model.on_train_epoch_start(epoch)
+            model.train()
+        else:
+            model.on_validation_epoch_start(epoch)
+            model.eval()
 
-        model = self.model.train()
-        stage = "train"
-        pbar = self.tqdm(train_loader, stage, epoch)
+        self._maybe_set_dataloader_epoch(loader, epoch)
+        pbar = self._pbar(loader, stage, epoch)
 
-        sums: Dict[str, torch.Tensor] = {}
-        n = torch.zeros((), device=self.accelerator.device)
+        # ✅ global epoch accumulator (works for BOTH train/val)
+        epoch_accum = StepMetricsAccumulator(accelerator)
 
-        step = -1
-        for step, batch in enumerate(pbar):
+        # ✅ train-only window accumulator (micro-steps -> optimizer-step)
+        step_accum = StepMetricsAccumulator(accelerator) if stage == "train" else None
+        opt_step = -1
+        last_micro_step = -1
+
+        for micro_step, batch in enumerate(pbar):
+            last_micro_step = micro_step
             bs = self._infer_batch_size(batch)
 
-            with self.accelerator.accumulate(model):
-                m = model.training_step(batch, step).model_copy(
-                    update=dict(stage=stage, epoch=epoch, step=step, batch_size=bs)
-                )
+            if stage == "train":
+                with accelerator.accumulate(model):
+                    m = model.training_step(batch, micro_step).model_copy(
+                        update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
+                    )
 
-                self.log_step(stage=stage, epoch=epoch, step=step, metrics=m, model=model, pbar=pbar)
+                    # accumulate for epoch + optimizer-step window
+                    epoch_accum.update(m, batch_size=bs, stage=stage)
+                    step_accum.update(m, batch_size=bs, stage=stage)
 
-                # global epoch mean accumulation
-                n = n + self._accum_weighted(sums, m, bs, stage)
+                    if m.loss is None:
+                        raise ValueError("training_step must return Metrics with loss (got loss=None)")
 
-                if m.loss is None:
-                    raise ValueError("training_step must return Metrics with loss (got loss=None)")
-                self.accelerator.backward(m.loss)
+                    accelerator.backward(m.loss)
 
-                if self.accelerator.sync_gradients:
-                    if self.max_grad_norm is not None:
-                        self.accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                    if accelerator.sync_gradients:
+                        if self.max_grad_norm is not None:
+                            accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm)
 
-                    self.optimizer.step()
-                    self.optimizer.zero_grad(set_to_none=True)
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
 
-                    if self.scheduler is not None and self.scheduler_interval == "step":
-                        self.scheduler.step()
+                        if self.scheduler is not None and self.scheduler_interval == "step":
+                            self.scheduler.step()
 
-        summary = self._reduce_epoch_means(stage=stage, epoch=epoch, sums=sums, n=n)
+                        # ✅ log ONE global mean row per optimizer step
+                        opt_step += 1
+                        step_means, step_count = step_accum.compute_global_means_count_and_reset()  # ALL ranks
 
-        self.log_step(
+                        loss_key = f"{stage}/loss"
+                        step_loss = step_means.pop(loss_key, None)
+
+                        step_row = Metrics(
+                            stage=stage,
+                            epoch=epoch,
+                            step=opt_step,          # optimizer-step index
+                            batch_size=step_count,  # true global samples in this window
+                            loss=step_loss,
+                            metrics=step_means,
+                        )
+                        self._log(step_row, trainer_model=model, pbar=pbar)
+
+            else:
+                with torch.no_grad():
+                    m = model.validation_step(batch, micro_step).model_copy(
+                        update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
+                    )
+
+                # ✅ accumulate epoch stats (global mean at end)
+                epoch_accum.update(m, batch_size=bs, stage=stage)
+
+        # ✅ global epoch means (ALL ranks)
+        epoch_means, epoch_count = epoch_accum.compute_global_means_count_and_reset()
+
+        # keep your previous convention: *_mean keys in epoch summary (no double-mean)
+        summary_metrics = {self._mean_key(k): v for k, v in epoch_means.items()}
+        summary = Metrics(
             stage=stage,
             epoch=epoch,
-            step=max(step, 0),
-            metrics=summary,
-            model=model,
-            pbar=pbar,
-            force_print=True,
+            step=max(last_micro_step, 0),
+            batch_size=epoch_count,  # true global samples in epoch
+            loss=None,
+            metrics=summary_metrics,
         )
+        self._log(summary, trainer_model=model, pbar=pbar, force_print=True)
 
-        model.on_train_epoch_end(epoch)
+        # end hooks
+        if stage == "train":
+            model.on_train_epoch_end(epoch)
+        else:
+            model.on_validation_epoch_end(epoch)
+
         return summary
 
-    @torch.no_grad()
-    def _validate_one_epoch(self, epoch: int, val_loader: DataLoader) -> "Metrics":
-        assert self.model is not None
-        model = self.model.eval()
-        stage = "val"
-
-        model.on_validation_epoch_start(epoch)
-
-        pbar = self.tqdm(val_loader, stage, epoch)
-
-        sums: Dict[str, torch.Tensor] = {}
-        n = torch.zeros((), device=self.accelerator.device)
-
-        step = -1
-        for step, batch in enumerate(pbar):
-            bs = self._infer_batch_size(batch)
-
-            m = model.validation_step(batch, step).model_copy(
-                update=dict(stage=stage, epoch=epoch, step=step, batch_size=bs)
-            )
-
-            self.log_step(stage=stage, epoch=epoch, step=step, metrics=m, model=model, pbar=pbar)
-
-            n = n + self._accum_weighted(sums, m, bs, stage)
-
-        summary = self._reduce_epoch_means(stage=stage, epoch=epoch, sums=sums, n=n)
-
-        self.log_step(
-            stage=stage,
-            epoch=epoch,
-            step=max(step, 0),
-            metrics=summary,
-            model=model,
-            pbar=pbar,
-            force_print=True,
-        )
-
-        model.on_validation_epoch_end(epoch)
-        return summary
-    
 # ----------------------------
 # KD + hints + ternary eval/export
 # ----------------------------
