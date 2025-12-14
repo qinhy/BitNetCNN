@@ -14,8 +14,7 @@ from accelerate import Accelerator
 from accelerate.utils import gather_object, broadcast_object_list
 from tqdm.auto import tqdm
 
-from bitlayers.bit import Bit
-from common_utils import DataModuleConfig, DataSetModule
+from dataset import DataModuleConfig, DataSetModule
 
 torch.set_float32_matmul_precision("high")
 
@@ -270,12 +269,12 @@ class StepMetricsAccumulator:
         # enforce "train/..." or "val/..." unless user already provided a prefix
         return key if "/" in key else f"{stage}/{key}"
 
-    def update(self, metrics_obj: Any, batch_size: int, stage: str) -> None:
+    def update(self, metrics_obj: Metrics, batch_size: int, stage: str) -> None:
         bs = torch.tensor(float(batch_size), device=self.acc.device, dtype=torch.float32)
         self.den = self.den + bs
 
         # stable loss key
-        loss = getattr(metrics_obj, "loss", None)
+        loss = metrics_obj.loss
         if loss is not None:
             t = self._to_scalar(loss)
             if t is not None:
@@ -283,7 +282,7 @@ class StepMetricsAccumulator:
                 self.num[k] = self.num.get(k, torch.zeros((), device=self.acc.device)) + t * bs
 
         # arbitrary metric keys (stage-prefixed)
-        for k, v in getattr(metrics_obj, "metrics", {}).items():
+        for k, v in metrics_obj.metrics.items():
             t = self._to_scalar(v)
             if t is None:
                 continue
@@ -406,7 +405,7 @@ class AccelTrainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
 
-        model.on_fit_start(self.accelerator)
+        self.accelerator.unwrap_model(model).on_fit_start(self.accelerator)
 
         for epoch in range(self.max_epochs):
             self._run_epoch(stage="train", epoch=epoch, loader=train_dataloader)
@@ -542,15 +541,16 @@ class AccelTrainer:
             assert self.optimizer is not None
 
         model = self.model
+        raw_model:LitBit = self.accelerator.unwrap_model(model)
         optimizer = self.optimizer
         accelerator = self.accelerator
 
         # hooks + mode
         if stage == "train":
-            model.on_train_epoch_start(epoch)
+            raw_model.on_train_epoch_start(epoch)
             model.train()
         else:
-            model.on_validation_epoch_start(epoch)
+            raw_model.on_validation_epoch_start(epoch)
             model.eval()
 
         self._maybe_set_dataloader_epoch(loader, epoch)
@@ -570,10 +570,11 @@ class AccelTrainer:
 
             if stage == "train":
                 with accelerator.accumulate(model):
-                    m = model.training_step(batch, micro_step).model_copy(
+                    m = raw_model.training_step(batch, micro_step).model_copy(
                         update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
                     )
-
+                    m.metrics['lr'] = optimizer.param_groups[0]["lr"]
+                    
                     # accumulate for epoch + optimizer-step window
                     epoch_accum.update(m, batch_size=bs, stage=stage)
                     step_accum.update(m, batch_size=bs, stage=stage)
@@ -612,7 +613,7 @@ class AccelTrainer:
 
             else:
                 with torch.no_grad():
-                    m = model.validation_step(batch, micro_step).model_copy(
+                    m = raw_model.validation_step(batch, micro_step).model_copy(
                         update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
                     )
 
@@ -636,9 +637,9 @@ class AccelTrainer:
 
         # end hooks
         if stage == "train":
-            model.on_train_epoch_end(epoch)
+            raw_model.on_train_epoch_end(epoch)
         else:
-            model.on_validation_epoch_end(epoch)
+            raw_model.on_validation_epoch_end(epoch)
 
         return summary
 

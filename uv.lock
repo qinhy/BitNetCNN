@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'win32'",
@@ -60,7 +60,6 @@ dependencies = [
     { name = "accelerate" },
     { name = "pillow" },
     { name = "pydanticv2-argparse" },
-    { name = "timm" },
     { name = "torch" },
     { name = "torchmetrics" },
     { name = "torchvision" },
@@ -74,7 +73,6 @@ dev = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "onnxscript" },
-    { name = "timm" },
 ]
 
 [package.metadata]
@@ -82,7 +80,6 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.12.0" },
     { name = "pillow", specifier = ">=11.3.0" },
     { name = "pydanticv2-argparse", specifier = ">=1.0.5" },
-    { name = "timm", specifier = ">=1.0.20" },
     { name = "torch", specifier = "==2.4.1+cu124", index = "https://download.pytorch.org/whl/cu124" },
     { name = "torchmetrics", specifier = ">=1.8.2" },
     { name = "torchvision", specifier = "==0.19.1+cu124", index = "https://download.pytorch.org/whl/cu124" },
@@ -96,7 +93,6 @@ dev = [
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "onnxscript", specifier = "<0.4" },
-    { name = "timm", specifier = ">=1.0.20" },
 ]
 
 [[package]]
@@ -1650,22 +1646,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
-]
-
-[[package]]
-name = "timm"
-version = "1.0.20"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "torchvision" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b5/ba/6f5d96622a4a9fc315da53f58b3ca224c66015efe40aa191df0d523ede7c/timm-1.0.20.tar.gz", hash = "sha256:7468d32a410c359181c1ef961f49c7e213286e0c342bfb898b99534a4221fc54", size = 2360052, upload-time = "2025-09-21T17:26:35.492Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/74/5573615570bf010f788e977ac57c4b49db0aaf6d634134f6a9212d8dcdfd/timm-1.0.20-py3-none-any.whl", hash = "sha256:f6e62f780358476691996c47aa49de87b95cc507edf923c3042f74a07e45b7fe", size = 2504047, upload-time = "2025-09-21T17:26:33.487Z" },
 ]
 
 [[package]]
