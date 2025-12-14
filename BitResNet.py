@@ -18,7 +18,7 @@ from bitlayers.convs import Conv2dModels
 from bitlayers.bit import Bit
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels
-from common_utils import DataModuleConfig
+from dataset import DataModuleConfig
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig
 
 
