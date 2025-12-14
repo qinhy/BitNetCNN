@@ -85,7 +85,7 @@ class Metrics(BaseModel):
     def get(self, key: str, default: Optional[float] = None) -> Any:
         return self.metrics.get(key, default)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self,digits=7) -> Dict[str, Any]:
         res: Dict[str, Any] = {f"{self.stage}/loss": self.loss}
         res.update(self.metrics)
 
@@ -97,6 +97,10 @@ class Metrics(BaseModel):
                 out[k] = float(v.detach().cpu().item())
             else:
                 out[k] = v
+            try:                
+                out[k] = float((f'{out[k]}')[:digits])
+            except:
+                pass
         return out
 
 
@@ -496,13 +500,14 @@ class AccelTrainer:
         if self.metrics_manager is not None:
             self.metrics_manager.log(metrics, self, trainer_model)
 
-        postfix = metrics.to_dict()
+        postfix = metrics.to_dict(7)
         if hasattr(pbar, "set_postfix"):
             pbar.set_postfix(postfix, refresh=False)
 
         step = metrics.step or 0
         if (step % self.log_every_n_steps == 0) or force_print:
-            self.print(f"[{metrics.stage}] epoch={metrics.epoch} step={step} {postfix}")
+            h = f"[{metrics.stage}]epoch={metrics.epoch} step={step}"
+            self.print(f"{h} {str(postfix).replace(metrics.stage+'/','')}")
 
     # -----------------------------
     # Utilities
@@ -968,7 +973,22 @@ class LitBit(AccelLightningModule):
             weight_decay=self.wd,
             nesterov=True,
         )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
+
+        def auto_n_restarts_T0(max_epochs: int, T_mult: int = 2, min_T0: int = 20, n_restarts_max: int = 10):
+            for n_restarts in range(n_restarts_max, -1, -1):
+                n_cycles = n_restarts + 1
+                if T_mult == 1:
+                    T0 = math.ceil(max_epochs / n_cycles)
+                else:
+                    T0 = math.ceil(max_epochs * (T_mult - 1) / (T_mult**n_cycles - 1))
+                if T0 >= min_T0:
+                    return n_restarts, T0
+            return 0, max_epochs
+        
+        # Good 400-epoch default
+        sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            opt, T_0=auto_n_restarts_T0(self.epochs), T_mult=2, eta_min=1e-6
+        )
         return opt, sched, "epoch"
 
 
