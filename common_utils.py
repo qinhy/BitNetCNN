@@ -131,14 +131,18 @@ def summ(model, verbose=True, include_buffers=True):
                 sorted(str(dt).replace("torch.", "") for dt in dtypes)
             )
         else:
-            dtype_str = "-"
+            dtype_str = "-" + " "*14
 
+        out_chs = ""
+        if hasattr(module,'out_channels'):
+            out_chs = f"out_channels={module.out_channels}"
+            
         row = (name, module.__class__.__name__, nparams, dtype_str)
         info.append(row)
 
         if verbose:
-            print(f"{name:40} {module.__class__.__name__:20} "
-                  f"params={nparams:10d}  dtypes={dtype_str}")
+            print(f"{name:35} {module.__class__.__name__:25} "
+                  f"params={nparams:8d}  dtypes={dtype_str:15} {out_chs}")
     return info
 
 @torch.no_grad()

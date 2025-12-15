@@ -2,14 +2,13 @@
 from pydanticV2_argparse import ArgumentParser
 import torch
 
-from dataset import DataModuleConfig
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
-from torchmetrics.classification import MulticlassAccuracy
 
 # Import from common_utils
 from common_utils import *
+from dataset import DataModuleConfig
 from bitlayers import bit, convs
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels

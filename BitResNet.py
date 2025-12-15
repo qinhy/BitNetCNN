@@ -1,5 +1,4 @@
-import argparse
-from typing import Callable, Dict, Iterable, Literal, Optional, Tuple
+from typing import Callable, Dict, Iterable, Literal, Tuple
 
 from pydantic import Field
 from pydanticV2_argparse import ArgumentParser
