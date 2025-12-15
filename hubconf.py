@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 
 from BitNetCNN import NetCNN
-from common_utils import Bit, convert_to_ternary  # noqa: F401 (Bit may be used externally)
+from common_utils import convert_to_ternary
 
 # ---------------------------------------------------------------------
 # Constants & dataset registry
@@ -285,14 +285,13 @@ def bitnet_resnet(
     ds = _canon_dataset(dataset)
     model_size = str(model_size)
 
+    from BitResNet import BitResNet,BasicBlockBit,BottleneckBit
     if model_size == "18":
-        from BitResNet import BitResNet18
 
-        model = BitResNet18(num_classes=_num_classes_for(ds), scale_op=scale_op)
+        model = BitResNet(BasicBlockBit, [2, 2, 2, 2], _num_classes_for(ds), 1, scale_op, 3, True)
     elif model_size == "50":
-        from BitResNet import BitResNet50
 
-        model = BitResNet50(num_classes=_num_classes_for(ds), scale_op=scale_op)
+        model = BitResNet(BottleneckBit, [3, 4, 6, 3], _num_classes_for(ds), 4, scale_op, 3, True)
     else:
         raise ValueError(f"Unsupported model_size='{model_size}'. Use '18' or '50'.")
 
