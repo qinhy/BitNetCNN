@@ -987,7 +987,7 @@ class LitBit(AccelLightningModule):
         
         # Good 400-epoch default
         sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            opt, T_0=auto_n_restarts_T0(self.epochs), T_mult=2, eta_min=1e-6
+            opt, T_0=auto_n_restarts_T0(self.epochs)[1], T_mult=2, eta_min=1e-6
         )
         return opt, sched, "epoch"
 
