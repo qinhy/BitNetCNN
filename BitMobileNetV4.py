@@ -379,17 +379,11 @@ class MobileNetV4(nn.Module):
         self.num_classes = num_classes
         self.spec = MobileNetV4.MODEL_SPECS[self.model_name]()
        
-        # conv0
         self.conv0 = self.spec['conv0']
-        # layer1
         self.layer1 = self.spec['layer1']
-        # layer2
         self.layer2 = self.spec['layer2']
-        # layer3
         self.layer3 = self.spec['layer3']
-        # layer4
         self.layer4 = self.spec['layer4']
-        # layer5   
         self.layer5 = self.spec['layer5']
 
         # print("Check output shape ...")
