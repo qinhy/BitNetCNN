@@ -207,9 +207,7 @@ class LitBitMBv2KD(LitBit):
             config.teacher = None
         else:
             raise ValueError(f"Unsupported dataset: {ds}")
-        summ(config.student)
-        summ(config.teacher)
-
+        
         config.model_name = config.model_name or "mbv2"
         config.model_size = config.model_size or f"x{int(width_mult*100)}"
 
@@ -234,11 +232,15 @@ class Config(CommonTrainConfig):
 
     num_workers: int = 1
 
-    batch_size:int=256
-    label_smoothing:float=0.1
-    alpha_kd:float=0.3
-    alpha_hint:float=0.05
-    T:float=4.0
+    batch_size:int = 512
+    epochs:int = 10
+
+    mixup: bool = True
+    cutmix: bool = True
+
+    lr: float = 0.2
+    alpha_kd: float = 0.3
+    alpha_hint: float = 0.05
 
     scale_op:str="median"
     export_dir:str="./ckpt_c100_mbv2"
