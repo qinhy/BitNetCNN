@@ -909,6 +909,14 @@ class LitBit(AccelLightningModule):
         logd = {**logd, "train/kd": loss_kd.detach()}
         return loss, logd, logits
 
+    def _ce_hint_training_step(self, x: torch.Tensor, y: torch.Tensor):
+        z_t = self.teacher_forward(x)
+        loss, logd, logits = self._ce_training_step(x, y)
+        loss_hint = self.get_loss_hint()
+        loss = loss + loss_hint
+        logd = {**logd, "train/hint": loss_hint.detach()}
+        return loss, logd, logits
+    
     def _ce_kd_hint_training_step(self, x: torch.Tensor, y: torch.Tensor):
         loss, logd, logits = self._ce_kd_training_step(x, y)
         loss_hint = self.get_loss_hint()
@@ -921,8 +929,12 @@ class LitBit(AccelLightningModule):
 
         if self.kd is not None and self.hint is not None:
             loss, logd, logits = self._ce_kd_hint_training_step(x, y)
-        elif self.kd is not None:
+
+        elif self.kd is not None and self.hint is None:
             loss, logd, logits = self._ce_kd_training_step(x, y)
+
+        elif self.kd is None and self.hint is not None:
+            loss, logd, logits = self._ce_hint_training_step(x, y)
         else:
             loss, logd, logits = self._ce_training_step(x, y)
 
