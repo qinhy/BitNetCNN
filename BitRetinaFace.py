@@ -4,9 +4,6 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
 from pydantic import BaseModel, Field, field_validator
 from pydanticV2_argparse import ArgumentParser
 import torch
@@ -30,21 +27,34 @@ BasicBlockBit = Conv2dModels.ResNetBasicBlock
 BottleneckBit = Conv2dModels.ResNetBottleneck
 
 class BitResNetBackbone(BitResNet):
-    def __init__(self, block_cls, layers, num_classes, expansion, scale_op = "median", in_ch = 3, small_stem = True):
-        super().__init__(block_cls, layers, num_classes, expansion, scale_op, in_ch, small_stem)
-        del self.head        
-        self.feature_channels = (
-            128 * expansion,
-            256 * expansion,
-            512 * expansion,
-        )
+    def __init__(self, model_size: str, scale_op: str = "median", in_ch: int = 3, small_stem: bool = True):
+        model_size = str(model_size)
+
+        if model_size == "18":
+            block_cls, layers, expansion = BasicBlockBit, [2, 2, 2, 2], 1
+        elif model_size == "50":
+            block_cls, layers, expansion = BottleneckBit, [3, 4, 6, 3], 4
+        else:
+            raise ValueError(f"Unsupported model_size={model_size!r}. Expected '18' or '50'.")
+
+        super().__init__(block_cls, layers, num_classes=1000, expansion=expansion,
+                         scale_op=scale_op, in_ch=in_ch, small_stem=small_stem)
+
+        del self.head
+        self.feature_channels = (128 * expansion, 256 * expansion, 512 * expansion)
+
     def forward(self, x: torch.Tensor):
-        c2, c3, c4, c5 = self.forward_features(x)
+        _, c3, c4, c5 = self.forward_features(x)
         return c3, c4, c5
-    
+
+
 # -----------------------------------------------------------------------------
 # RetinaFace-specific blocks
 # -----------------------------------------------------------------------------
+def _act(inplace=True):
+    return ActModels.SiLU(inplace=inplace)
+def _norm(num_features=-1):
+    return NormModels.BatchNorm2d(num_features=num_features)
 def _conv_block(
     in_ch: int, out_ch: int,
     k: int, stride: int, padding: int,
@@ -59,73 +69,80 @@ def _conv_block(
         padding=padding,
         bias=False,
         scale_op=scale_op,
-        norm=NormModels.BatchNorm2d(num_features=-1),
+        norm=_norm(),
     )
     if act:
-        return Conv2dModels.Conv2dNormAct(**conf,
-            act=ActModels.SiLU(inplace=True)).build()
+        return Conv2dModels.Conv2dNormAct(**conf,act=_act(inplace=True)).build()
     return Conv2dModels.Conv2dNorm(**conf).build()
 
 
 class BitSSH(nn.Module):
-    """Single Stage Headless context module used in RetinaFace."""
+    """Single Stage Headless (SSH) context module used in RetinaFace."""
 
     def __init__(self, in_ch: int, out_ch: int, scale_op: str = "median") -> None:
         super().__init__()
-        assert out_ch % 4 == 0, "SSH output channels must be divisible by 4."
+        if out_ch % 4 != 0:
+            raise ValueError("SSH output channels must be divisible by 4.")
+
         half = out_ch // 2
-        quarter = out_ch // 4
+        quart = out_ch // 4
 
-        self.conv3x3 = _conv_block(in_ch, half, 3, 1, 1, scale_op, act=False)
+        # 3x3 branch
+        self.branch3 = _conv_block(in_ch, half, 3, 1, 1, scale_op, act=False)
 
-        self.conv5x5_1 = _conv_block(in_ch, quarter, 3, 1, 1, scale_op)
-        self.conv5x5_2 = _conv_block(quarter, quarter, 3, 1, 1, scale_op, act=False)
+        # shared stem for 5x5 and 7x7 branches
+        self.stem5   = _conv_block(in_ch, quart, 3, 1, 1, scale_op, act=True)
 
-        self.conv7x7_2 = _conv_block(quarter, quarter, 3, 1, 1, scale_op)
-        self.conv7x7_3 = _conv_block(quarter, quarter, 3, 1, 1, scale_op, act=False)
-        self.relu = nn.ReLU(inplace=True)
+        # 5x5 branch (two 3x3 convs total)
+        self.branch5 = _conv_block(quart, quart, 3, 1, 1, scale_op, act=False)
+
+        # 7x7 branch (three 3x3 convs total; last two are here)
+        self.branch7 = nn.Sequential(
+            _conv_block(quart, quart, 3, 1, 1, scale_op, act=True),
+            _conv_block(quart, quart, 3, 1, 1, scale_op, act=False),
+        )
+
+        self.act = _act(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        c3x3 = self.conv3x3(x)
-        c5_1 = self.conv5x5_1(x)
-        c5x5 = self.conv5x5_2(c5_1)
-        c7x7 = self.conv7x7_3(self.conv7x7_2(c5_1))
-        out = torch.cat([c3x3, c5x5, c7x7], dim=1)
-        return self.relu(out)
+        c3 = self.branch3(x)
+
+        c5_1 = self.stem5(x)      # shared intermediate
+        c5 = self.branch5(c5_1)   # 5x5 path output
+        c7 = self.branch7(c5_1)   # 7x7 path output (must use c5_1)
+
+        return self.act(torch.cat((c3, c5, c7), dim=1))
 
 
 class BitFPN(nn.Module):
     def __init__(
-        self,
-        in_channels: Sequence[int],
-        out_channels: int = 256,
-        scale_op: str = "median",
-    ) -> None:
+        self, in_channels: Sequence[int], out_channels: int = 256, scale_op: str = "median"):
         super().__init__()
+
         self.lateral = nn.ModuleList(
-            [
-                _conv_block(ch, out_channels, k=1, stride=1, padding=0, scale_op=scale_op, act=False)
-                for ch in in_channels
-            ]
+            _conv_block(ch, out_channels, k=1, stride=1, padding=0, scale_op=scale_op, act=False)
+            for ch in in_channels
         )
         self.output = nn.ModuleList(
-            [
-                _conv_block(out_channels, out_channels, k=3, stride=1, padding=1, scale_op=scale_op, act=False)
-                for _ in in_channels
-            ]
+            _conv_block(out_channels, out_channels, k=3, stride=1, padding=1, scale_op=scale_op, act=False)
+            for _ in in_channels
         )
 
     def forward(self, feats: Sequence[torch.Tensor]) -> List[torch.Tensor]:
         results: List[torch.Tensor] = []
-        last = None
-        for idx in reversed(range(len(feats))):
+        last: torch.Tensor | None = None
+
+        for idx in range(len(feats) - 1, -1, -1):
             lat = self.lateral[idx](feats[idx])
+
             if last is not None:
                 lat = lat + F.interpolate(last, size=lat.shape[-2:], mode="nearest")
+
             last = lat
             results.append(self.output[idx](lat))
-        return results[::-1]
 
+        results.reverse()
+        return results
 
 class PredictionHead(nn.Module):
     def __init__(
@@ -137,17 +154,18 @@ class PredictionHead(nn.Module):
         scale_op: str = "median",
     ) -> None:
         super().__init__()
-        assert len(num_priors_per_level) == num_levels
-        self.num_levels = num_levels
+        if len(num_priors_per_level) != num_levels:
+            raise ValueError("len(num_priors_per_level) must equal num_levels")
+
         self.out_per_anchor = out_per_anchor
         self.num_priors = tuple(num_priors_per_level)
-        self.heads = nn.ModuleList()
-        for level in range(num_levels):
-            conv = nn.Sequential(
+
+        self.heads = nn.ModuleList(
+            nn.Sequential(
                 _conv_block(in_channels, in_channels, k=3, stride=1, padding=1, scale_op=scale_op),
                 Bit.Conv2d(
                     in_channels,
-                    self.num_priors[level] * out_per_anchor,
+                    priors * out_per_anchor,
                     kernel_size=1,
                     stride=1,
                     padding=0,
@@ -155,15 +173,15 @@ class PredictionHead(nn.Module):
                     scale_op=scale_op,
                 ),
             )
-            self.heads.append(conv)
+            for priors in self.num_priors
+        )
 
     def forward(self, feats: Sequence[torch.Tensor]) -> torch.Tensor:
-        outputs = []
-        for feat, head, num_priors in zip(feats, self.heads, self.num_priors):
-            pred = head(feat)
-            pred = pred.permute(0, 2, 3, 1).contiguous()
-            outputs.append(pred.view(pred.size(0), -1, self.out_per_anchor))
-        return torch.cat(outputs, dim=1)
+        preds = []
+        for feat, head in zip(feats, self.heads):
+            p = head(feat).permute(0, 2, 3, 1).contiguous()
+            preds.append(p.view(p.size(0), -1, self.out_per_anchor))
+        return torch.cat(preds, dim=1)
 
 
 class BitRetinaFace(nn.Module):
@@ -180,13 +198,16 @@ class BitRetinaFace(nn.Module):
         small_stem: bool = False,
     ) -> None:
         super().__init__()
+
         self.backbone_size = str(backbone_size)
         self.fpn_channels = fpn_channels
+        self.num_classes = num_classes
         self.num_priors = tuple(num_priors)
         self.scale_op = scale_op
-        self.num_classes = num_classes
         self.in_ch = in_ch
         self.small_stem = small_stem
+
+        num_levels = 3
 
         self.backbone = BitResNetBackbone(
             model_size=self.backbone_size,
@@ -194,25 +215,29 @@ class BitRetinaFace(nn.Module):
             scale_op=scale_op,
             small_stem=small_stem,
         )
+
         self.fpn = BitFPN(self.backbone.feature_channels, fpn_channels, scale_op=scale_op)
-        self.ssh = nn.ModuleList([BitSSH(fpn_channels, fpn_channels, scale_op=scale_op) for _ in range(3)])
+
+        self.ssh = nn.ModuleList(
+            BitSSH(fpn_channels, fpn_channels, scale_op=scale_op) for _ in range(num_levels)
+        )
 
         self.classification_head = PredictionHead(
-            num_levels=3,
+            num_levels=num_levels,
             in_channels=fpn_channels,
             out_per_anchor=num_classes,
             num_priors_per_level=self.num_priors,
             scale_op=scale_op,
         )
         self.bbox_head = PredictionHead(
-            num_levels=3,
+            num_levels=num_levels,
             in_channels=fpn_channels,
             out_per_anchor=4,
             num_priors_per_level=self.num_priors,
             scale_op=scale_op,
         )
         self.landmark_head = PredictionHead(
-            num_levels=3,
+            num_levels=num_levels,
             in_channels=fpn_channels,
             out_per_anchor=10,
             num_priors_per_level=self.num_priors,
@@ -220,13 +245,13 @@ class BitRetinaFace(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        feats = self.backbone(x)
-        feats = self.fpn(feats)
-        feats = [ssh(f) for ssh, f in zip(self.ssh, feats)]
-        cls = self.classification_head(feats)
-        bbox = self.bbox_head(feats)
-        ldm = self.landmark_head(feats)
-        return {"cls": cls, "bbox": bbox, "landmark": ldm}
+        feats = self.fpn(self.backbone(x))
+        feats = [m(f) for m, f in zip(self.ssh, feats)]
+        return {
+            "cls": self.classification_head(feats),
+            "bbox": self.bbox_head(feats),
+            "landmark": self.landmark_head(feats),
+        }
 
     def clone(self) -> "BitRetinaFace":
         model = BitRetinaFace(
@@ -240,7 +265,6 @@ class BitRetinaFace(nn.Module):
         )
         model.load_state_dict(self.state_dict(), strict=True)
         return model
-
 
 # -----------------------------------------------------------------------------
 # Anchors and target assignment
@@ -380,14 +404,6 @@ def match_anchors(
 # -----------------------------------------------------------------------------
 # Dataset / DataModule
 # -----------------------------------------------------------------------------
-def _read_annotations(path: Path) -> List[Dict]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, list):
-        raise ValueError(f"Annotation file {path} must contain a list of samples.")
-    return data
-
-
 class RetinaFaceDataset(Dataset):
     """
     Dataset wrapper that expects a JSON annotation list with entries:
@@ -410,7 +426,16 @@ class RetinaFaceDataset(Dataset):
     ) -> None:
         super().__init__()
         self.root = Path(root)
-        self.items = _read_annotations(self.root / annotation_path if not os.path.isabs(annotation_path) else Path(annotation_path))
+        
+        def _read_annotations(path: Path) -> List[Dict]:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                raise ValueError(f"Annotation file {path} must contain a list of samples.")
+            return data
+        
+        annotation_path = annotation_path if not os.path.isabs(annotation_path) else Path(annotation_path)
+        self.items = _read_annotations(self.root / annotation_path)
         self.image_size = image_size
         self.augment = augment
         self.mean = (0.485, 0.456, 0.406)
@@ -462,7 +487,6 @@ class RetinaFaceDataset(Dataset):
         }
         return image, target
 
-
 def retinaface_collate(batch):
     images = torch.stack([item[0] for item in batch])
     boxes = [item[1]["boxes"] for item in batch]
@@ -470,67 +494,10 @@ def retinaface_collate(batch):
     return images, {"boxes": boxes, "landmarks": landmarks}
 
 
-class RetinaFaceDataModule(pl.LightningDataModule):
-    def __init__(
-        self,
-        data_dir: str,
-        train_annotations: str,
-        val_annotations: str,
-        image_size: int,
-        batch_size: int,
-        num_workers: int = 4,
-    ) -> None:
-        super().__init__()
-        self.data_dir = data_dir
-        self.train_ann = train_annotations
-        self.val_ann = val_annotations
-        self.image_size = image_size
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-
-    def setup(self, stage: Optional[str] = None) -> None:
-        if stage in (None, "fit"):
-            self.train_ds = RetinaFaceDataset(
-                self.data_dir,
-                self.train_ann,
-                image_size=self.image_size,
-                augment=True,
-            )
-        if stage in (None, "fit", "validate"):
-            self.val_ds = RetinaFaceDataset(
-                self.data_dir,
-                self.val_ann,
-                image_size=self.image_size,
-                augment=False,
-            )
-
-    def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.train_ds,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=True,
-            collate_fn=retinaface_collate,
-        )
-
-    def val_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.val_ds,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            drop_last=False,
-            collate_fn=retinaface_collate,
-        )
-
-
 # -----------------------------------------------------------------------------
 # LightningModule
 # -----------------------------------------------------------------------------
-class LitRetinaFace(pl.LightningModule):
+class LitRetinaFace:
     def __init__(self, config: "RetinaFaceConfig") -> None:
         super().__init__()
         self.save_hyperparameters(config.model_dump())
@@ -685,77 +652,6 @@ class LitRetinaFace(pl.LightningModule):
 
 
 # -----------------------------------------------------------------------------
-# Callbacks / Trainer helpers
-# -----------------------------------------------------------------------------
-class ExportBestRetinaFace(Callback):
-    def __init__(self, export_dir: str, monitor: str = "val/loss") -> None:
-        super().__init__()
-        self.export_dir = export_dir
-        self.monitor = monitor
-        self.best: Optional[float] = None
-        os.makedirs(export_dir, exist_ok=True)
-
-    def _is_better(self, current: float) -> bool:
-        if self.best is None:
-            return True
-        return current < self.best
-
-    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: LitRetinaFace) -> None:
-        metrics = trainer.callback_metrics
-        if self.monitor not in metrics:
-            return
-        current = metrics[self.monitor].item()
-        if not self._is_better(current):
-            return
-        self.best = current
-        fp_model = pl_module.model.clone().cpu()
-        fp_path = os.path.join(
-            self.export_dir,
-            f"bit_retinaface_{pl_module.model_size}_best_fp_loss={current:.4f}.pt",
-        )
-        torch.save({"model": fp_model.state_dict(), "val_loss": current}, fp_path)
-
-        ternary = convert_to_ternary(fp_model).cpu()
-        tern_path = os.path.join(
-            self.export_dir,
-            f"bit_retinaface_{pl_module.model_size}_ternary_loss={current:.4f}.pt",
-        )
-        torch.save({"model": ternary.state_dict(), "val_loss": current}, tern_path)
-        pl_module.print(f"[OK] Exported checkpoints to {fp_path} and {tern_path}")
-
-
-def setup_retinaface_trainer(config: "RetinaFaceConfig") -> pl.Trainer:
-    pl.seed_everything(config.seed, workers=True)
-    os.makedirs(config.export_dir, exist_ok=True)
-    logger = CSVLogger(save_dir=config.export_dir, name="logs")
-    ckpt_cb = ModelCheckpoint(
-        monitor="val/loss",
-        mode="min",
-        save_top_k=1,
-        save_last=True,
-        filename="retinaface-{epoch:03d}-{val_loss:.4f}",
-    )
-    lr_cb = LearningRateMonitor(logging_interval="epoch")
-    export_cb = ExportBestRetinaFace(config.export_dir)
-
-    devices = config.gpus
-    strategy = config.strategy
-    accelerator = "cpu" if config.cpu else "auto"
-    trainer = pl.Trainer(
-        max_epochs=config.epochs,
-        accelerator=accelerator,
-        devices=devices,
-        strategy=strategy,
-        precision="16-mixed" if config.amp else "32-true",
-        logger=logger,
-        callbacks=[ckpt_cb, lr_cb, export_cb],
-        log_every_n_steps=25,
-        num_sanity_val_steps=0,
-    )
-    return trainer
-
-
-# -----------------------------------------------------------------------------
 # CLI
 # -----------------------------------------------------------------------------
 class RetinaFaceConfig(BaseModel):
@@ -809,17 +705,17 @@ def main() -> None:
     parser = ArgumentParser(model=RetinaFaceConfig)
     config = parser.parse_typed_args()
 
-    dm = RetinaFaceDataModule(
-        data_dir=config.data_dir,
-        train_annotations=config.train_annotations,
-        val_annotations=config.val_annotations,
-        image_size=config.image_size,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-    )
-    model = LitRetinaFace(config)
-    trainer = setup_retinaface_trainer(config)
-    trainer.fit(model, datamodule=dm)
+    # dm = RetinaFaceDataModule(
+    #     data_dir=config.data_dir,
+    #     train_annotations=config.train_annotations,
+    #     val_annotations=config.val_annotations,
+    #     image_size=config.image_size,
+    #     batch_size=config.batch_size,
+    #     num_workers=config.num_workers,
+    # )
+    # model = LitRetinaFace(config)
+    # trainer = setup_retinaface_trainer(config)
+    # trainer.fit(model, datamodule=dm)
 
 
 if __name__ == "__main__":
