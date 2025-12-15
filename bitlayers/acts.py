@@ -323,7 +323,7 @@ class ActModels:
 
     class Sigmoid(_InplaceActBase):
         def build(self) -> nn.Module:
-            return self._build(nn.Sigmoid)
+            return nn.Sigmoid()
 
     class Tanh(_InplaceActBase):
         def build(self) -> nn.Module:
