@@ -1,11 +1,19 @@
-import argparse
+from typing import Literal, Optional
+
+from pydantic import Field
 from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
+
 from bitlayers import convs
+from bitlayers.bit import Bit
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels
-from common_utils import *
+from common_utils import summ
+from dataset import DataModuleConfig
+from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig
+
+torch.set_float32_matmul_precision("high")
 
 # ----------------------------
 # MobileNetV2 (Bit) blocks
@@ -64,7 +72,7 @@ class BitMobileNetV2(nn.Module):
       - Collects stage-end names in self.hint_points for hooks
     """
     def __init__(self, num_classes=100, width_mult=1.0, round_nearest=8,
-                 scale_op="median", in_ch=3, act=ActModels.SiLU(), last_channel_override=None):
+                 scale_op="median", in_ch=3, act=ActModels.SiLU(inplace=True), last_channel_override=None):
         super().__init__()
         self.num_classes, self.width_mult, self.round_nearest, self.scale_op, self.in_ch, self.act, self.last_channel_override = \
             num_classes, width_mult, round_nearest, scale_op, in_ch, act, last_channel_override
@@ -83,9 +91,12 @@ class BitMobileNetV2(nn.Module):
         else:
             last_channel = _make_divisible(1280 * max(1.0, width_mult), round_nearest)
 
-        self.stem = ConvBNActBit(in_channels=in_ch,out_channels=input_channel,
+        def norm():
+            return NormModels.BatchNorm2d(num_features=-1)
+
+        self.stem = ConvBNActBit(in_channels=in_ch, out_channels=input_channel,
                                  kernel_size=3,stride=1,padding=1,scale_op=scale_op,
-                                 norm=NormModels.BatchNorm2d(num_features=-1),
+                                 norm=norm(),
                                  act=act).build()
 
         features = []
@@ -95,16 +106,30 @@ class BitMobileNetV2(nn.Module):
             for i in range(n):
                 stride = s if i == 0 else 1
                 features.append(
-                    InvertedResidualBit(in_channels=input_channel, out_channels=output_channel, stride=stride,
-                                        expand_ratio=t, scale_op=scale_op,act=act).build()
+                    InvertedResidualBit(
+                        in_channels=input_channel,
+                        out_channels=output_channel,
+                        stride=stride,
+                        exp_ratio=t,
+                        scale_op=scale_op,
+                        conv_pw_exp_layer=convs.Conv2dModels.Conv2dPointwiseNormAct(
+                            in_channels=-1, norm=norm(), act=act
+                        ),
+                        conv_dw_layer=convs.Conv2dModels.Conv2dDepthwiseNormAct(
+                            in_channels=-1, norm=norm(), act=act
+                        ),
+                        conv_pw_layer=convs.Conv2dModels.Conv2dPointwiseNorm(
+                            in_channels=-1, norm=norm()
+                        ),
+                    ).build()
                 )
                 input_channel = output_channel
-            self.hint_points.append(f"features.{len(features)-1}")
+            self.hint_points.append((f"features.{len(features)-1}.conv_pw.conv",f"features.{len(features)}"))
         self.features = nn.Sequential(*features)
 
-        self.head_conv = ConvBNActBit(in_channels=input_channel,out_channels=last_channel,
+        self.head_conv = ConvBNActBit(in_channels=input_channel, out_channels=last_channel,
                                  kernel_size=1,stride=1,padding=0,scale_op=scale_op,
-                                 norm=NormModels.BatchNorm2d(num_features=-1),
+                                 norm=norm(),
                                  act=act).build()
         
         self.pool       = nn.AdaptiveAvgPool2d(1)
@@ -143,12 +168,14 @@ class BitMobileNetV2(nn.Module):
 # ----------------------------
 def make_mobilenetv2_teacher_from_hub(variant="cifar100_mobilenetv2_x1_4", device="cuda"):
     teacher = torch.hub.load("chenyaofo/pytorch-cifar-models", variant, pretrained=True)
-    return teacher.to(device)
+    return teacher.eval().to(device)
 
-def make_resnet18_tiny_teacher_from_self(device: str = "cuda"):
-    model = torch.hub.load('.', 'bitnet_resnet18', source='local',
-                        pretrained = True,dataset= "timnet",ternary = True)
-    return model.to(device)
+
+def make_mobilenetv2_teacher_imagenet(device: str = "cuda"):
+    from torchvision.models import MobileNet_V2_Weights, mobilenet_v2
+
+    model = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V2)
+    return model.eval().to(device)
 
 # ----------------------------
 # LightningModule: KD + hints + ternary eval/export
@@ -156,26 +183,43 @@ def make_resnet18_tiny_teacher_from_self(device: str = "cuda"):
 class LitBitMBv2KD(LitBit):
     def __init__(self, config:LitBitConfig,
                  width_mult,
-                 teacher_variant="cifar100_mobilenetv2_x1_4"):
+                 teacher_variant: str = "cifar100_mobilenetv2_x1_4",
+                 teacher_device: str = "cpu"):
 
-        config.student = student = BitMobileNetV2(num_classes=config.num_classes, width_mult=width_mult, scale_op=config.scale_op)
+        config = LitBitConfig.model_validate(config)
+        if config.dataset is None:
+            raise ValueError("LitBitMBv2KD requires config.dataset to be set (DataModuleConfig).")
+
+        config.student = student = BitMobileNetV2(
+            num_classes=config.dataset.num_classes,
+            width_mult=width_mult,
+            scale_op=config.scale_op,
+        )
         config.hint_points = student.hint_points
 
         # Teacher per dataset
-        if config.dataset_name in ['c100','cifar100']:
-            config.teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device="cpu")
-        elif config.dataset_name == 'timnet':
-            config.teacher = None#make_resnet18_tiny_teacher_from_self()
-            config.alpha_hint = 0.0
+        ds = config.dataset.dataset_name
+        if ds == "c100":
+            config.teacher = make_mobilenetv2_teacher_from_hub(teacher_variant, device=teacher_device)
+        elif ds == "imnet":
+            config.teacher = make_mobilenetv2_teacher_imagenet(device=teacher_device)
+        elif ds == "timnet":
+            config.teacher = None
         else:
-            raise ValueError(f"Unsupported dataset: {config.dataset_name}")
-        
+            raise ValueError(f"Unsupported dataset: {ds}")
+        summ(config.student)
+        summ(config.teacher)
+
+        config.model_name = config.model_name or "mbv2"
+        config.model_size = config.model_size or f"x{int(width_mult*100)}"
+
         super().__init__(config)
         
 # ----------------------------
 # CLI / main
 # ----------------------------
 class Config(CommonTrainConfig):
+    data: Optional[str] = Field(default=None, description="Alias for --data_dir (back-compat).")
     width_mult: float = Field(
         default=1.4,
         description="Width multiplier for MobileNetV2.",
@@ -188,9 +232,11 @@ class Config(CommonTrainConfig):
         description="Teacher checkpoint/variant name.",
     )
 
-    batch_size:int=16
+    num_workers: int = 1
+
+    batch_size:int=256
     label_smoothing:float=0.1
-    alpha_kd:float=0.7
+    alpha_kd:float=0.3
     alpha_hint:float=0.05
     T:float=4.0
 
@@ -202,21 +248,31 @@ def main():
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
 
-    args.export_dir = f"./ckpt_{args.dataset_name}_mbv2"
-    args.model_size = f"x{int(args.width_mult*100)}"
+    if args.data is not None:
+        args.data_dir = args.data
 
     dm = DataModuleConfig.model_validate(args.model_dump())
     config = LitBitConfig.model_validate(args.model_dump())
+    config.dataset = dm.model_copy()
+
+    args.export_dir = config.export_dir = f"./ckpt_{config.dataset.dataset_name}_mbv2"
+    config.model_name = "mbv2"
+    config.model_size = f"x{int(args.width_mult*100)}"
 
     lit = LitBitMBv2KD(
         config=config,
         width_mult=args.width_mult,
         teacher_variant=args.teacher_variant,
+        teacher_device="cpu",
     )
 
-    dm = dm.build()
-    trainer = setup_trainer(args)
-    trainer.fit(lit, datamodule=dm)
+    trainer = AccelTrainer(
+        max_epochs=args.epochs,
+        mixed_precision="fp16" if args.amp else "no",
+        gradient_accumulation_steps=1,
+        log_every_n_steps=10,
+    )
+    trainer.fit(lit, datamodule=dm.build())
 
 
 if __name__ == "__main__":
