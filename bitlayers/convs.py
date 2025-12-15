@@ -164,7 +164,7 @@ class Conv2dModels:
         
         @model_validator(mode='after')
         def valid_model(self):
-            if self.rd_channels is None:
+            if self.rd_channels is None or self.rd_channels<1:
                 self.rd_channels = round(self.in_channels * self.rd_ratio)
             
             self.conv_reduce_layer.update(
@@ -610,15 +610,20 @@ class Conv2dModules:
         def __init__(self,para):
             super().__init__(para)
             self.para:Conv2dModels.DepthwiseSeparableConv=self.para
+            self.out_channels = self.para.out_channels
             self.conv_s2d = self.para.conv_s2d_layer.build() if self.para.conv_s2d_layer else nn.Identity()      
             self.conv_dw = self.para.conv_dw_layer.build()
             self.aa = self.para.aa_layer.build() if self.para.aa_layer else nn.Identity()
             if self.para.se_layer:
                 if self.para.aa_layer:
                     # aa_layer is a pooling layer in_channels is out_channels
-                    self.para.se_layer.in_channels = self.para.aa_layer.in_channels
+                    se_in_channels = self.para.aa_layer.in_channels
                 else:
-                    self.para.se_layer.in_channels = self.para.conv_dw_layer.out_channels            
+                    se_in_channels = self.para.conv_dw_layer.out_channels
+                self.para.se_layer = self.para.se_layer.__class__(in_channels=se_in_channels,
+                                                                  rd_ratio=self.para.se_layer.rd_ratio,
+                                                                  rd_channels=self.para.se_layer.rd_channels,
+                )
             self.se = self.para.se_layer.build() if self.para.se_layer else nn.Identity()
             self.conv_pw = self.para.conv_pw_layer.build()
             # ---- DropPath / stochastic depth ----
