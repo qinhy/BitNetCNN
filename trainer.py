@@ -1029,7 +1029,7 @@ class AdaptiveHintLoss(nn.Module):
 
     def register_pair(self, name: str, c_s: int, c_t: int):
         k = self._k(name)
-        self.proj[k] = nn.Conv2d(c_s, c_t, kernel_size=1, bias=True)
+        self.proj[k] = nn.Identity() if c_s==c_t else nn.Conv2d(c_s, c_t, kernel_size=1, bias=True)
 
     def forward(self, name: str, f_s: torch.Tensor, f_t: torch.Tensor) -> torch.Tensor:
         f_s = F.adaptive_avg_pool2d(f_s, f_t.shape[-2:])

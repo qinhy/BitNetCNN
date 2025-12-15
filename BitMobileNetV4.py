@@ -1,5 +1,3 @@
-# from https://raw.githubusercontent.com/jaiwei98/MobileNetV4-pytorch
-
 import copy
 from typing import Literal, Optional
 import warnings
@@ -8,13 +6,9 @@ from pydantic import BaseModel, Field
 from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from bitlayers.acts import ActModels
 from bitlayers.attn2d import Attention2dModels
 from bitlayers.bit import Bit
 from bitlayers.convs import Conv2dModels
-from bitlayers.linear import LinearModels
 from bitlayers.norms import NormModels
 from bitlayers.uir import UniversalInvertedResidual
 from common_utils import IN1kToTiny200Adapter, load_tiny200_to_in1k_map, summ
@@ -27,11 +21,6 @@ Conv2dNorm = Conv2dModels.Conv2dNorm
 Conv2dNormAct = Conv2dModels.Conv2dNormAct
 InvertedResidual = Conv2dModels.InvertedResidual
 UniversalInvertedResidual = UniversalInvertedResidual
-
-class AdaptiveAvgPool2d(BaseModel):
-    output_size:int = 1
-    def build(self):return nn.AdaptiveAvgPool2d(self.output_size)
-
 
 def make_divisible(
         value: float,
@@ -160,8 +149,8 @@ def MHSA(num_heads, key_dim, value_dim, px):
     # [heads, kdim, vdim, q_h_s, q_w_s, kv_s, use_layer_scale, use_multi_query, use_residual]
     # return [num_heads, key_dim, value_dim, 1, 1, kv_strides, True, True, True]
     return Attention2dModels.MobileAttention(
-                                            in_channels=-999,
-                                            out_channels=-999,
+                                            in_channels=-1,
+                                            out_channels=-1,
                                             stride=1,
                                             num_heads=num_heads,
                                             key_dim=key_dim,
@@ -299,7 +288,7 @@ MNV4HybridConvMedium = lambda:{
                     uib(48, 80, 3, 5, True, 2, 4, True),
                     uib(80, 80, 3, 3, True, 1, 2, True)),
     "layer3": stage("uib",
-                    uib(80, 160, 3, 5, True, 2, 6, True),
+                    uib(80,  160, 3, 5, True, 2, 6, True),
                     uib(160, 160, 0, 0, True, 1, 2, True),
                     uib(160, 160, 3, 3, True, 1, 4, True),
                     uib(160, 160, 3, 5, True, 1, 4, True, MHSA(4, 64, 64, 24)),
@@ -426,15 +415,23 @@ class MobileNetV4(nn.Module):
                 self.model_name,
                 self.num_classes)
 
-# model = MobileNetV4("MobileNetV4HybridMedium",200)
-# # Check the trainable params
-# total_params = sum(p.numel() for p in model.parameters())
-# print(f"Number of parameters: {total_params}")
-# # Check the model's output shape
-# print("Check output shape ...")
-# x = torch.rand(2, 3, 224, 224)
-# y = model.feature(x)
-# for i in y: print(i.shape)
+# for n in [
+#         "small",
+#         "medium",
+#         "large",
+#         "hybrid_medium",
+#         "hybrid_large",
+#     ]:
+#     print(n)
+#     model = MobileNetV4(n,200)
+#     # Check the trainable params
+#     total_params = sum(p.numel() for p in model.parameters())
+#     print(f"Number of parameters: {total_params}")
+#     # Check the model's output shape
+#     print("Check output shape ...")
+#     x = torch.rand(2, 3, 64, 64)
+#     y = model.feature(x)
+#     for i in y: print(i.shape)
 
 # ----------------------------
 # MobileNetV4: builders + KD
@@ -632,8 +629,6 @@ class LitMobileNetV4KD(LitBit):
             device=teacher_device,
             pretrained=teacher_pretrained,
         )
-        summ(config.student)
-        summ(config.teacher)
         t_nc = self._infer_num_classes(config.teacher)
         if t_nc is not None and t_nc != config.dataset.num_classes and config.alpha_kd > 0:
             warnings.warn(
@@ -665,7 +660,7 @@ class Config(CommonTrainConfig):
         "hybrid_medium",
         "hybrid_large",
     ] = Field(
-        default="medium",
+        default="small",
         description="MobileNetV4 variant.",
     )
 
@@ -684,9 +679,9 @@ class Config(CommonTrainConfig):
     
     num_workers: int = 1
     batch_size:int=512
-    lr:float=0.02
+    lr:float=0.01
     alpha_kd:float=0.0
-    alpha_hint:float=1e-3
+    alpha_hint:float=1e-5
 
 def main_mnv4() -> None:
     parser = ArgumentParser(model=Config)
@@ -697,6 +692,9 @@ def main_mnv4() -> None:
     dm = DataModuleConfig.model_validate(args.model_dump())
     config = LitBitConfig.model_validate(args.model_dump())
     config.dataset = dm.model_copy()
+
+    if "hybrid" in config.model_size.lower():
+        print("[!!!Warning!!!]: hybrid models need image size >= 64x64")
 
     args.export_dir = config.export_dir = f"./ckpt_{config.dataset.dataset_name}_mnv4_{args.model_size}"
     config.model_name = "mnv4"
