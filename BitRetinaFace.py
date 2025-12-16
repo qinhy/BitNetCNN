@@ -2,11 +2,13 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field, field_validator
 from pydanticV2_argparse import ArgumentParser
 import torch
+
+from trainer import LitBit
 
 torch.set_float32_matmul_precision("high")
 import torch.nn as nn
@@ -53,13 +55,14 @@ class BitResNetBackbone(BitResNet):
 # -----------------------------------------------------------------------------
 def _act(inplace=True):
     return ActModels.SiLU(inplace=inplace)
-def _norm(num_features=-1):
-    return NormModels.BatchNorm2d(num_features=num_features)
+
 def _conv_block(
     in_ch: int, out_ch: int,
     k: int, stride: int, padding: int,
     scale_op: str,
-    act: bool = True,
+    act: Any = ActModels.SiLU(inplace=True),
+    norm: Any = NormModels.BatchNorm2d(num_features=-1),
+    bias=False,
 ) -> nn.Sequential:
     conf = dict(
         in_channels=in_ch,
@@ -67,16 +70,20 @@ def _conv_block(
         kernel_size=k,
         stride=stride,
         padding=padding,
-        bias=False,
+        bias=bias,
+        bit=True,
         scale_op=scale_op,
-        norm=_norm(),
+        norm=norm,
     )
-    if act:
-        return Conv2dModels.Conv2dNormAct(**conf,act=_act(inplace=True)).build()
-    return Conv2dModels.Conv2dNorm(**conf).build()
+    if act and norm:
+        return Conv2dModels.Conv2dNormAct(**conf,act=act).build()
+    if not act and norm:
+        return Conv2dModels.Conv2dNorm(**conf).build()
+    if act and not norm:
+        return Conv2dModels.Conv2dAct(**conf).build()
+    return Conv2dModels.Conv2d(**conf).build()
 
-
-class BitSSH(nn.Module):
+class SSH(nn.Module):
     """Single Stage Headless (SSH) context module used in RetinaFace."""
 
     def __init__(self, in_ch: int, out_ch: int, scale_op: str = "median") -> None:
@@ -114,7 +121,7 @@ class BitSSH(nn.Module):
         return self.act(torch.cat((c3, c5, c7), dim=1))
 
 
-class BitFPN(nn.Module):
+class FPN(nn.Module):
     def __init__(
         self, in_channels: Sequence[int], out_channels: int = 256, scale_op: str = "median"):
         super().__init__()
@@ -163,15 +170,9 @@ class PredictionHead(nn.Module):
         self.heads = nn.ModuleList(
             nn.Sequential(
                 _conv_block(in_channels, in_channels, k=3, stride=1, padding=1, scale_op=scale_op),
-                Bit.Conv2d(
-                    in_channels,
-                    priors * out_per_anchor,
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                    bias=True,
-                    scale_op=scale_op,
-                ),
+                _conv_block(in_channels, priors * out_per_anchor,
+                            k=1, stride=1, padding=0, scale_op=scale_op,
+                            act=False,norm=False,bias=True),
             )
             for priors in self.num_priors
         )
@@ -216,33 +217,21 @@ class BitRetinaFace(nn.Module):
             small_stem=small_stem,
         )
 
-        self.fpn = BitFPN(self.backbone.feature_channels, fpn_channels, scale_op=scale_op)
+        self.fpn = FPN(self.backbone.feature_channels, fpn_channels, scale_op=scale_op)
 
         self.ssh = nn.ModuleList(
-            BitSSH(fpn_channels, fpn_channels, scale_op=scale_op) for _ in range(num_levels)
+            SSH(fpn_channels, fpn_channels, scale_op=scale_op) for _ in range(num_levels)
         )
-
-        self.classification_head = PredictionHead(
+        head = lambda num_classes:PredictionHead(
             num_levels=num_levels,
             in_channels=fpn_channels,
             out_per_anchor=num_classes,
             num_priors_per_level=self.num_priors,
             scale_op=scale_op,
         )
-        self.bbox_head = PredictionHead(
-            num_levels=num_levels,
-            in_channels=fpn_channels,
-            out_per_anchor=4,
-            num_priors_per_level=self.num_priors,
-            scale_op=scale_op,
-        )
-        self.landmark_head = PredictionHead(
-            num_levels=num_levels,
-            in_channels=fpn_channels,
-            out_per_anchor=10,
-            num_priors_per_level=self.num_priors,
-            scale_op=scale_op,
-        )
+        self.classification_head = head(num_classes)
+        self.bbox_head = head(4)
+        self.landmark_head = head(10)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         feats = self.fpn(self.backbone(x))
@@ -404,88 +393,351 @@ def match_anchors(
 # -----------------------------------------------------------------------------
 # Dataset / DataModule
 # -----------------------------------------------------------------------------
-class RetinaFaceDataset(Dataset):
+class RetinaFaceDataset(VisionDataset):
+    
     """
-    Dataset wrapper that expects a JSON annotation list with entries:
-        {
-            "file": "relative/or/absolute/path.jpg",
-            "width": 1024,
-            "height": 768,
-            "boxes": [[x1, y1, x2, y2], ...],
-            "landmarks": [[x1, y1, x2, y2, x3, y3, x4, y4, x5, y5], ...]  # optional
-        }
-    Bounding boxes and landmarks are assumed to be in absolute pixel space of the original image.
+    Yep — for *geometric* aug (resize/crop/flip/affine), you really want **joint transforms** that see **(image, boxes, landmarks)** together.
+
+    The cleanest way in modern torchvision is:
+
+    * treat `boxes` as `tv_tensors.BoundingBoxes`
+    * treat `landmarks` as `tv_tensors.KeyPoints` (shape `[N, 5, 2]`)
+    * run `torchvision.transforms.v2` so the same ops update everything consistently ([PyTorch Documentation][1])
+    * note: **KeyPoints support landed in torchvision 0.23** (beta feature) ([PyTorch Documentation][2])
+
+    Below is a practical pattern that also handles the one RetinaFace-specific quirk: **when you flip horizontally, you must swap left/right landmark indices** (eye/mouth corners). torchvision can flip keypoint coordinates, but it doesn’t know your semantic ordering.
+
+    ## Joint transforms for RetinaFace (boxes + landmarks)
+
+    ```py
+    import torch
+    from torchvision import tv_tensors
+    from torchvision.transforms import v2
+    from torchvision.transforms.v2 import functional as F
+
+
+    class WrapRetinaFaceTargets:
+        Convert plain tensors to TVTensors so v2 transforms update them.
+        def __call__(self, img, target):
+            H, W = map(int, F.get_size(img))  # [H, W]
+            target = dict(target)
+
+            boxes = target["boxes"]
+            if boxes.numel() == 0:
+                boxes_tv = tv_tensors.BoundingBoxes(boxes.view(-1, 4), format="XYXY", canvas_size=(H, W))
+            else:
+                boxes_tv = tv_tensors.BoundingBoxes(boxes.view(-1, 4), format="XYXY", canvas_size=(H, W))
+
+            # landmarks: (N,10) with -1 for missing -> KeyPoints (N,5,2) + valid mask
+            lm = target.get("landmarks", None)
+            if lm is None or lm.numel() == 0:
+                kp = torch.zeros((boxes_tv.shape[0], 5, 2), dtype=torch.float32)
+                valid = torch.zeros((boxes_tv.shape[0], 5), dtype=torch.bool)
+            else:
+                kp = lm.view(-1, 5, 2).to(torch.float32).clone()
+                valid = (kp[..., 0] >= 0) & (kp[..., 1] >= 0)
+                kp[~valid] = 0.0  # placeholder; we keep "valid" separately
+
+            kps_tv = tv_tensors.KeyPoints(kp, canvas_size=(H, W))
+
+            target["boxes"] = boxes_tv
+            target["keypoints"] = kps_tv
+            target["landmarks_valid"] = valid
+            return img, target
+
+
+    class RandomFaceHorizontalFlip:
+        Flip image/boxes/keypoints and also swap left/right landmark indices.
+        def __init__(self, p=0.5):
+            self.p = float(p)
+
+        def __call__(self, img, target):
+            if torch.rand(()) >= self.p:
+                return img, target
+
+            img = F.horizontal_flip(img)
+            target = dict(target)
+
+            target["boxes"] = F.horizontal_flip(target["boxes"])
+            kps = F.horizontal_flip(target["keypoints"])      # (N,5,2), coords flipped
+            kps = kps[:, [1, 0, 2, 4, 3], :]                  # swap le<->re and lm<->rm
+            target["keypoints"] = kps
+
+            if "landmarks_valid" in target:
+                target["landmarks_valid"] = target["landmarks_valid"][:, [1, 0, 2, 4, 3]]
+
+            return img, target
+
+
+    class UnwrapAndNormalizeRetinaFace:
+        Convert TVTensors back to your model format: boxes/landmarks normalized to [0,1] and -1 missing.
+        def __call__(self, img, target):
+            H, W = map(int, F.get_size(img))
+            target = dict(target)
+
+            boxes = torch.as_tensor(target["boxes"], dtype=torch.float32).view(-1, 4)
+            if boxes.numel():
+                boxes[:, [0, 2]] /= float(W)
+                boxes[:, [1, 3]] /= float(H)
+                boxes = boxes.clamp(0.0, 1.0)
+
+            kps = torch.as_tensor(target["keypoints"], dtype=torch.float32)  # (N,5,2)
+            valid = target.get("landmarks_valid", torch.ones(kps.shape[:2], dtype=torch.bool))
+
+            # after crop/resize, some points may go out of bounds: mark them missing
+            within = (kps[..., 0] >= 0) & (kps[..., 0] <= W) & (kps[..., 1] >= 0) & (kps[..., 1] <= H)
+            valid = valid & within
+
+            kps[..., 0] /= float(W)
+            kps[..., 1] /= float(H)
+            kps = kps.clamp(0.0, 1.0)
+            kps[~valid] = -1.0
+
+            target["boxes"] = boxes
+            target["landmarks"] = kps.view(-1, 10)
+
+            target.pop("keypoints", None)
+            target.pop("landmarks_valid", None)
+            return img, target
+    ```
+
+    ### Example train transform pipeline
+
+    ```py
+    mean = (0.485, 0.456, 0.406)
+    std  = (0.229, 0.224, 0.225)
+
+    train_tf = v2.Compose([
+        v2.ToImage(),                            # makes image a tensor TVTensor
+        WrapRetinaFaceTargets(),                 # boxes->BoundingBoxes, landmarks->KeyPoints
+        v2.RandomResizedCrop((640, 640), antialias=True),
+        RandomFaceHorizontalFlip(p=0.5),         # flip + swap landmark order
+        v2.ClampBoundingBoxes(),                 # optional :contentReference[oaicite:2]{index=2}
+        v2.ClampKeyPoints(),                     # optional :contentReference[oaicite:3]{index=3}
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
+        UnwrapAndNormalizeRetinaFace(),          # back to your normalized [0,1] + -1 missing format
+    ])
+    ```
+
+    ### Dataset usage
+
+    Use the **joint** `transforms=` argument (not `transform=`), since `transform=` is image-only:
+
+    ```py
+    ds = RetinaFaceDataset(
+        root=self.data_dir,
+        train=True,
+        download=True,
+        transforms=train_tf,
+    )
+    ```
+
+    If you paste your current `train_tf` (what ops you want: resize? mosaic? iou-crop? affine?), I can tailor the pipeline so every step correctly updates **boxes + landmarks** and matches RetinaFace’s expected input/output shapes.
+
+    [1]: https://docs.pytorch.org/vision/stable/transforms.html "Transforming images, videos, boxes and more — Torchvision 0.24 documentation"
+    [2]: https://docs.pytorch.org/vision/main/auto_examples/transforms/plot_keypoints_transforms.html "Transforms on KeyPoints — Torchvision main documentation"
+
+
+
+    Expected layout (default):
+      root/
+        annotations/
+          train.json
+          val.json
+        (images referenced by JSON paths)
+
+    JSON entries:
+      {
+        "file": "...",
+        "width": 1024, "height": 768,          # optional
+        "boxes": [[x1,y1,x2,y2], ...],          # absolute pixels
+        "landmarks": [[x1,y1, ..., x5,y5], ...] # optional, absolute pixels OR -1 for missing
+      }
+
+    Outputs:
+      image: tensor or PIL (depending on transforms)
+      target:
+        boxes: (N,4) in [0,1]
+        landmarks: (N,10) in [0,1] or -1 for missing
+        labels: (N,) long (all ones)
     """
 
     def __init__(
         self,
         root: str,
-        annotation_path: str,
+        train: bool = True,
+        download: bool = False,
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        transforms: Optional[Callable] = None,  # joint (img,target) transform
         image_size: int = 640,
-        augment: bool = False,
+        augment: Optional[bool] = None,
+        annotation_file: Optional[str] = None,
+        annotations_dir: str = "annotations",
+        train_ann: str = "train.json",
+        val_ann: str = "val.json",
+        download_url: Optional[str] = None,  # optional hook
     ) -> None:
-        super().__init__()
+        super().__init__(root=root, transforms=transforms, transform=transform, target_transform=target_transform)
+
         self.root = Path(root)
-        
-        def _read_annotations(path: Path) -> List[Dict]:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, list):
-                raise ValueError(f"Annotation file {path} must contain a list of samples.")
-            return data
-        
-        annotation_path = annotation_path if not os.path.isabs(annotation_path) else Path(annotation_path)
-        self.items = _read_annotations(self.root / annotation_path)
-        self.image_size = image_size
-        self.augment = augment
+        self.train = bool(train)
+        self.download = bool(download)
+        self.image_size = int(image_size)
+        self.download_url = download_url
+
+        if augment is None:
+            augment = self.train
+        self.augment = bool(augment)
+
+        # pick annotation file
+        if annotation_file is None:
+            ann_name = train_ann if self.train else val_ann
+            annotation_file = str(Path(annotations_dir) / ann_name)
+
+        self.ann_path = Path(annotation_file)
+        if not self.ann_path.is_absolute():
+            self.ann_path = self.root / self.ann_path
+
+        if self.download and not self.ann_path.exists():
+            self._download()
+
+        if not self.ann_path.exists():
+            raise FileNotFoundError(f"Annotation file not found: {self.ann_path}")
+
+        with open(self.ann_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError(f"Annotation file {self.ann_path} must contain a list of samples.")
+        self.items: List[Dict[str, Any]] = data
+
+        # default transform only if user didn't pass transform/transforms
         self.mean = (0.485, 0.456, 0.406)
         self.std = (0.229, 0.224, 0.225)
-        self.to_tensor = transforms.Compose(
+        self._default_tf = T.Compose(
             [
-                transforms.Resize((image_size, image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(self.mean, self.std),
+                T.Resize((self.image_size, self.image_size)),
+                T.ToTensor(),
+                T.Normalize(self.mean, self.std),
             ]
         )
+
+        # built-in light aug (safe + we update targets for flip)
+        self.color_aug = T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)
 
     def __len__(self) -> int:
         return len(self.items)
 
     def _resolve_path(self, file_path: str) -> Path:
-        path = Path(file_path)
-        if path.is_absolute():
-            return path
-        return self.root / file_path
+        p = Path(file_path)
+        return p if p.is_absolute() else (self.root / p)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def _download(self) -> None:
+        # Generic hook: you can implement this once you know your dataset URL/format.
+        if not self.download_url:
+            raise RuntimeError(
+                "download=True was set but no download_url was provided, and the annotation file is missing.\n"
+                "Either provide download_url or place the dataset under root."
+            )
+        # Example implementation (uncomment once you know the URL points to an archive):
+        # from torchvision.datasets.utils import download_and_extract_archive
+        # download_and_extract_archive(self.download_url, download_root=str(self.root))
+        raise NotImplementedError("Provide a real download implementation for your dataset source.")
+
+    @staticmethod
+    def _flip_targets_horiz(
+        boxes: torch.Tensor, landmarks: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if boxes.numel():
+            x1 = boxes[:, 0].clone()
+            x2 = boxes[:, 2].clone()
+            boxes[:, 0] = 1.0 - x2
+            boxes[:, 2] = 1.0 - x1
+
+        if landmarks.numel():
+            lm = landmarks.view(-1, 5, 2).clone()
+            valid = lm[..., 0] >= 0  # missing is -1
+
+            # flip x for valid points
+            lm[..., 0][valid] = 1.0 - lm[..., 0][valid]
+
+            # swap left/right: [le,re,nose,lm,rm] -> [re,le,nose,rm,lm]
+            lm = lm[:, [1, 0, 2, 4, 3], :]
+
+            landmarks = lm.view(-1, 10)
+
+        return boxes, landmarks
+
+    def __getitem__(self, idx: int) -> Tuple[Any, Dict[str, torch.Tensor]]:
         entry = self.items[idx]
-        img = Image.open(self._resolve_path(entry["file"])).convert("RGB")
-        orig_w, orig_h = entry.get("width", img.width), entry.get("height", img.height)
 
-        boxes = torch.tensor(entry.get("boxes", []), dtype=torch.float32)
+        img_path = self._resolve_path(entry["file"])
+        img = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
+
+        # Prefer actual image size (EXIF-safe). Keep JSON width/height as fallback.
+        orig_w = int(entry.get("width", img.width))
+        orig_h = int(entry.get("height", img.height))
+        orig_w = max(orig_w, 1)
+        orig_h = max(orig_h, 1)
+
+        boxes = torch.tensor(entry.get("boxes", []), dtype=torch.float32).view(-1, 4)
         if boxes.numel() == 0:
             boxes = torch.zeros((0, 4), dtype=torch.float32)
 
-        if boxes.numel() > 0:
-            boxes[:, [0, 2]] = boxes[:, [0, 2]] / max(orig_w, 1)
-            boxes[:, [1, 3]] = boxes[:, [1, 3]] / max(orig_h, 1)
+        if boxes.numel():
+            boxes[:, [0, 2]] /= float(orig_w)
+            boxes[:, [1, 3]] /= float(orig_h)
             boxes = boxes.clamp(0.0, 1.0)
 
         land = entry.get("landmarks", [])
-        if len(land) == 0:
-            landmarks = torch.full((boxes.size(0), 5, 2), -1.0, dtype=torch.float32)
+        if not land:
+            landmarks = torch.full((boxes.size(0), 10), -1.0, dtype=torch.float32)
         else:
-            lm = torch.tensor(land, dtype=torch.float32).view(-1, 5, 2)
-            lm[:, :, 0] = lm[:, :, 0] / max(orig_w, 1)
-            lm[:, :, 1] = lm[:, :, 1] / max(orig_h, 1)
-            landmarks = lm.clamp(0.0, 1.0)
+            landmarks = torch.tensor(land, dtype=torch.float32).view(-1, 10)
+            if landmarks.size(0) != boxes.size(0):
+                raise ValueError(
+                    f"Mismatch: {boxes.size(0)} boxes but {landmarks.size(0)} landmark rows for file={entry.get('file')}"
+                )
+            lm = landmarks.view(-1, 5, 2)
 
-        image = self.to_tensor(img)
-        target = {
+            # preserve missing points (-1): only normalize/clamp valid points
+            valid = lm[..., 0] >= 0
+            lm_x = lm[..., 0].clone()
+            lm_y = lm[..., 1].clone()
+            lm_x[valid] = (lm_x[valid] / float(orig_w)).clamp(0.0, 1.0)
+            lm_y[valid] = (lm_y[valid] / float(orig_h)).clamp(0.0, 1.0)
+            lm[..., 0] = lm_x
+            lm[..., 1] = lm_y
+            landmarks = lm.view(-1, 10)
+
+        # built-in aug only if user did NOT provide a joint transform pipeline
+        if self.augment and self.transforms is None:
+            img = self.color_aug(img)
+            if torch.rand(()) < 0.5:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                boxes, landmarks = self._flip_targets_horiz(boxes, landmarks)
+
+        target: Dict[str, torch.Tensor] = {
             "boxes": boxes,
-            "landmarks": landmarks.view(landmarks.size(0), -1),
+            "landmarks": landmarks,
+            "labels": torch.ones((boxes.size(0),), dtype=torch.long),
         }
-        return image, target
+
+        # torchvision-style transform handling:
+        if self.transforms is not None:
+            img, target = self.transforms(img, target)
+        else:
+            if self.transform is not None:
+                img = self.transform(img)
+            else:
+                # default image pipeline (resize + tensor + normalize)
+                img = self._default_tf(img)
+
+            if self.target_transform is not None:
+                target = self.target_transform(target)
+
+        return img, target
 
 def retinaface_collate(batch):
     images = torch.stack([item[0] for item in batch])
@@ -497,9 +749,9 @@ def retinaface_collate(batch):
 # -----------------------------------------------------------------------------
 # LightningModule
 # -----------------------------------------------------------------------------
-class LitRetinaFace:
+class LitRetinaFace(LitBit):
     def __init__(self, config: "RetinaFaceConfig") -> None:
-        super().__init__()
+        super().__init__(config)
         self.save_hyperparameters(config.model_dump())
         self.model = BitRetinaFace(
             backbone_size=config.backbone_size,
@@ -646,9 +898,9 @@ class LitRetinaFace:
         return total
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.wd)
+        opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
-        return {"optimizer": opt, "lr_scheduler": sched}
+        return opt, sched, 'epoch'
 
 
 # -----------------------------------------------------------------------------
