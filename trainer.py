@@ -1,9 +1,11 @@
+from datetime import datetime
 import os
 import math
 import copy
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 import torch
 import torch.nn as nn
@@ -347,6 +349,36 @@ class StepMetricsAccumulator:
         return out, count
 
 
+class TextAppendLogger(BaseModel):
+    filepath: Optional[Path] = None  # if None -> auto-generate
+    log_dir: Path = Field(default=Path("logs"))
+    name_prefix: str = "run"
+    ext: str = ".txt"
+    prefix_ts: bool = True
+    encoding: str = "utf-8"
+
+    def resolve_path(self):
+        if self.filepath is None:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = self.ext if self.ext.startswith(".") else f".{self.ext}"
+            self.filepath = Path(self.log_dir) / f"{self.name_prefix}_{ts}{ext}"
+        else:
+            self.filepath = Path(self.filepath)
+
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        return self
+
+    def __call__(self, text: str) -> None:
+        self.resolve_path()
+        line = text.rstrip("\n")
+        if self.prefix_ts:
+            ts = datetime.now().isoformat(timespec="seconds")
+            line = f"[{ts}] {line}"
+
+        with self.filepath.open("a", encoding=self.encoding) as f:
+            f.write(line + "\n")
+            f.flush()
+
 class AccelTrainer:
     def __init__(
         self,
@@ -357,6 +389,7 @@ class AccelTrainer:
         show_progress_bar: bool = True,
         metrics_manager: Optional["MetricsManager"] = None,
         log_every_n_steps: int = 10,
+        logger: Optional[Callable[..., None]] = TextAppendLogger(),
     ):
         self.max_epochs = int(max_epochs)
         self.accelerator = Accelerator(
@@ -385,6 +418,7 @@ class AccelTrainer:
                 ]
             )
         self.metrics_manager = metrics_manager
+        self.logger=logger
 
     # -----------------------------
     # Public API
@@ -396,6 +430,9 @@ class AccelTrainer:
         train_dataloader: Optional[DataLoader] = None,
         val_dataloader: Optional[DataLoader] = None,
     ):
+        if self.logger is not None:
+            self.logger.log_dir = model.config.export_dir
+            
         train_dataloader, val_dataloader = self._resolve_dataloaders(datamodule, train_dataloader, val_dataloader)
 
         optimizer, scheduler, interval = self._configure_optimizers(model)
@@ -486,6 +523,7 @@ class AccelTrainer:
     def print(self, msg: str) -> None:
         if self.accelerator.is_main_process:
             tqdm.write(msg)
+            if self.logger:self.logger(msg)
 
     def _pbar(self, loader: DataLoader, stage: str, epoch: int):
         if not (self.show_progress_bar and self.accelerator.is_main_process):
@@ -807,7 +845,7 @@ class LitBit(AccelLightningModule):
             t_total = sum(p.numel() for p in self.teacher.parameters()) if self.has_teacher and self.teacher else 0
             t_train = sum(p.numel() for p in self.teacher.parameters() if p.requires_grad) if self.teacher else 0
             accelerator.print("=" * 80)
-            accelerator.print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes}")
+            accelerator.print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes} | batch_size: {self.config.dataset.batch_size}")
             accelerator.print(f"Student : {class_name(self.student)} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
             if self.has_teacher:
                 accelerator.print(f"Teacher : {class_name(self.teacher)} | params {t_total/1e6:.2f}M ({'frozen' if t_train==0 else t_train})")
