@@ -124,7 +124,7 @@ class BitMobileNetV2(nn.Module):
                     ).build()
                 )
                 input_channel = output_channel
-            self.hint_points.append((f"features.{len(features)-1}.conv_pw.conv",f"features.{len(features)}"))
+            self.hint_points.append((f"features.{len(features)-1}",f"features.{len(features)}"))
         self.features = nn.Sequential(*features)
 
         self.head_conv = ConvBNActBit(in_channels=input_channel, out_channels=last_channel,
@@ -132,9 +132,10 @@ class BitMobileNetV2(nn.Module):
                                  norm=norm(),
                                  act=act).build()
         
-        self.pool       = nn.AdaptiveAvgPool2d(1)
-        self.classifier = Bit.Linear(last_channel, num_classes, bias=True, scale_op=scale_op)
-
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=0.2),
+            Bit.Linear(last_channel, num_classes, bias=True, scale_op=scale_op),
+        )
         self._init_weights()
 
     def _init_weights(self):
@@ -152,11 +153,12 @@ class BitMobileNetV2(nn.Module):
                 if hasattr(m, "bias") and m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor):
         x = self.stem(x)
         x = self.features(x)
         x = self.head_conv(x)
-        x = self.pool(x).flatten(1)
+        x = nn.functional.adaptive_avg_pool2d(x, (1, 1))
+        x = torch.flatten(x, 1)
         return self.classifier(x)
     
     def clone(self):
@@ -210,7 +212,7 @@ class LitBitMBv2KD(LitBit):
         
         config.model_name = config.model_name or "mbv2"
         config.model_size = config.model_size or f"x{int(width_mult*100)}"
-
+        
         super().__init__(config)
         
 # ----------------------------
@@ -239,8 +241,8 @@ class Config(CommonTrainConfig):
     cutmix: bool = True
 
     lr: float = 0.2
-    alpha_kd: float = 0.3
-    alpha_hint: float = 0.05
+    alpha_kd: float = 0.1
+    alpha_hint: float = 2.0
 
     scale_op:str="median"
     export_dir:str="./ckpt_c100_mbv2"

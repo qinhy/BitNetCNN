@@ -897,29 +897,28 @@ class LitBit(AccelLightningModule):
     def _ce_training_step(self, x: torch.Tensor, y: torch.Tensor):
         logits = self.student(x)
         ce = self.ce_hard if self.ce_hard is not None else self.ce_soft
-        loss = ce(logits, y)
-        return loss, {"train/ce": loss.detach()}, logits
+        loss_ce = (1.0 - self.alpha_kd) * ce(logits, y)
+        return loss_ce, {"train/ce": loss_ce.detach()}, logits
 
     def _ce_kd_training_step(self, x: torch.Tensor, y: torch.Tensor):
         z_t = self.teacher_forward(x)
         loss_ce, logd, logits = self._ce_training_step(x, y)
-        alpha_kd = self.alpha_kd
-        loss_kd = self.kd(logits.float(), z_t.float())
-        loss = (1.0 - alpha_kd) * loss_ce + alpha_kd * loss_kd
+        loss_kd = self.alpha_kd * self.kd(logits.float(), z_t.float())
+        loss = loss_ce + loss_kd
         logd = {**logd, "train/kd": loss_kd.detach()}
         return loss, logd, logits
 
     def _ce_hint_training_step(self, x: torch.Tensor, y: torch.Tensor):
         z_t = self.teacher_forward(x)
-        loss, logd, logits = self._ce_training_step(x, y)
-        loss_hint = self.get_loss_hint()
-        loss = loss + loss_hint
+        loss_ce, logd, logits = self._ce_training_step(x, y)
+        loss_hint = self.alpha_hint * self.get_loss_hint()
+        loss = loss_ce + loss_hint
         logd = {**logd, "train/hint": loss_hint.detach()}
         return loss, logd, logits
     
     def _ce_kd_hint_training_step(self, x: torch.Tensor, y: torch.Tensor):
         loss, logd, logits = self._ce_kd_training_step(x, y)
-        loss_hint = self.get_loss_hint()
+        loss_hint = self.alpha_hint * self.get_loss_hint()
         loss = loss + loss_hint
         logd = {**logd, "train/hint": loss_hint.detach()}
         return loss, logd, logits
