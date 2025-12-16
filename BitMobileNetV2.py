@@ -208,8 +208,8 @@ class Config(CommonTrainConfig):
     cutmix: bool = True
 
     lr: float = 0.2
-    alpha_kd: float = 0.0#0.1 , this model is better without teacher
-    alpha_hint: float = 0.0#2.0 , this model is better without teacher
+    alpha_kd: float = 0.0 #0.1 this model is better without teacher
+    alpha_hint: float = 0.0 #2.0 this model is better without teacher
 
     scale_op:str="median"
     export_dir:str="./ckpt_c100_mbv2"
