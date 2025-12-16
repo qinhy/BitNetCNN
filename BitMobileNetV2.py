@@ -5,7 +5,7 @@ from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
 
-from bitlayers import convs
+from bitlayers.convs import Conv2dModels
 from bitlayers.bit import Bit
 from bitlayers.acts import ActModels
 from bitlayers.norms import NormModels
@@ -26,43 +26,8 @@ def _make_divisible(v, divisor=8, min_value=None):
         new_v += divisor
     return new_v
 
-ConvBNActBit = convs.Conv2dModels.Conv2dNormAct
-# class ConvBNActBit(nn.Module):
-#     def __init__(self, in_ch, out_ch, k, s, p, groups=1, scale_op="median", act="silu"):
-#         super().__init__()
-#         self.conv = Bit.Conv2d(in_ch, out_ch, k, stride=s, padding=p, bias=False,
-#                               groups=groups, scale_op=scale_op)
-#         self.norm   = nn.BatchNorm2d(out_ch)
-#         if act == "relu6":
-#             self.act = nn.ReLU6(inplace=True)
-#         elif act == "silu":
-#             self.act = nn.SiLU(inplace=True)
-#         else:
-#             self.act = nn.Identity()
-#     def forward(self, x):
-#         return self.act(self.norm(self.conv(x)))
-
-InvertedResidualBit = convs.Conv2dModels.InvertedResidual
-# class InvertedResidualBit(nn.Module):
-#     def __init__(self, inp, oup, stride, expand_ratio, scale_op="median", act="silu"):
-#         super().__init__()
-#         assert stride in [1, 2]
-#         hidden_dim = int(round(inp * expand_ratio))
-#         self.use_res_connect = (stride == 1 and inp == oup)
-#         layers = []
-#         if expand_ratio != 1:
-#             layers.append(ConvBNActBit(inp, hidden_dim, 1, 1, 0, scale_op=scale_op, act=act))
-#         layers.append(ConvBNActBit(hidden_dim, hidden_dim, 3, stride, 1,
-#                                    groups=hidden_dim, scale_op=scale_op, act=act))
-#         layers.append(Bit.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False, scale_op=scale_op))
-#         layers.append(nn.BatchNorm2d(oup))
-#         self.block = nn.Sequential(*layers)
-
-#     def forward(self, x):
-#         out = self.block(x)
-#         if self.use_res_connect:
-#             out = x + out
-#         return out
+Conv2dNormAct = Conv2dModels.Conv2dNormAct
+InvertedResidualBit = Conv2dModels.InvertedResidual
 
 class BitMobileNetV2(nn.Module):
     """
@@ -72,10 +37,12 @@ class BitMobileNetV2(nn.Module):
       - Collects stage-end names in self.hint_points for hooks
     """
     def __init__(self, num_classes=100, width_mult=1.0, round_nearest=8,
-                 scale_op="median", in_ch=3, act=ActModels.SiLU(inplace=True), last_channel_override=None):
+                 scale_op="median", in_ch=3, act=ActModels.SiLU(inplace=True), last_channel_override=None,
+                 norm = NormModels.BatchNorm2d(num_features=-1)):
         super().__init__()
         self.num_classes, self.width_mult, self.round_nearest, self.scale_op, self.in_ch, self.act, self.last_channel_override = \
             num_classes, width_mult, round_nearest, scale_op, in_ch, act, last_channel_override
+        self.norm = norm
         setting = [
             [1,  16, 1, 1],
             [6,  24, 2, 2],
@@ -91,17 +58,13 @@ class BitMobileNetV2(nn.Module):
         else:
             last_channel = _make_divisible(1280 * max(1.0, width_mult), round_nearest)
 
-        def norm():
-            return NormModels.BatchNorm2d(num_features=-1)
-
-        self.stem = ConvBNActBit(in_channels=in_ch, out_channels=input_channel,
+        self.stem = Conv2dNormAct(in_channels=in_ch, out_channels=input_channel,
                                  kernel_size=3,stride=1,padding=1,scale_op=scale_op,
-                                 norm=norm(),
-                                 act=act).build()
+                                 norm=norm,act=act).build()
 
         features = []
         self.hint_points = []
-        for t, c, n, s in setting:
+        for exp_ratio, c, n, s in setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
                 stride = s if i == 0 else 1
@@ -110,16 +73,16 @@ class BitMobileNetV2(nn.Module):
                         in_channels=input_channel,
                         out_channels=output_channel,
                         stride=stride,
-                        exp_ratio=t,
+                        exp_ratio=exp_ratio,
                         scale_op=scale_op,
-                        conv_pw_exp_layer=convs.Conv2dModels.Conv2dPointwiseNormAct(
-                            in_channels=-1, norm=norm(), act=act
+                        conv_pw_exp_layer=Conv2dModels.Conv2dPointwiseNormAct(
+                            in_channels=-1, norm=norm, act=act
                         ),
-                        conv_dw_layer=convs.Conv2dModels.Conv2dDepthwiseNormAct(
-                            in_channels=-1, norm=norm(), act=act
+                        conv_dw_layer=Conv2dModels.Conv2dDepthwiseNormAct(
+                            in_channels=-1, norm=norm, act=act
                         ),
-                        conv_pw_layer=convs.Conv2dModels.Conv2dPointwiseNorm(
-                            in_channels=-1, norm=norm()
+                        conv_pw_layer=Conv2dModels.Conv2dPointwiseNorm(
+                            in_channels=-1, norm=norm
                         ),
                     ).build()
                 )
@@ -127,9 +90,9 @@ class BitMobileNetV2(nn.Module):
             self.hint_points.append((f"features.{len(features)-1}",f"features.{len(features)}"))
         self.features = nn.Sequential(*features)
 
-        self.head_conv = ConvBNActBit(in_channels=input_channel, out_channels=last_channel,
+        self.head_conv = Conv2dNormAct(in_channels=input_channel, out_channels=last_channel,
                                  kernel_size=1,stride=1,padding=0,scale_op=scale_op,
-                                 norm=norm(),
+                                 norm=norm,
                                  act=act).build()
         
         self.classifier = nn.Sequential(
@@ -162,8 +125,12 @@ class BitMobileNetV2(nn.Module):
         return self.classifier(x)
     
     def clone(self):
-        return BitMobileNetV2(self.num_classes, self.width_mult, self.round_nearest,
-                              self.scale_op, self.in_ch, self.act, self.last_channel_override)
+        return BitMobileNetV2(num_classes = self.num_classes,
+                            width_mult = self.width_mult,
+                            round_nearest = self.round_nearest,
+                            scale_op = self.scale_op,
+                            in_ch = self.in_ch, act = self.act, norm = self.norm,
+                            last_channel_override = self.last_channel_override,)
 
 # ----------------------------
 # Teacher: MobileNetV2 from torch.hub
@@ -241,8 +208,8 @@ class Config(CommonTrainConfig):
     cutmix: bool = True
 
     lr: float = 0.2
-    alpha_kd: float = 0.1
-    alpha_hint: float = 2.0
+    alpha_kd: float = 0.0#0.1 , this model is better without teacher
+    alpha_hint: float = 0.0#2.0 , this model is better without teacher
 
     scale_op:str="median"
     export_dir:str="./ckpt_c100_mbv2"
