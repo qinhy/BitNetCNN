@@ -238,18 +238,7 @@ def main():
             )
             return opt, None, "epoch"
         lit.configure_optimizers = configure_optimizers
-    else:
-        def configure_optimizers():
-            opt = torch.optim.SGD(
-                lit.configure_optimizer_params(),
-                lr=lit.lr,
-                momentum=0.9,
-                weight_decay=lit.wd,
-                nesterov=True,
-            )
-            return opt, None, "epoch"
-        lit.configure_optimizers = configure_optimizers
-    
+        
     trainer = AccelTrainer(
         max_epochs=args.epochs,
         mixed_precision="fp16" if args.amp else "no",
