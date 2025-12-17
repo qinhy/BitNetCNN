@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import GaussianBlur
 from torchvision.transforms import v2
+import torchvision.transforms.functional as vF
 
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -24,114 +25,179 @@ class ToTensor(BaseModel):
         return v2.Compose([v2.ToImage(),
                            v2.ToDtype(self._torch_dtype, scale=self.scale)])
 
-class Cutout(BaseModel):
-    size: Union[int, Tuple[int, int]] = 16
 
-    @model_validator(mode='after')
-    def valid_model(self):
-        size = self.size
-        if isinstance(size, int):
-            self.size = (size, size)
-        else:
-            if len(size) != 2:
-                raise ValueError(f"Cutout size must be int or (h, w) tuple, got: {size}")
-            self.size = (int(size[0]), int(size[1]))
-    def build(self):return CutoutModule(self)
-
-class CutoutModule(nn.Module):
-    """Simple Cutout transform for tensors [C, H, W].
-
-    size:
-        - int       -> square hole (size x size)
-        - (h, w)    -> rectangular hole (height x width)
+class Cutout(nn.Module):
     """
-    def __init__(self, config:Cutout):
+    Cutout for tensors [C, H, W], where the hole size is computed from image size.
+
+    ratio:
+        - float        -> square hole: (H*ratio, W*ratio)
+        - (rh, rw)     -> rectangular hole: (H*rh, W*rw)
+
+    ratio_range:
+        - (lo, hi)     -> sample r ~ Uniform(lo, hi) each call (applies to both H and W)
+                          (overrides ratio if provided)
+
+    Example:
+        For 32x32 and want 8x8 cutout => ratio = 8/32 = 0.25
+    """
+
+    def __init__(
+        self,
+        ratio: Union[float, Tuple[float, float]] = 0.25,
+        ratio_range: Optional[Tuple[float, float]] = None,
+        fill: float = 0.0,
+        min_size: int = 1,
+    ):
         super().__init__()
-        self.size = config.size
+        self.ratio = ratio
+        self.ratio_range = ratio_range
+        self.fill = float(fill)
+        self.min_size = int(min_size)
+
+    def _get_ratios(self, device) -> Tuple[float, float]:
+        if self.ratio_range is not None:
+            lo, hi = self.ratio_range
+            r = float(torch.empty(1, device=device).uniform_(lo, hi).item())
+            return r, r
+
+        if isinstance(self.ratio, tuple):
+            return float(self.ratio[0]), float(self.ratio[1])
+
+        r = float(self.ratio)
+        return r, r
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
-        # img is expected to be a Tensor after ToImage/ToDtype
         if not torch.is_tensor(img):
             return img
+
+        if img.ndim != 3:
+            raise ValueError(f"Cutout expects [C,H,W] tensor, got shape: {tuple(img.shape)}")
 
         _, h, w = img.shape
         if h <= 0 or w <= 0:
             return img
 
-        mask_h, mask_w = self.size
-        mask_h_half = mask_h // 2
-        mask_w_half = mask_w // 2
+        rh, rw = self._get_ratios(device=img.device)
+        rh = max(rh, 0.0)
+        rw = max(rw, 0.0)
 
-        cy = torch.randint(0, h, (1,)).item()
-        cx = torch.randint(0, w, (1,)).item()
+        mask_h = int(round(h * rh))
+        mask_w = int(round(w * rw))
 
-        y1 = max(0, cy - mask_h_half)
-        y2 = min(h, cy + mask_h_half)
-        x1 = max(0, cx - mask_w_half)
-        x2 = min(w, cx + mask_w_half)
+        mask_h = max(self.min_size, min(mask_h, h))
+        mask_w = max(self.min_size, min(mask_w, w))
 
-        img = img.clone()  # safer than in-place
-        img[:, y1:y2, x1:x2] = 0.0
+        cy = int(torch.randint(0, h, (1,), device=img.device).item())
+        cx = int(torch.randint(0, w, (1,), device=img.device).item())
+
+        y1 = max(0, cy - mask_h // 2)
+        y2 = min(h, y1 + mask_h)
+        x1 = max(0, cx - mask_w // 2)
+        x2 = min(w, x1 + mask_w)
+
+        out = img.clone()
+        out[:, y1:y2, x1:x2] = self.fill
+        return out
+
+class AutoRandomCrop(nn.Module):
+    """
+    Output size is always the original (H, W).
+    Padding is computed dynamically as round(H*ratio_h) and round(W*ratio_w).
+    """
+
+    def __init__(
+        self,
+        pad_ratio: Union[float, Tuple[float, float]] = 0.125,
+        pad_ratio_range: Optional[Tuple[float, float]] = None,  # e.g. (0.05, 0.15)
+        fill: int = 0,
+    ) -> None:
+        super().__init__()
+        self.pad_ratio = pad_ratio
+        self.pad_ratio_range = pad_ratio_range
+        self.fill = fill
+
+    def _get_ratios(self) -> Tuple[float, float]:
+        if self.pad_ratio_range is not None:
+            lo, hi = self.pad_ratio_range
+            r = float(torch.empty(1).uniform_(lo, hi).item())
+            return r, r
+
+        if isinstance(self.pad_ratio, tuple):
+            return float(self.pad_ratio[0]), float(self.pad_ratio[1])
+
+        r = float(self.pad_ratio)
+        return r, r
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        _, h, w = vF.get_dimensions(img)  # (C, H, W)
+
+        rh, rw = self._get_ratios()
+        rh = max(rh, 0.0)
+        rw = max(rw, 0.0)
+
+        pad_h = int(round(h * rh))
+        pad_w = int(round(w * rw))
+
+        if pad_h > 0 or pad_w > 0:
+            # padding format: [left, top, right, bottom]
+            img = vF.pad(img, padding=[pad_w, pad_h, pad_w, pad_h], fill=self.fill)
+
+            _, H, W = vF.get_dimensions(img)
+            max_i = H - h
+            max_j = W - w
+
+            i = int(torch.randint(0, max_i + 1, (1,)).item()) if max_i > 0 else 0
+            j = int(torch.randint(0, max_j + 1, (1,)).item()) if max_j > 0 else 0
+
+            img = vF.crop(img, i, j, h, w)
+
         return img
-
+    
 class SimpleImageTrainAugment(BaseModel):
-    # --- normalization ---
-    norm_mean: Tuple[float, ...]
-    norm_std: Tuple[float, ...]
+    mean: Sequence[float]
+    std: Sequence[float]
+    p: float = Field(default=0.325, ge=0.0, le=1.0)
 
-    # --- crop ---
-    crop_output_size: int = 32
-    crop_padding_px: int = 4
+    # advance
+    flip: bool = True
+    pad_ratio_range: Tuple[float, float] = (0.1,0.125)
+    cout_ratio_range: Tuple[float, float] = (0.20, 0.25)
 
-    # --- horizontal flip ---
-    enable_hflip: bool = True
+    def build(self):
+        rmin, rmax = self.cout_ratio_range
+        return v2.Compose(
+            [
+                AutoRandomCrop(pad_ratio_range=self.pad_ratio_range),
+                v2.RandomHorizontalFlip() if self.flip else v2.Identity(),
+                v2.RandomRotation(15, interpolation=v2.InterpolationMode.BILINEAR, fill=0),
+                # v2.RandomApply([v2.GaussianNoise(sigma=0.01)], p=self.p),
+                v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
 
-    # --- probabilities (explicit) ---
-    randaugment_apply_prob: float = Field(default=0.325, ge=0.0, le=1.0)
-    random_erasing_apply_prob: float = Field(default=0.5, ge=0.0, le=1.0)
-
-    # --- RandAugment ---
-    enable_randaugment: bool = True
-    randaugment_num_ops: int = Field(default=2, ge=1)
-    randaugment_magnitude: int = Field(default=7, ge=0)
-
-    # --- RandomErasing ---
-    erasing_area_fraction_range: Tuple[float, float] = (0.02, 0.2)
-    erasing_aspect_ratio_range: Tuple[float, float] = (0.3, 3.3)
-    erasing_fill: str = "random"  # torchvision expects "random" or a numeric value
-
-    # --- dtype / tensor conversion ---
-    dtype: str= "float32"
-
-    def build(self) -> v2.Compose:
-        ra = v2.RandAugment(
-            num_ops=self.randaugment_num_ops,
-            magnitude=self.randaugment_magnitude,
+                # v2.RandomApply([Cutout(ratio_range=self.cout_ratio_range)], p=self.p),
+                v2.RandomErasing(p=self.p, scale=(rmin*rmin, rmax*rmax), ratio=(1.0, 1.0), value=0),
+                v2.Normalize(self.mean, self.std),
+            ]
         )
-
-        return v2.Compose([
-            v2.RandomCrop(self.crop_output_size, padding=self.crop_padding_px),
-            v2.RandomHorizontalFlip() if self.enable_hflip else v2.Identity(),
-
-            v2.RandomApply([ra], p=self.randaugment_apply_prob)
-            if self.enable_randaugment else v2.Identity(),
-
-            ToTensor(dtype=self.dtype, scale=True).build(),
-
-            # single probability here (no wrapper) ✅
-            v2.RandomErasing(
-                p=self.random_erasing_apply_prob,
-                scale=self.erasing_area_fraction_range,
-                ratio=self.erasing_aspect_ratio_range,
-                value=self.erasing_fill,
-            ),
-
-            v2.Normalize(self.norm_mean, self.norm_std),
-        ])
+    #     strong_train_transforms = A.Compose([
+    #     A.RandomResizedCrop(224, 224, scale=(0.6, 1.0)),
+    #     A.HorizontalFlip(p=0.5),
+    #     A.OneOf([
+    #         A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
+    #         A.ToGray(p=1.0),
+    #     ], p=0.8),
+    #     A.OneOf([
+    #         A.GaussianBlur(blur_limit=(1, 3)),
+    #         A.GaussNoise(var_limit=(10, 50)),
+    #     ], p=0.5),
+    #     A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.5),
+    #     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    #     A.ToTensorV2(),
+    # ])
 
 class SimpleImageValAugment(BaseModel):
-    norm_mean: Tuple[float, ...]
-    norm_std: Tuple[float, ...]
+    norm_mean: Sequence[float]
+    norm_std: Sequence[float]
 
     dtype: str= "float32"
 
