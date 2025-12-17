@@ -435,7 +435,7 @@ class AccelTrainer:
             
         train_dataloader, val_dataloader = self._resolve_dataloaders(datamodule, train_dataloader, val_dataloader)
 
-        optimizer, scheduler, interval = self._configure_optimizers(model)
+        optimizer, scheduler, interval = model.configure_optimizers()
         self.scheduler_interval = interval or "epoch"
 
         model, optimizer, train_dataloader, val_dataloader, scheduler = self._prepare(
@@ -476,15 +476,6 @@ class AccelTrainer:
             raise ValueError("Need train_dataloader or datamodule")
 
         return train_dataloader, val_dataloader
-
-    def _configure_optimizers(
-        self,
-        model: "AccelLightningModule",
-    ) -> Tuple[torch.optim.Optimizer, Optional[torch.optim.lr_scheduler._LRScheduler], str]:
-        optimizer, scheduler, interval = model.configure_optimizers()
-        if optimizer is None:
-            raise ValueError("model.configure_optimizers() must return an optimizer")
-        return optimizer, scheduler, (interval or "epoch")
 
     def _prepare(
         self,
@@ -740,8 +731,9 @@ class LitBitConfig(BaseModel):
     student: Optional[Any] = None
     teacher: Optional[Any] = None
 
-    model_name: str = ""
-    model_size: str = ""
+    model_name: str = Field(default="mbv2", description="Model family/name identifier.")
+    model_size: str = Field(default="", description="Optional model size preset (empty = default).")
+    model_weights: str = Field(default="", description="Optional path/name for pretrained weights (empty = none).")
 
     hint_points: List[Union[str, Tuple]] = Field(default_factory=list)
 
@@ -756,6 +748,10 @@ class LitBit(AccelLightningModule):
         # --- core ---
         self.scale_op = config.scale_op
         self.student: nn.Module = config.student
+        if os.path.exists(self.config.model_weights):
+            stats = torch.load(self.config.model_weights)
+            stats = stats['model'] if 'model' in stats else stats
+            self.student.load_state_dict(state_dict=stats)
         self.teacher: Optional[nn.Module] = config.teacher
         self.has_teacher = True if config.teacher is not None else False
 
@@ -857,7 +853,11 @@ class LitBit(AccelLightningModule):
                 trainer.print(f"KD      : alpha_kd={self.alpha_kd}")
             if self.hint is not None:
                 trainer.print(f"Hint    : alpha_hint={self.alpha_hint} | points={self.hint_points}")
-            trainer.print(f"Optim(SGD): lr={self.lr} wd={self.wd} epochs={self.epochs}")
+                
+            opt,sch,inv = self.configure_optimizers()
+            trainer.print(f"Optim({class_name(opt)}): lr={self.lr} wd={self.wd} epochs={self.epochs}")
+            if sch:
+                trainer.print(f"Scheduler({class_name(sch)}): enable")
             trainer.print("=" * 80)
 
     def on_validation_epoch_start(self, epoch: int):
