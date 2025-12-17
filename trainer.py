@@ -5,6 +5,7 @@ import copy
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
+import numpy as np
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 import torch
@@ -57,7 +58,7 @@ class AccelLightningModule(nn.Module):
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> "Metrics":
         return Metrics(stage="val")
 
-    def configure_optimizers(self):
+    def configure_optimizers(self, trainer: 'AccelTrainer'=None):
         raise NotImplementedError
 
     # optional hooks
@@ -435,7 +436,7 @@ class AccelTrainer:
             
         train_dataloader, val_dataloader = self._resolve_dataloaders(datamodule, train_dataloader, val_dataloader)
 
-        optimizer, scheduler, interval = model.configure_optimizers()
+        optimizer, scheduler, interval = model.configure_optimizers(self)
         self.scheduler_interval = interval or "epoch"
 
         model, optimizer, train_dataloader, val_dataloader, scheduler = self._prepare(
@@ -1014,7 +1015,7 @@ class LitBit(AccelLightningModule):
             params += list(self.kd.parameters())
         return params
 
-    def configure_optimizers(self):
+    def configure_optimizers(self, trainer: 'AccelTrainer'=None):
         opt = torch.optim.SGD(
             self.configure_optimizer_params(),
             lr=self.lr,
@@ -1034,9 +1035,42 @@ class LitBit(AccelLightningModule):
                     return n_restarts, T0
             return 0, max_epochs
         
-        # Good 400-epoch default
+        def cosine_warm_restarts_lr(max_epochs, base_lr=1.0, eta_min=1e-6, T_mult=2, min_T0=20, n_restarts_max=10):
+            n_restarts, T0 = auto_n_restarts_T0(max_epochs, T_mult=T_mult, min_T0=min_T0, n_restarts_max=n_restarts_max)
+            # Build cycle lengths
+            n_cycles = n_restarts + 1
+            cycle_lengths = [T0 * (T_mult**k) for k in range(n_cycles)]
+            boundaries = np.cumsum([0] + cycle_lengths)  # start indices of each cycle; last is end
+            total = boundaries[-1]
+            # epochs we will plot: 0..max_epochs inclusive
+            epochs = np.arange(0, max_epochs + 1, dtype=float)
+            lrs = np.empty_like(epochs)
+
+            # For each epoch, find which cycle it is in using boundaries
+            # boundaries: [0, end1, end2, ..., total]
+            for i, e in enumerate(epochs):
+                # If training ends before schedule total, clamp to e
+                # Find cycle idx such that boundaries[idx] <= e < boundaries[idx+1]
+                idx = np.searchsorted(boundaries[1:], e, side='right')
+                idx = min(idx, len(cycle_lengths) - 1)
+                start = boundaries[idx]
+                Ti = cycle_lengths[idx]
+                t_cur = e - start
+                # In case e falls past planned total (unlikely), wrap into last cycle by mod
+                if t_cur > Ti:
+                    t_cur = t_cur % Ti
+                lrs[i] = eta_min + (base_lr - eta_min) * (1.0 + math.cos(math.pi * (t_cur / Ti))) / 2.0
+
+            restart_epochs = list(boundaries[1:-1].astype(int))  # where new cycle starts (excluding 0 and final end)
+            return epochs, lrs, n_restarts, T0, cycle_lengths, restart_epochs, int(total)
+        
+        planned_epochs = cosine_warm_restarts_lr(self.epochs)[-1]
+        if planned_epochs!=self.epochs and trainer:
+            trainer.print(f'[!!warning!!]: scheduler planned epochs={planned_epochs}, but now epochs={self.epochs}.')
+        
+        # Good for [102,300,510,1023,1512,2016,4064] epoch
         sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            opt, T_0=auto_n_restarts_T0(self.epochs)[1], T_mult=2, eta_min=1e-6
+            opt, T_0=auto_n_restarts_T0(self.epochs)[1], T_mult=2, eta_min=0.
         )
         return opt, sched, "epoch"
 
