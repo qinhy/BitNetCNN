@@ -61,7 +61,7 @@ class AccelLightningModule(nn.Module):
         raise NotImplementedError
 
     # optional hooks
-    def on_fit_start(self, accelerator: Accelerator): ...
+    def on_fit_start(self, trainer: 'AccelTrainer'): ...
     def on_train_epoch_start(self, epoch: int): ...
     def on_train_epoch_end(self, epoch: int): ...
     def on_validation_epoch_start(self, epoch: int): ...
@@ -446,7 +446,7 @@ class AccelTrainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
 
-        self.accelerator.unwrap_model(model).on_fit_start(self.accelerator)
+        self.accelerator.unwrap_model(model).on_fit_start(self)
 
         for epoch in range(self.max_epochs):
             self._run_epoch(stage="train", epoch=epoch, loader=train_dataloader)
@@ -825,8 +825,8 @@ class LitBit(AccelLightningModule):
         return self.student(x)
 
     @torch.no_grad()
-    def on_fit_start(self, accelerator: Accelerator):
-        self._accel = accelerator
+    def on_fit_start(self, trainer: 'AccelTrainer'):
+        self._accel = accel = trainer.accelerator
 
         if self.has_teacher and self.teacher is not None:
             self.teacher.eval()
@@ -839,26 +839,26 @@ class LitBit(AccelLightningModule):
 
         class_name = lambda c: c.__class__.__name__
 
-        if accelerator.is_main_process:
+        if accel.is_main_process:
             s_total = sum(p.numel() for p in self.student.parameters())
             s_train = sum(p.numel() for p in self.student.parameters() if p.requires_grad)
             t_total = sum(p.numel() for p in self.teacher.parameters()) if self.has_teacher and self.teacher else 0
             t_train = sum(p.numel() for p in self.teacher.parameters() if p.requires_grad) if self.teacher else 0
-            accelerator.print("=" * 80)
-            accelerator.print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes} | batch_size: {self.config.dataset.batch_size}")
-            accelerator.print(f"Student : {class_name(self.student)} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
+            trainer.print("=" * 80)
+            trainer.print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes} | batch_size: {self.config.dataset.batch_size}")
+            trainer.print(f"Student : {class_name(self.student)} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
             if self.has_teacher:
-                accelerator.print(f"Teacher : {class_name(self.teacher)} | params {t_total/1e6:.2f}M ({'frozen' if t_train==0 else t_train})")
+                trainer.print(f"Teacher : {class_name(self.teacher)} | params {t_total/1e6:.2f}M ({'frozen' if t_train==0 else t_train})")
             if self.ce_hard is not None:
-                accelerator.print("ce_hard : enable")
+                trainer.print("ce_hard : enable")
             if self.ce_soft is not None:
-                accelerator.print("ce_soft : enable")
+                trainer.print("ce_soft : enable")
             if self.kd is not None:
-                accelerator.print(f"KD      : alpha_kd={self.alpha_kd}")
+                trainer.print(f"KD      : alpha_kd={self.alpha_kd}")
             if self.hint is not None:
-                accelerator.print(f"Hint    : alpha_hint={self.alpha_hint} | points={self.hint_points}")
-            accelerator.print(f"Optim(SGD): lr={self.lr} wd={self.wd} epochs={self.epochs}")
-            accelerator.print("=" * 80)
+                trainer.print(f"Hint    : alpha_hint={self.alpha_hint} | points={self.hint_points}")
+            trainer.print(f"Optim(SGD): lr={self.lr} wd={self.wd} epochs={self.epochs}")
+            trainer.print("=" * 80)
 
     def on_validation_epoch_start(self, epoch: int):
         self._ternary_snapshot = self._clone_student()
