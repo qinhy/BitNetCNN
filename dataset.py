@@ -1,21 +1,23 @@
 import os
 import math
-from typing import Optional, Tuple, Union, List, Dict
+from typing import Optional, Sequence, Tuple, Union, List, Dict
 
 from matplotlib import pyplot as plt
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.data import default_collate
 
 from torchvision import datasets
+import torchvision.transforms.functional as vF
 from torchvision.transforms import v2
 from torchvision.transforms import InterpolationMode
 from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import extract_archive, download_url, check_integrity
+
+from bitlayers.aug import SimpleImageTrainAugment
 
 torch.set_float32_matmul_precision("high")
 
@@ -23,71 +25,6 @@ torch.set_float32_matmul_precision("high")
 # ----------------------------
 # Augmentations
 # ----------------------------
-class Cutout(nn.Module):
-    """Simple Cutout transform for tensors [C, H, W].
-
-    size:
-        - int       -> square hole (size x size)
-        - (h, w)    -> rectangular hole (height x width)
-    """
-
-    def __init__(self, size: Union[int, Tuple[int, int]] = 16):
-        super().__init__()
-        if isinstance(size, int):
-            self.size = (size, size)
-        else:
-            if len(size) != 2:
-                raise ValueError(f"Cutout size must be int or (h, w) tuple, got: {size}")
-            self.size = (int(size[0]), int(size[1]))
-
-    def forward(self, img: torch.Tensor) -> torch.Tensor:
-        # img is expected to be a Tensor after ToImage/ToDtype
-        if not torch.is_tensor(img):
-            return img
-
-        _, h, w = img.shape
-        if h <= 0 or w <= 0:
-            return img
-
-        mask_h, mask_w = self.size
-        mask_h_half = mask_h // 2
-        mask_w_half = mask_w // 2
-
-        cy = torch.randint(0, h, (1,)).item()
-        cx = torch.randint(0, w, (1,)).item()
-
-        y1 = max(0, cy - mask_h_half)
-        y2 = min(h, cy + mask_h_half)
-        x1 = max(0, cx - mask_w_half)
-        x2 = min(w, cx + mask_w_half)
-
-        img = img.clone()  # safer than in-place
-        img[:, y1:y2, x1:x2] = 0.0
-        return img
-
-
-def get_train_tf(
-    mean,
-    std,
-    flip: bool = True,
-    crop: Tuple[int, int] = (32, 4),
-    cout: Union[int, Tuple[int, int]] = (8, 8),
-    p: float = 0.325,
-    randaugment: bool = True,
-):
-    ra = v2.RandAugment(num_ops=2, magnitude=7)
-    return v2.Compose(
-        [
-            v2.RandomCrop(crop[0], padding=crop[1]),
-            v2.RandomHorizontalFlip() if flip else v2.Identity(),
-            v2.RandomApply([ra], p=p) if randaugment else v2.Identity(),
-            v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
-            v2.RandomApply([Cutout(size=cout)], p=p),
-            v2.Normalize(mean, std),
-        ]
-    )
-
-
 def get_val_tf(mean, std):
     return v2.Compose(
         [
@@ -326,7 +263,7 @@ class CIFAR100DataModule(DataSetModule):
         self.num_classes = 100
         self.mean = (0.5071, 0.4867, 0.4408)
         self.std = (0.2675, 0.2565, 0.2761)
-        self.train_tf = get_train_tf(self.mean, self.std, flip=True, crop=(32, 4), cout=(8, 8), p=0.325)
+        self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, p=0.325).build()
         self.val_tf = get_val_tf(self.mean, self.std)
         self.dataset_cls = datasets.CIFAR100
 
@@ -340,7 +277,7 @@ class TinyImageNetDataModule(DataSetModule):
         self.num_classes = 200
         self.mean = (0.4802, 0.4481, 0.3975)
         self.std = (0.2302, 0.2265, 0.2262)
-        self.train_tf = get_train_tf(self.mean, self.std, flip=True, crop=(64, 4), cout=(16, 16), p=0.325)
+        self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, p=0.325).build()
         self.val_tf = get_val_tf(self.mean, self.std)
         self.dataset_cls = TinyImageNetDataset
 
@@ -355,9 +292,7 @@ class MNISTDataModule(DataSetModule):
         self.mean = (0.1307,)
         self.std = (0.3081,)
         # RandAugment can be a bit odd on grayscale; enable if you know it's fine in your env.
-        self.train_tf = get_train_tf(
-            self.mean, self.std, flip=False, crop=(28, 2), cout=(8, 8), p=0.325, randaugment=False
-        )
+        self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, flip=False, p=0.325).build()
         self.val_tf = get_val_tf(self.mean, self.std)
         self.dataset_cls = datasets.MNIST
         # CutMix on MNIST is typically not useful; keep it off by default.
