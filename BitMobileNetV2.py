@@ -187,33 +187,26 @@ class LitBitMBv2KD(LitBit):
 # ----------------------------
 class Config(CommonTrainConfig):
     data: Optional[str] = Field(default=None, description="Alias for --data_dir (back-compat).")
-    width_mult: float = Field(
-        default=1.4,
-        description="Width multiplier for MobileNetV2.",
-    )
-    model_name: str = "mbv2"
-    model_size: str = ""
+    width_mult: float = Field(default=1.4, description="Width multiplier for MobileNetV2.")
+    model_name: str = Field(default="mbv2", description="Model family/name identifier.")
+    model_size: str = Field(default="", description="Optional model size preset (empty = default).")
+    model_weights: str = Field(default="", description="Optional path/name for pretrained weights (empty = none).")
+    teacher_variant: str = Field(default="cifar100_mobilenetv2_x1_4", description="Teacher checkpoint/variant name.")
+    num_workers: int = Field(default=1, description="Number of DataLoader worker processes.")
+    batch_size: int = Field(default=512, description="Training batch size.")
+    epochs: int = Field(default=10, description="Number of training epochs.")
+    mixup: bool = Field(default=True, description="Enable MixUp augmentation.")
+    cutmix: bool = Field(default=True, description="Enable CutMix augmentation.")
 
-    teacher_variant: str = Field(
-        default="cifar100_mobilenetv2_x1_4",
-        description="Teacher checkpoint/variant name.",
-    )
-
-    num_workers: int = 1
-
-    batch_size:int = 512
-    epochs:int = 10
-
-    mixup: bool = True
-    cutmix: bool = True
-
-    lr: float = 0.2
-    alpha_kd: float = 0.0 #0.1 this model is better without teacher
-    alpha_hint: float = 0.0 #2.0 this model is better without teacher
-
-    scale_op:str="median"
-    export_dir:str="./ckpt_c100_mbv2"
-    dataset_name:str='c100'
+    
+    adam_w: bool = Field(default=False, description="use adam_w or False(SGD).")
+    lr: float = Field(default=0.2, description="Base learning rate.")    
+    wd: float = Field(1e-4, ge=0)
+    alpha_kd: float = Field(default=0.0, description="Knowledge distillation loss weight (0.0 disables KD).")
+    alpha_hint: float = Field(default=0.0, description="Hint/intermediate feature matching loss weight (0.0 disables).")
+    scale_op: str = Field(default="median", description="Scaling operation name (e.g., median/mean/etc.).")
+    export_dir: str = Field(default="./ckpt_c100_mbv2", description="Directory to save checkpoints/exports.")
+    dataset_name: str = Field(default="c100", description="Dataset identifier (e.g., c100 for CIFAR-100).")
 
 def main():
     parser = ArgumentParser(model=Config)
@@ -237,6 +230,26 @@ def main():
         teacher_device="cpu",
     )
 
+    if args.adam_w:
+        def configure_optimizers():
+            opt = torch.optim.AdamW(
+                lit.configure_optimizer_params(),
+                lr=lit.lr, weight_decay=lit.wd
+            )
+            return opt, None, "epoch"
+        lit.configure_optimizers = configure_optimizers
+    else:
+        def configure_optimizers():
+            opt = torch.optim.SGD(
+                lit.configure_optimizer_params(),
+                lr=lit.lr,
+                momentum=0.9,
+                weight_decay=lit.wd,
+                nesterov=True,
+            )
+            return opt, None, "epoch"
+        lit.configure_optimizers = configure_optimizers
+    
     trainer = AccelTrainer(
         max_epochs=args.epochs,
         mixed_precision="fp16" if args.amp else "no",
