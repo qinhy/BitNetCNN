@@ -220,7 +220,7 @@ class SimpleImageValAugment(BaseModel):
     def build(self) -> v2.Compose:
         return A.Compose([
             A.ToTensorV2(),
-            A.Normalize(mean=self.norm_mean, std=self.norm_std),
+            A.Normalize(mean=self.mean, std=self.std),
         ])
 
 class MixupCutmix(BaseModel):
@@ -249,8 +249,8 @@ class MixupCutmix(BaseModel):
 
 class CIFAR100Augment(BaseModel):
     # --- normalization ---
-    norm_mean: Tuple[float, ...] = (0.5071, 0.4867, 0.4408)
-    norm_std: Tuple[float, ...] = (0.2675, 0.2565, 0.2761)
+    mean: Tuple[float, ...] = (0.5071, 0.4867, 0.4408)
+    std: Tuple[float, ...] = (0.2675, 0.2565, 0.2761)
     # --- crop ---
     crop_output_size: int = 32
     crop_padding_px: int = 4
