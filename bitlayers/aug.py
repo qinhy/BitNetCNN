@@ -1,10 +1,18 @@
 import math
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import GaussianBlur
 from torchvision.transforms import v2
 import torchvision.transforms.functional as vF
+
+from collections import OrderedDict
+from typing import Any, Dict, Optional, Tuple
+import albumentations as A
+import albumentations.augmentations.crops.functional as fcrops
+import albumentations.augmentations.geometric.functional as fgeometric
 
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -153,47 +161,55 @@ class AutoRandomCrop(nn.Module):
             img = vF.crop(img, i, j, h, w)
 
         return img
-    
+
+class AutoRandomResizedCrop(A.RandomResizedCrop):
+    def __init__(self, scale = ..., ratio = ..., interpolation = cv2.INTER_LINEAR, mask_interpolation = cv2.INTER_NEAREST, area_for_downscale = None, p = 1):
+        super().__init__((1,1), scale, ratio, interpolation, mask_interpolation, area_for_downscale, p)
+
+    def apply(
+        self,
+        img: np.ndarray,
+        crop_coords: tuple[int, int, int, int],
+        **params: Any,
+    ) -> np.ndarray:
+        h, w = img.shape[:2]
+        self.size = (h, w)
+        crop = fcrops.crop(img, *crop_coords)
+        interpolation = self._get_interpolation_for_resize(crop.shape[:2], "image")
+        return fgeometric.resize(crop, self.size, interpolation)
+        
+
 class SimpleImageTrainAugment(BaseModel):
     mean: Sequence[float]
     std: Sequence[float]
     p: float = Field(default=0.325, ge=0.0, le=1.0)
+    
 
     # advance
     flip: bool = True
-    pad_ratio_range: Tuple[float, float] = (0.1,0.125)
-    cout_ratio_range: Tuple[float, float] = (0.20, 0.25)
+    noise_std_range: Tuple[float, float] = (0.0125, 0.025)
+    cout_ratio_range: Tuple[float, float] = (0.1, 0.2)
 
     def build(self):
         rmin, rmax = self.cout_ratio_range
-        return v2.Compose(
-            [
-                AutoRandomCrop(pad_ratio_range=self.pad_ratio_range),
-                v2.RandomHorizontalFlip() if self.flip else v2.Identity(),
-                v2.RandomRotation(15, interpolation=v2.InterpolationMode.BILINEAR, fill=0),
-                # v2.RandomApply([v2.GaussianNoise(sigma=0.01)], p=self.p),
-                v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)]),
-
-                # v2.RandomApply([Cutout(ratio_range=self.cout_ratio_range)], p=self.p),
-                v2.RandomErasing(p=self.p, scale=(rmin*rmin, rmax*rmax), ratio=(1.0, 1.0), value=0),
-                v2.Normalize(self.mean, self.std),
-            ]
-        )
-    #     strong_train_transforms = A.Compose([
-    #     A.RandomResizedCrop(224, 224, scale=(0.6, 1.0)),
-    #     A.HorizontalFlip(p=0.5),
-    #     A.OneOf([
-    #         A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
-    #         A.ToGray(p=1.0),
-    #     ], p=0.8),
-    #     A.OneOf([
-    #         A.GaussianBlur(blur_limit=(1, 3)),
-    #         A.GaussNoise(var_limit=(10, 50)),
-    #     ], p=0.5),
-    #     A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.5),
-    #     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    #     A.ToTensorV2(),
-    # ])
+        return  A.Compose([
+            A.Rotate(limit=(-10,10), p=0.5),
+            AutoRandomResizedCrop(scale=(0.8, 1.0), ratio=(0.75, 1.33),p=0.5),
+            A.HorizontalFlip() if self.flip else A.NoOp(),
+            A.OneOf([
+                A.ColorJitter(p=1.0,brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
+                A.ToGray(p=1.0),
+            ], p=self.p),
+            A.OneOf([
+                A.GaussianBlur(p=1.0,blur_limit=(1, 3)),
+                A.GaussNoise(p=1.0,std_range=self.noise_std_range),
+            ], p=self.p),
+             A.CoarseDropout(num_holes_range=(1,4), 
+                             hole_height_range=(rmin, rmax), 
+                             hole_width_range=(rmin, rmax), p=self.p),
+            A.Normalize(mean=self.mean, std=self.std),
+            A.ToTensorV2(),
+        ])
 
 class SimpleImageValAugment(BaseModel):
     norm_mean: Sequence[float]

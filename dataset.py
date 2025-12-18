@@ -1,8 +1,10 @@
 import os
 import math
-from typing import Optional, Sequence, Tuple, Union, List, Dict
+from typing import Any, Optional, Sequence, Tuple, Union, List, Dict
 
+import cv2
 from matplotlib import pyplot as plt
+import numpy as np
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 import torch
 import torch.nn as nn
@@ -257,6 +259,16 @@ class DataSetModule:
 # ----------------------------
 # CIFAR-100
 # ----------------------------
+class CIFAR100Dataset(datasets.CIFAR100):
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        img, target = self.data[index], self.targets[index]
+        img:np.ndarray = img
+        if self.transform is not None:
+            img = self.transform(image=img)["image"]
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return img, target
+    
 class CIFAR100DataModule(DataSetModule):
     def __init__(self, config: "DataModuleConfig"):
         super().__init__(config)
@@ -265,7 +277,7 @@ class CIFAR100DataModule(DataSetModule):
         self.std = (0.2675, 0.2565, 0.2761)
         self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, p=0.325).build()
         self.val_tf = get_val_tf(self.mean, self.std)
-        self.dataset_cls = datasets.CIFAR100
+        self.dataset_cls = CIFAR100Dataset
 
 
 # ----------------------------
@@ -285,6 +297,18 @@ class TinyImageNetDataModule(DataSetModule):
 # ----------------------------
 # MNIST
 # ----------------------------
+class MNISTDataset(datasets.MNIST):
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        img, target = self.data[index], self.targets[index]
+        img:np.ndarray = img.numpy()
+        img:np.ndarray = cv2.cvtColor(img,cv2.COLOR_GRAY2RGB)
+        if self.transform is not None:
+            img:torch.Tensor = self.transform(image=img)["image"]
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        img = img.mean(0,keepdim=True)
+        return img, target
+    
 class MNISTDataModule(DataSetModule):
     def __init__(self, config: "DataModuleConfig"):
         super().__init__(config)
@@ -294,7 +318,7 @@ class MNISTDataModule(DataSetModule):
         # RandAugment can be a bit odd on grayscale; enable if you know it's fine in your env.
         self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, flip=False, p=0.325).build()
         self.val_tf = get_val_tf(self.mean, self.std)
-        self.dataset_cls = datasets.MNIST
+        self.dataset_cls = MNISTDataset
         # CutMix on MNIST is typically not useful; keep it off by default.
         self.cutmix = False
 
@@ -421,17 +445,26 @@ class TinyImageNetDataset(VisionDataset):
     def _check_integrity(self):
         return check_integrity(os.path.join(self.root, self.filename), self.md5)
 
-    def __getitem__(self, index):
-        img_path, target = self.data[index]
-        image = self.loader(img_path)
+    # def __getitem__(self, index):
+    #     img_path, target = self.data[index]
+    #     image = self.loader(img_path)
 
+    #     if self.transform is not None:
+    #         image = self.transform(image)
+    #     if self.target_transform is not None:
+    #         target = self.target_transform(target)
+
+    #     return image, target
+
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        img, target = self.data[index], self.targets[index]
+        img:np.ndarray = img
         if self.transform is not None:
-            image = self.transform(image)
+            img = self.transform(image=img)["image"]
         if self.target_transform is not None:
             target = self.target_transform(target)
-
-        return image, target
-
+        return img, target
+    
     def __len__(self):
         return len(self.data)
 
