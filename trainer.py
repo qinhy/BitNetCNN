@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedType
 from accelerate.utils import gather_object, broadcast_object_list
 from tqdm.auto import tqdm
 
@@ -478,15 +478,13 @@ class AccelTrainer:
 
         return train_dataloader, val_dataloader
 
-    def _prepare(
-        self,
-        model: "AccelLightningModule",
-        optimizer: torch.optim.Optimizer,
-        train_dataloader: DataLoader,
-        val_dataloader: Optional[DataLoader],
-        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
-    ):
-        objs: List[Any] = [model, optimizer, train_dataloader]
+    def _prepare(self, model:'LitBit', optimizer, train_dataloader, val_dataloader=None, scheduler=None):
+        # Only do SyncBN in multi-GPU DDP-style training on CUDA
+        if (self.accelerator.distributed_type == DistributedType.MULTI_GPU
+            and self.accelerator.device.type == "cuda"):
+            model.student = nn.SyncBatchNorm.convert_sync_batchnorm(model.student)
+            
+        objs = [model, optimizer, train_dataloader]
         if val_dataloader is not None:
             objs.append(val_dataloader)
         if scheduler is not None:
@@ -498,14 +496,9 @@ class AccelTrainer:
         model_p = prepared[idx]; idx += 1
         optim_p = prepared[idx]; idx += 1
         train_p = prepared[idx]; idx += 1
-
-        val_p = None
-        if val_dataloader is not None:
-            val_p = prepared[idx]; idx += 1
-
-        sched_p = None
-        if scheduler is not None:
-            sched_p = prepared[idx]; idx += 1
+        val_p = prepared[idx] if val_dataloader is not None else None
+        idx += 1 if val_dataloader is not None else 0
+        sched_p = prepared[idx] if scheduler is not None else None
 
         return model_p, optim_p, train_p, val_p, sched_p
 
