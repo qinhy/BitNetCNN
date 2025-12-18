@@ -457,8 +457,9 @@ class TinyImageNetDataset(VisionDataset):
     #     return image, target
 
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        img, target = self.data[index], self.targets[index]
-        img:np.ndarray = img
+        img_path, target = self.data[index]
+        img = self.loader(img_path)
+        img:np.ndarray = np.asarray(img)
         if self.transform is not None:
             img = self.transform(image=img)["image"]
         if self.target_transform is not None:

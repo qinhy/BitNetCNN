@@ -218,9 +218,9 @@ class SimpleImageValAugment(BaseModel):
     dtype: str= "float32"
 
     def build(self) -> v2.Compose:
-        return v2.Compose([
-            ToTensor(self.dtype, scale=True).build(),
-            v2.Normalize(self.norm_mean, self.norm_std),
+        return A.Compose([
+            A.ToTensorV2(),
+            A.Normalize(mean=self.norm_mean, std=self.norm_std),
         ])
 
 class MixupCutmix(BaseModel):
