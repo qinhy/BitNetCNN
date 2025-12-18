@@ -212,8 +212,8 @@ class SimpleImageTrainAugment(BaseModel):
         ])
 
 class SimpleImageValAugment(BaseModel):
-    norm_mean: Sequence[float]
-    norm_std: Sequence[float]
+    mean: Sequence[float]
+    std: Sequence[float]
 
     dtype: str= "float32"
 
