@@ -19,7 +19,7 @@ from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import extract_archive, download_url, check_integrity
 
-from bitlayers.aug import SimpleImageTrainAugment
+from bitlayers.aug import SimpleImageTrainAugment, SimpleImageValAugment
 
 torch.set_float32_matmul_precision("high")
 
@@ -276,7 +276,7 @@ class CIFAR100DataModule(DataSetModule):
         self.mean = (0.5071, 0.4867, 0.4408)
         self.std = (0.2675, 0.2565, 0.2761)
         self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, p=0.325).build()
-        self.val_tf = get_val_tf(self.mean, self.std)
+        self.val_tf = SimpleImageValAugment(mean=self.mean,std=self.std)
         self.dataset_cls = CIFAR100Dataset
 
 
@@ -290,7 +290,7 @@ class TinyImageNetDataModule(DataSetModule):
         self.mean = (0.4802, 0.4481, 0.3975)
         self.std = (0.2302, 0.2265, 0.2262)
         self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, p=0.325).build()
-        self.val_tf = get_val_tf(self.mean, self.std)
+        self.val_tf = SimpleImageValAugment(mean=self.mean,std=self.std)
         self.dataset_cls = TinyImageNetDataset
 
 
@@ -317,7 +317,7 @@ class MNISTDataModule(DataSetModule):
         self.std = (0.3081,)
         # RandAugment can be a bit odd on grayscale; enable if you know it's fine in your env.
         self.train_tf = SimpleImageTrainAugment(mean=self.mean,std=self.std, flip=False, p=0.325).build()
-        self.val_tf = get_val_tf(self.mean, self.std)
+        self.val_tf = SimpleImageValAugment(mean=self.mean,std=self.std)
         self.dataset_cls = MNISTDataset
         # CutMix on MNIST is typically not useful; keep it off by default.
         self.cutmix = False
