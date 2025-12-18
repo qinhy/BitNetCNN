@@ -200,10 +200,12 @@ class Config(CommonTrainConfig):
 
     
     adam_w: bool = Field(default=False, description="use adam_w or False(SGD).")
-    lr: float = Field(default=0.2, description="Base learning rate.")    
+    lr: float = Field(default=0.2, description="Base learning rate.")
     wd: float = Field(1e-4, ge=0)
-    alpha_kd: float = Field(default=0.0, description="Knowledge distillation loss weight (0.0 disables KD).")
-    alpha_hint: float = Field(default=0.0, description="Hint/intermediate feature matching loss weight (0.0 disables).")
+
+    alpha_kd: float = Field(default=0.1, description="Knowledge distillation loss weight (0.0 disables KD).")
+    alpha_hint: float = Field(default=1.0, description="Hint/intermediate feature matching loss weight (0.0 disables).")
+
     scale_op: str = Field(default="median", description="Scaling operation name (e.g., median/mean/etc.).")
     export_dir: str = Field(default="./ckpt_c100_mbv2", description="Directory to save checkpoints/exports.")
     dataset_name: str = Field(default="c100", description="Dataset identifier (e.g., c100 for CIFAR-100).")
