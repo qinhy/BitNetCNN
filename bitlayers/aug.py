@@ -219,8 +219,8 @@ class SimpleImageValAugment(BaseModel):
 
     def build(self) -> v2.Compose:
         return A.Compose([
-            A.ToTensorV2(),
             A.Normalize(mean=self.mean, std=self.std),
+            A.ToTensorV2(),
         ])
 
 class MixupCutmix(BaseModel):
