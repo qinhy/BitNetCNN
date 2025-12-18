@@ -16,11 +16,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator, DistributedType
 from accelerate.utils import gather_object, broadcast_object_list
 from tqdm.auto import tqdm
-
 from dataset import DataModuleConfig, DataSetModule
-
-torch.set_float32_matmul_precision("high")
-
 
 # ----------------------------
 # Model-wide conversion helpers
@@ -245,6 +241,36 @@ class ExportBestTernary:
 # ----------------------------
 # AccelTrainer
 # ----------------------------
+class TextAppendLogger(BaseModel):
+    filepath: Optional[Path] = None  # if None -> auto-generate
+    log_dir: Path = Field(default=Path("logs"))
+    name_prefix: str = "run"
+    ext: str = ".txt"
+    prefix_ts: bool = True
+    encoding: str = "utf-8"
+
+    def resolve_path(self):
+        if self.filepath is None:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ext = self.ext if self.ext.startswith(".") else f".{self.ext}"
+            self.filepath = Path(self.log_dir) / f"{self.name_prefix}_{ts}{ext}"
+        else:
+            self.filepath = Path(self.filepath)
+
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        return self
+
+    def __call__(self, text: str) -> None:
+        self.resolve_path()
+        line = text.rstrip("\n")
+        if self.prefix_ts:
+            ts = datetime.now().isoformat(timespec="seconds")
+            line = f"[{ts}] {line}"
+
+        with self.filepath.open("a", encoding=self.encoding) as f:
+            f.write(line + "\n")
+            f.flush()
+
 class StepMetricsAccumulator:
     """
     Accumulates (value * batch_size) and batch_size across micro-steps.
@@ -267,17 +293,16 @@ class StepMetricsAccumulator:
             t = t.float().mean() if t.numel() != 1 else t.float()
             return t.to(self.acc.device)
         try:
-            return torch.tensor(float(v), device=self.acc.device, dtype=torch.float32)
+            return torch.tensor(float(v), device=self.acc.device).float()
         except Exception:
             return None
 
     @staticmethod
     def _stage_prefix(stage: str, key: str) -> str:
-        # enforce "train/..." or "val/..." unless user already provided a prefix
         return key if "/" in key else f"{stage}/{key}"
 
-    def update(self, metrics_obj: Metrics, batch_size: int, stage: str) -> None:
-        bs = torch.tensor(float(batch_size), device=self.acc.device, dtype=torch.float32)
+    def update(self, metrics_obj: "Metrics", batch_size: int, stage: str) -> None:
+        bs = torch.tensor(float(batch_size), device=self.acc.device).float()
         self.den = self.den + bs
 
         # stable loss key
@@ -322,10 +347,6 @@ class StepMetricsAccumulator:
         broadcast_object_list(obj, from_process=0)
         return obj[0]
 
-    def compute_global_means_and_reset(self) -> Dict[str, torch.Tensor]:
-        means, _count = self.compute_global_means_count_and_reset()
-        return means
-
     def compute_global_means_count_and_reset(self) -> Tuple[Dict[str, torch.Tensor], int]:
         """
         IMPORTANT: call on ALL ranks (no main-process guard), otherwise you can deadlock.
@@ -349,54 +370,24 @@ class StepMetricsAccumulator:
         self.reset()
         return out, count
 
-
-class TextAppendLogger(BaseModel):
-    filepath: Optional[Path] = None  # if None -> auto-generate
-    log_dir: Path = Field(default=Path("logs"))
-    name_prefix: str = "run"
-    ext: str = ".txt"
-    prefix_ts: bool = True
-    encoding: str = "utf-8"
-
-    def resolve_path(self):
-        if self.filepath is None:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ext = self.ext if self.ext.startswith(".") else f".{self.ext}"
-            self.filepath = Path(self.log_dir) / f"{self.name_prefix}_{ts}{ext}"
-        else:
-            self.filepath = Path(self.filepath)
-
-        self.filepath.parent.mkdir(parents=True, exist_ok=True)
-        return self
-
-    def __call__(self, text: str) -> None:
-        self.resolve_path()
-        line = text.rstrip("\n")
-        if self.prefix_ts:
-            ts = datetime.now().isoformat(timespec="seconds")
-            line = f"[{ts}] {line}"
-
-        with self.filepath.open("a", encoding=self.encoding) as f:
-            f.write(line + "\n")
-            f.flush()
-
 class AccelTrainer:
     def __init__(
         self,
         max_epochs: int,
-        mixed_precision: str = "no",  # "no" | "fp16" | "bf16"
+        mixed_precision: str = "no",  # "no" | "fp16" | "bf16" | "fp8"
         gradient_accumulation_steps: int = 1,
         max_grad_norm: Optional[float] = None,
         show_progress_bar: bool = True,
         metrics_manager: Optional["MetricsManager"] = None,
         log_every_n_steps: int = 10,
-        logger: Optional[Callable[..., None]] = TextAppendLogger(),
+        logger: Optional[Callable[..., None]] = None,
+        # FP8 extras (optional)
+        fp8_backend: Optional[Literal["te", "msamp", "ao"]] = None,
+        fp8_kwargs: Optional[dict] = None,
+        # Advanced: pass custom Accelerate kwargs_handlers directly
+        kwargs_handlers: Optional[list] = None,
     ):
         self.max_epochs = int(max_epochs)
-        self.accelerator = Accelerator(
-            mixed_precision=mixed_precision,
-            gradient_accumulation_steps=int(gradient_accumulation_steps),
-        )
         self.max_grad_norm = max_grad_norm
         self.show_progress_bar = show_progress_bar
         self.log_every_n_steps = int(log_every_n_steps)
@@ -421,6 +412,36 @@ class AccelTrainer:
         self.metrics_manager = metrics_manager
         self.logger=logger
 
+        # ---- FP8 recipe selection (optional) ----
+        handlers = list(kwargs_handlers) if kwargs_handlers is not None else []
+
+        if mixed_precision == "fp8" and fp8_backend is not None:
+            fp8_kwargs = fp8_kwargs or {}
+            try:
+                # Newer Accelerate uses recipe kwargs classes
+                from accelerate.utils import TERecipeKwargs, MSAMPRecipeKwargs, AORecipeKwargs
+            except Exception as e:
+                raise RuntimeError(
+                    "FP8 backend recipe requested, but your accelerate version "
+                    "doesn't expose TERecipeKwargs/MSAMPRecipeKwargs/AORecipeKwargs. "
+                    "Upgrade accelerate or pass kwargs_handlers yourself."
+                ) from e
+
+            if fp8_backend == "te":
+                handlers.append(TERecipeKwargs(**fp8_kwargs))
+            elif fp8_backend == "msamp":
+                handlers.append(MSAMPRecipeKwargs(**fp8_kwargs))
+            elif fp8_backend == "ao":
+                handlers.append(AORecipeKwargs(**fp8_kwargs))
+            else:
+                raise ValueError(f"Unknown fp8_backend={fp8_backend!r}")
+
+        self.accelerator = Accelerator(
+            mixed_precision=mixed_precision,
+            gradient_accumulation_steps=int(gradient_accumulation_steps),
+            kwargs_handlers=handlers or None,
+        )
+
     # -----------------------------
     # Public API
     # -----------------------------
@@ -431,9 +452,13 @@ class AccelTrainer:
         train_dataloader: Optional[DataLoader] = None,
         val_dataloader: Optional[DataLoader] = None,
     ):
-        if self.logger is not None:
-            self.logger.log_dir = model.config.export_dir
-            
+        # optional logger dir convention
+        if self.logger is not None and hasattr(model, "config") and hasattr(model.config, "export_dir"):
+            try:
+                self.logger.log_dir = model.config.export_dir
+            except Exception:
+                pass
+
         train_dataloader, val_dataloader = self._resolve_dataloaders(datamodule, train_dataloader, val_dataloader)
 
         optimizer, scheduler, interval = model.configure_optimizers(self)
@@ -447,6 +472,7 @@ class AccelTrainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
 
+        # hooks on unwrapped model are fine
         self.accelerator.unwrap_model(model).on_fit_start(self)
 
         for epoch in range(self.max_epochs):
@@ -478,12 +504,13 @@ class AccelTrainer:
 
         return train_dataloader, val_dataloader
 
-    def _prepare(self, model:'LitBit', optimizer, train_dataloader, val_dataloader=None, scheduler=None):
+    def _prepare(self, model: nn.Module, optimizer, train_dataloader, val_dataloader=None, scheduler=None):
         # Only do SyncBN in multi-GPU DDP-style training on CUDA
         if (self.accelerator.distributed_type == DistributedType.MULTI_GPU
-            and self.accelerator.device.type == "cuda"):
+            and self.accelerator.device.type == "cuda"
+            and hasattr(model, "student")):
             model.student = nn.SyncBatchNorm.convert_sync_batchnorm(model.student)
-            
+
         objs = [model, optimizer, train_dataloader]
         if val_dataloader is not None:
             objs.append(val_dataloader)
@@ -508,7 +535,8 @@ class AccelTrainer:
     def print(self, msg: str) -> None:
         if self.accelerator.is_main_process:
             tqdm.write(msg)
-            if self.logger:self.logger(msg)
+            if self.logger:
+                self.logger(msg)
 
     def _pbar(self, loader: DataLoader, stage: str, epoch: int):
         if not (self.show_progress_bar and self.accelerator.is_main_process):
@@ -516,7 +544,7 @@ class AccelTrainer:
         return tqdm(loader, desc=f"{stage} {epoch+1}", leave=False, dynamic_ncols=True)
 
     def _log(self, metrics: "Metrics", trainer_model: nn.Module, pbar, *, force_print: bool = False) -> None:
-        # ✅ only main logs (prevents duplicate stdout + duplicate MetricsManager rows)
+        # only main logs
         if not self.accelerator.is_main_process:
             return
 
@@ -555,21 +583,20 @@ class AccelTrainer:
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
 
-    # -----------------------------
-    # Epoch runner using StepMetricsAccumulator
-    # -----------------------------
     @staticmethod
     def _mean_key(k: str) -> str:
-        # avoid "_mean_mean"
         return k if k.endswith("_mean") else f"{k}_mean"
 
+    # -----------------------------
+    # Epoch runner (FP16/BF16/FP8-ready)
+    # -----------------------------
     def _run_epoch(self, stage: Literal["train", "val"], epoch: int, loader: DataLoader) -> "Metrics":
         assert self.model is not None
         if stage == "train":
             assert self.optimizer is not None
 
-        model = self.model
-        raw_model:LitBit = self.accelerator.unwrap_model(model)
+        model = self.model                       # ✅ prepared/wrapped model
+        raw_model = self.accelerator.unwrap_model(model)  # ✅ only for hooks/export
         optimizer = self.optimizer
         accelerator = self.accelerator
 
@@ -584,11 +611,9 @@ class AccelTrainer:
         self._maybe_set_dataloader_epoch(loader, epoch)
         pbar = self._pbar(loader, stage, epoch)
 
-        # ✅ global epoch accumulator (works for BOTH train/val)
         epoch_accum = StepMetricsAccumulator(accelerator)
-
-        # ✅ train-only window accumulator (micro-steps -> optimizer-step)
         step_accum = StepMetricsAccumulator(accelerator) if stage == "train" else None
+
         opt_step = -1
         last_micro_step = -1
 
@@ -598,12 +623,18 @@ class AccelTrainer:
 
             if stage == "train":
                 with accelerator.accumulate(model):
-                    m = raw_model.training_step(batch, micro_step).model_copy(
-                        update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
-                    )
-                    m.metrics['lr'] = optimizer.param_groups[0]["lr"]
-                    
-                    # accumulate for epoch + optimizer-step window
+                    # ✅ This is the key for fp16/bf16/fp8:
+                    with accelerator.autocast():
+                        m = model.training_step(batch, micro_step).model_copy(
+                            update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
+                        )
+
+                    if optimizer is not None:
+                        try:
+                            m.metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+                        except Exception:
+                            pass
+
                     epoch_accum.update(m, batch_size=bs, stage=stage)
                     step_accum.update(m, batch_size=bs, stage=stage)
 
@@ -619,12 +650,14 @@ class AccelTrainer:
                         optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
 
+                        # ✅ If fp16 overflow caused step to be skipped, don’t advance LR
                         if self.scheduler is not None and self.scheduler_interval == "step":
-                            self.scheduler.step()
+                            if not accelerator.optimizer_step_was_skipped:
+                                self.scheduler.step()
 
-                        # ✅ log ONE global mean row per optimizer step
+                        # log ONE global mean row per optimizer step
                         opt_step += 1
-                        step_means, step_count = step_accum.compute_global_means_count_and_reset()  # ALL ranks
+                        step_means, step_count = step_accum.compute_global_means_count_and_reset()
 
                         loss_key = f"{stage}/loss"
                         step_loss = step_means.pop(loss_key, None)
@@ -632,8 +665,8 @@ class AccelTrainer:
                         step_row = Metrics(
                             stage=stage,
                             epoch=epoch,
-                            step=opt_step,          # optimizer-step index
-                            batch_size=step_count,  # true global samples in this window
+                            step=opt_step,
+                            batch_size=step_count,
                             loss=step_loss,
                             metrics=step_means,
                         )
@@ -641,23 +674,20 @@ class AccelTrainer:
 
             else:
                 with torch.no_grad():
-                    m = raw_model.validation_step(batch, micro_step).model_copy(
-                        update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
-                    )
-
-                # ✅ accumulate epoch stats (global mean at end)
+                    with accelerator.autocast():
+                        m = model.validation_step(batch, micro_step).model_copy(
+                            update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
+                        )
                 epoch_accum.update(m, batch_size=bs, stage=stage)
 
-        # ✅ global epoch means (ALL ranks)
         epoch_means, epoch_count = epoch_accum.compute_global_means_count_and_reset()
-
-        # keep your previous convention: *_mean keys in epoch summary (no double-mean)
         summary_metrics = {self._mean_key(k): v for k, v in epoch_means.items()}
+
         summary = Metrics(
             stage=stage,
             epoch=epoch,
             step=max(last_micro_step, 0),
-            batch_size=epoch_count,  # true global samples in epoch
+            batch_size=epoch_count,
             loss=None,
             metrics=summary_metrics,
         )
@@ -906,11 +936,11 @@ class LitBit(AccelLightningModule):
             )
         return loss_hint
 
-    def teacher_forward(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+    @torch.no_grad()
+    def teacher_forward(self, x):
         if not self.has_teacher or self.teacher is None:
             return None
-        with torch.no_grad():
-            return self.teacher.eval()(x).detach()
+        return self.teacher(x)
 
     @torch.no_grad()
     def _clone_student(self) -> nn.Module:
