@@ -388,31 +388,8 @@ class AccelTrainer:
         kwargs_handlers: Optional[list] = None,
     ):
         self.max_epochs = int(max_epochs)
-        self.max_grad_norm = max_grad_norm
-        self.show_progress_bar = show_progress_bar
-        self.log_every_n_steps = int(log_every_n_steps)
 
-        self.model: Optional["AccelLightningModule"] = None
-        self.optimizer: Optional[torch.optim.Optimizer] = None
-        self.scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
-        self.scheduler_interval: str = "epoch"
-
-        # ✅ avoid shared mutable defaults across trainer instances
-        if metrics_manager is None:
-            metrics_manager = MetricsManager(
-                epoch_metric_tracers=[
-                    MetricsTracer(
-                        stage="val",
-                        key="val/acc_tern_mean",
-                        mode="max",
-                        callback=ExportBestTernary(),
-                    )
-                ]
-            )
-        self.metrics_manager = metrics_manager
-        self.logger=logger
-
-        # ---- FP8 recipe selection (optional) ----
+        # ---- optional FP8 recipe handler ----
         handlers = list(kwargs_handlers) if kwargs_handlers is not None else []
 
         if mixed_precision == "fp8" and fp8_backend is not None:
@@ -441,6 +418,30 @@ class AccelTrainer:
             gradient_accumulation_steps=int(gradient_accumulation_steps),
             kwargs_handlers=handlers or None,
         )
+
+        self.max_grad_norm = max_grad_norm
+        self.show_progress_bar = show_progress_bar
+        self.log_every_n_steps = int(log_every_n_steps)
+
+        self.model: Optional["AccelLightningModule"] = None
+        self.optimizer: Optional[torch.optim.Optimizer] = None
+        self.scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None
+        self.scheduler_interval: str = "epoch"
+
+        # keep your original default if you pass None in your codebase
+        if metrics_manager is None:
+            metrics_manager = MetricsManager(
+                epoch_metric_tracers=[
+                    MetricsTracer(
+                        stage="val",
+                        key="val/acc_tern_mean",
+                        mode="max",
+                        callback=ExportBestTernary(),
+                    )
+                ]
+            )
+        self.metrics_manager = metrics_manager
+        self.logger = logger
 
     # -----------------------------
     # Public API
@@ -847,6 +848,7 @@ class LitBit(AccelLightningModule):
     @torch.no_grad()
     def on_fit_start(self, trainer: 'AccelTrainer'):
         self._accel = accel = trainer.accelerator
+        self._trainer = trainer.accelerator
 
         if self.has_teacher and self.teacher is not None:
             self.teacher.eval()
@@ -858,6 +860,7 @@ class LitBit(AccelLightningModule):
                 self._t_handles = make_feature_hooks(self.teacher, self.hint_points, self._t_feats, idx=1)
 
         class_name = lambda c: c.__class__.__name__
+        str10 = lambda s: (s+' '*10)[:10]
 
         if accel.is_main_process:
             s_total = sum(p.numel() for p in self.student.parameters())
@@ -865,23 +868,31 @@ class LitBit(AccelLightningModule):
             t_total = sum(p.numel() for p in self.teacher.parameters()) if self.has_teacher and self.teacher else 0
             t_train = sum(p.numel() for p in self.teacher.parameters() if p.requires_grad) if self.teacher else 0
             trainer.print("=" * 80)
-            trainer.print(f"Dataset : {self.dataset_name} | num_classes: {self.num_classes} | batch_size: {self.config.dataset.batch_size}")
-            trainer.print(f"Student : {class_name(self.student)} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
+            trainer.print(f"{str10('Dataset')} : {self.dataset_name} | num_classes: {self.num_classes} | batch_size: {self.config.dataset.batch_size}")
+            trainer.print(f"{str10('Student')} : {class_name(self.student)} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
             if self.has_teacher:
-                trainer.print(f"Teacher : {class_name(self.teacher)} | params {t_total/1e6:.2f}M ({'frozen' if t_train==0 else t_train})")
+                trainer.print(f"{str10('Teacher')} : {class_name(self.teacher)} | params {t_total/1e6:.2f}M ({'frozen' if t_train==0 else t_train})")
             if self.ce_hard is not None:
-                trainer.print("ce_hard : enable")
+                trainer.print(f"{str10('CE_hard')} : enable")
             if self.ce_soft is not None:
-                trainer.print("ce_soft : enable")
+                trainer.print(f"{str10('CE_soft')} : enable")
             if self.kd is not None:
-                trainer.print(f"KD      : alpha_kd={self.alpha_kd}")
+                trainer.print(f"{str10('KD')} : alpha_kd={self.alpha_kd}")
             if self.hint is not None:
-                trainer.print(f"Hint    : alpha_hint={self.alpha_hint} | points={self.hint_points}")
+                trainer.print(f"{str10('Hint')} : alpha_hint={self.alpha_hint} | points={self.hint_points}")
                 
             opt,sch,inv = self.configure_optimizers()
-            trainer.print(f"Optim({class_name(opt)}): lr={self.lr} wd={self.wd} epochs={self.epochs}")
+            trainer.print(f"{str10('Optim('+class_name(opt)+')')} : lr={self.lr} wd={self.wd} epochs={self.epochs}")
             if sch:
-                trainer.print(f"Scheduler({class_name(sch)}): enable")
+                trainer.print(f"{str10('Scheduler')} : enable ({class_name(sch)})")
+               
+            trainer.print(
+                f"{str10('Accelerate')} : device={trainer.accelerator.device} "
+                f"distributed={trainer.accelerator.distributed_type} "
+                f"num_processes={trainer.accelerator.num_processes} "
+                f"mixed_precision={trainer.accelerator.mixed_precision}"
+            )
+
             trainer.print("=" * 80)
 
     def on_validation_epoch_start(self, epoch: int):
@@ -1003,6 +1014,15 @@ class LitBit(AccelLightningModule):
         acc = (logits.argmax(dim=1) == y_idx).float().mean()
         logd["train/acc"] = acc.detach()
 
+        # if batch_idx == 0:
+        #     self._trainer.print(
+        #         f"[AMP] enabled={torch.is_autocast_enabled()} "
+        #         f"gpu_dtype={torch.get_autocast_gpu_dtype() if self._accel.device.type=='cuda' else None} "
+        #         f"student_dtype={next(self.student.parameters()).dtype} "
+        #         f"x_dtype={x.dtype} "
+        #         f"logits_dtype={logits.dtype} "
+        #         f"loss_dtype={loss.dtype} "
+        #     )
         return Metrics(loss=loss, metrics=logd)
 
     @torch.no_grad()
