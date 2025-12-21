@@ -774,8 +774,9 @@ class LitBit(AccelLightningModule):
         self.scale_op = config.scale_op
         self.student: nn.Module = config.student
         if os.path.exists(self.config.model_weights):
-            stats = torch.load(self.config.model_weights)
+            stats = torch.load(self.config.model_weights,weights_only=False)
             stats = stats['model'] if 'model' in stats else stats
+            print(f"[LitBit]: load student weights of {self.config.model_weights}")
             self.student.load_state_dict(state_dict=stats)
         self.teacher: Optional[nn.Module] = config.teacher
         self.has_teacher = True if config.teacher is not None else False
