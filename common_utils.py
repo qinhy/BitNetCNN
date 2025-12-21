@@ -22,8 +22,6 @@ from pydantic import BaseModel, Field, PrivateAttr
 import torch
 
 from bitlayers.bit import Bit
-
-torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader

@@ -3,7 +3,6 @@ from pydanticV2_argparse import ArgumentParser
 import torch
 
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig
-torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 
 # Import from common_utils
