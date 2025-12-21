@@ -15,7 +15,6 @@ from common_utils import IN1kToTiny200Adapter, load_tiny200_to_in1k_map, summ
 from dataset import DataModuleConfig
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig
 
-torch.set_float32_matmul_precision("high")
 
 Conv2dNorm = Conv2dModels.Conv2dNorm
 Conv2dNormAct = Conv2dModels.Conv2dNormAct

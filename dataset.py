@@ -21,7 +21,6 @@ from torchvision.datasets.utils import extract_archive, download_url, check_inte
 
 from bitlayers.aug import SimpleImageTrainAugment, SimpleImageValAugment
 
-torch.set_float32_matmul_precision("high")
 
 
 # ----------------------------

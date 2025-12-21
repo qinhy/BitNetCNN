@@ -13,7 +13,6 @@ from common_utils import summ
 from dataset import DataModuleConfig
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig
 
-torch.set_float32_matmul_precision("high")
 
 # ----------------------------
 # MobileNetV2 (Bit) blocks
