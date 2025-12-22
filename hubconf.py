@@ -26,7 +26,6 @@ import urllib.request
 import torch
 import torch.nn as nn
 
-from BitNetCNN import NetCNN
 from common_utils import convert_to_ternary
 
 # ---------------------------------------------------------------------
@@ -259,13 +258,16 @@ def bitnet_mnist(
     """
     BitNetCNN model for MNIST (1 channel, 10 classes).
     """
+    from BitNetCNN import NetCNN
     model = NetCNN(in_channels=1, num_classes=10, expand_ratio=5, scale_op=scale_op)
 
     state_dict: Optional[Dict[str, torch.Tensor]] = None
+    _convert_to_ternary_if_needed(model, ternary, state_dict)
     if pretrained or checkpoint_path:
         checkpoint_url = "https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/bit_netcnn_small_mnist_ternary.zip"
         state_dict = _load_pretrained_weights(model, checkpoint_url, checkpoint_path, model_name="BitNetCNN MNIST")
-    return _convert_to_ternary_if_needed(model, ternary, state_dict)
+    if state_dict:model.load_state_dict(state_dict, strict=True)
+    return model
 
 
 def bitnet_resnet(
@@ -296,6 +298,7 @@ def bitnet_resnet(
         raise ValueError(f"Unsupported model_size='{model_size}'. Use '18' or '50'.")
 
     state_dict: Optional[Dict[str, torch.Tensor]] = None
+    _convert_to_ternary_if_needed(model,ternary,state_dict)
     if checkpoint_path or pretrained:
         filenames = [
             RESNET_FILE_TMPL.format(
@@ -314,7 +317,8 @@ def bitnet_resnet(
             model_name=f"BitResNet{model_size} {_fullname_for(ds)}{' (ternary)' if ternary else ''}",
         )
 
-    return _convert_to_ternary_if_needed(model, ternary, state_dict)
+    if state_dict:model.load_state_dict(state_dict, strict=True)
+    return model
 
 
 def bitnet_resnet18(
@@ -397,7 +401,8 @@ def bitnet_mobilenetv2(
             model_name=f"BitMobileNetV2 x{width_mult} {_fullname_for(ds)}{' (ternary)' if ternary else ''}",
         )
 
-    return _convert_to_ternary_if_needed(model, ternary, state_dict)
+    if state_dict:model.load_state_dict(state_dict, strict=True)
+    return model
 
 
 def bitnet_convnextv2(
@@ -437,4 +442,5 @@ def bitnet_convnextv2(
             model_name=f"BitConvNeXtv2 {model_size} {_fullname_for(ds)}{' (ternary)' if ternary else ''}",
         )
 
-    return _convert_to_ternary_if_needed(model, ternary, state_dict)
+    if state_dict:model.load_state_dict(state_dict, strict=True)
+    return model

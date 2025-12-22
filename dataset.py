@@ -282,16 +282,19 @@ class DataSetModule:
         model: nn.Module,
         criterion: nn.Module,
         device: Optional[torch.device] = None,
-        amp: bool = True,
+        amp: bool = False,
         topk: Tuple[int, ...] = (1,),
         split: str = "val",
         max_batches: Optional[int] = None,
     ) -> Dict[str, float]:
         """
-        Validate a classification model.
-        - split: 'val' or 'train' (train may include MixUp/CutMix -> soft labels)
-        Returns dict: {'val_loss': ..., 'top1_acc': ..., 'top5_acc': ...}
+        Validate a classification model on hard labels.
+        Returns: {'val_loss': ..., 'top1_acc': ..., ...}
         """
+        # If you NEVER want train validation (because it may be mixup/cutmix),
+        # uncomment the next line:
+        # assert split == "val", "This validate() expects hard labels; use split='val' only."
+
         assert split in {"train", "val"}, "split must be 'train' or 'val'"
 
         model.eval()
@@ -311,29 +314,28 @@ class DataSetModule:
                 break
 
             x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)  # expected shape [B], dtype long for CE
 
-            with torch.amp.autocast('cuda', enabled=autocast_enabled):
+            # AMP only on CUDA
+            if device.type == "cuda":
+                autocast_ctx = torch.amp.autocast(device_type="cuda", enabled=autocast_enabled)
+            else:
+                autocast_ctx = torch.amp.autocast(device_type="cpu", enabled=False)
+
+            with autocast_ctx:
                 out = model(x)
                 logits = self._unwrap_model_output(out)
-
-                # If labels are soft (MixUp/CutMix), compute soft CE
-                if torch.is_tensor(y) and y.ndim == 2 and y.dtype.is_floating_point:
-                    loss = self._soft_target_cross_entropy(logits, y)
-                    hard_targets = y.argmax(dim=1)
-                else:
-                    loss = criterion(logits, y)
-                    hard_targets = y
+                loss = criterion(logits, y)
 
             bs = x.size(0)
             total_loss += float(loss.item()) * bs
             total_samples += bs
 
-            # Top-k accuracy (uses hard targets)
+            # Top-k accuracy
             max_k = max(topk)
             _, pred = logits.topk(max_k, dim=1, largest=True, sorted=True)  # [B, max_k]
             pred = pred.t()  # [max_k, B]
-            correct = pred.eq(hard_targets.view(1, -1).expand_as(pred))  # [max_k, B]
+            correct = pred.eq(y.view(1, -1).expand_as(pred))
 
             for k in topk:
                 correct_k[k] += float(correct[:k].reshape(-1).float().sum().item())

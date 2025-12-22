@@ -37,7 +37,7 @@ print("=" * 60)
 print("Test 2: Loading BitNetCNN (ternary)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_mnist', source='local', pretrained=True, ternary=True)
+    model = torch.hub.load('.', 'bitnet_mnist', source='local', pretrained=True,checkpoint_path='./models/bit_netcnn_small_mnist_ternary.zip', ternary=True)
     print(f"[OK] Ternary model loaded successfully")
 
     # Test forward pass
@@ -45,16 +45,16 @@ try:
     out = model(x)
     print(f"  Output shape: {out.shape}")
     print("  [OK] Ternary forward pass successful\n")
+    print(mnist.validate(model.cuda(),torch.nn.CrossEntropyLoss()))
 except Exception as e:
     print(f"[FAIL] Failed: {e}\n")
-print(mnist.validate(model,torch.nn.CrossEntropyLoss()))
-exit()
+
 # Test 3: Load BitResNet18
 print("=" * 60)
 print("Test 3: Loading BitResNet18 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_resnet18', source='local', pretrained=True)
+    model = torch.hub.load('.', 'bitnet_resnet18', source='local', pretrained=True,checkpoint_path='./models/bit_resnet_18_c100_ternary.zip')
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -65,6 +65,7 @@ try:
     print(f"  Output shape: {out.shape}")
     assert out.shape == (2, 100), f"Expected output shape (2, 100), got {out.shape}"
     print("  [OK] Forward pass successful\n")
+    print(c100.validate(model.cuda(),torch.nn.CrossEntropyLoss()))
 except Exception as e:
     print(f"[FAIL] Failed: {e}\n")
 
@@ -73,7 +74,7 @@ print("=" * 60)
 print("Test 4: Loading BitResNet50 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_resnet50', source='local', pretrained=True)
+    model = torch.hub.load('.', 'bitnet_resnet50', source='local', pretrained=True,checkpoint_path='./models/bit_resnet_50_c100_ternary.zip')
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -82,15 +83,17 @@ try:
     out = model(x)
     print(f"  Output shape: {out.shape}")
     print("  [OK] Forward pass successful\n")
+    print(c100.validate(model.cuda(),torch.nn.CrossEntropyLoss()))
 except Exception as e:
     print(f"[FAIL] Failed: {e}\n")
 
+exit()
 # Test 5: Load BitMobileNetV2
 print("=" * 60)
 print("Test 5: Loading BitMobileNetV2 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_mobilenetv2', source='local', pretrained=False, width_mult=1.0)
+    model = torch.hub.load('.', 'bitnet_mobilenetv2', source='local', pretrained=True, width_mult=1.4)
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
