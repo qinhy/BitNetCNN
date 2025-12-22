@@ -220,7 +220,7 @@ def _load_pretrained_weights(
         try:
             raw = _load_checkpoint_from_file(checkpoint_path)
             state_dict = _pick_state_dict(raw)
-            model.load_state_dict(state_dict, strict=False)
+            model.load_state_dict(state_dict, strict=True)
             acc = _extract_accuracy(raw)
             note = f" (acc: {acc})" if acc is not None else ""
             print(f"Loaded checkpoint from {checkpoint_path}{note}")

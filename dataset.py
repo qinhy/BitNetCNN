@@ -65,7 +65,7 @@ class DataModuleConfig(BaseModel):
     num_classes: int = -1
 
     batch_size: int
-    num_workers: int = 1
+    num_workers: int = 0
 
     mixup: bool = False
     cutmix: bool = False
@@ -254,6 +254,158 @@ class DataSetModule:
         plt.show()
         return x, y
 
+
+    # -----------------------------
+    # Validation (Classification)
+    # -----------------------------
+    @staticmethod
+    def _unwrap_model_output(output):
+        """Handle models that return (logits, ...) or {'logits': ...}."""
+        if isinstance(output, (tuple, list)):
+            return output[0]
+        if isinstance(output, dict):
+            return output.get("logits", output.get("output", None)) if ("logits" in output or "output" in output) else next(iter(output.values()))
+        return output
+
+    @staticmethod
+    def _soft_target_cross_entropy(logits: torch.Tensor, soft_targets: torch.Tensor) -> torch.Tensor:
+        """
+        Cross-entropy when targets are soft distributions (e.g., from MixUp/CutMix).
+        soft_targets: [B, C], floats summing ~1 across C.
+        """
+        log_probs = torch.log_softmax(logits, dim=1)
+        return -(soft_targets * log_probs).sum(dim=1).mean()
+
+    @torch.no_grad()
+    def validate(
+        self,
+        model: nn.Module,
+        criterion: nn.Module,
+        device: Optional[torch.device] = None,
+        amp: bool = True,
+        topk: Tuple[int, ...] = (1,),
+        split: str = "val",
+        max_batches: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """
+        Validate a classification model.
+        - split: 'val' or 'train' (train may include MixUp/CutMix -> soft labels)
+        Returns dict: {'val_loss': ..., 'top1_acc': ..., 'top5_acc': ...}
+        """
+        assert split in {"train", "val"}, "split must be 'train' or 'val'"
+
+        model.eval()
+        if device is None:
+            device = next(model.parameters()).device
+
+        loader = self.val_dataloader() if split == "val" else self.train_dataloader()
+
+        total_loss = 0.0
+        total_samples = 0
+        correct_k = {k: 0.0 for k in topk}
+
+        autocast_enabled = amp and (device.type == "cuda")
+
+        for b_idx, (x, y) in enumerate(loader):
+            if max_batches is not None and b_idx >= max_batches:
+                break
+
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+
+            with torch.amp.autocast('cuda', enabled=autocast_enabled):
+                out = model(x)
+                logits = self._unwrap_model_output(out)
+
+                # If labels are soft (MixUp/CutMix), compute soft CE
+                if torch.is_tensor(y) and y.ndim == 2 and y.dtype.is_floating_point:
+                    loss = self._soft_target_cross_entropy(logits, y)
+                    hard_targets = y.argmax(dim=1)
+                else:
+                    loss = criterion(logits, y)
+                    hard_targets = y
+
+            bs = x.size(0)
+            total_loss += float(loss.item()) * bs
+            total_samples += bs
+
+            # Top-k accuracy (uses hard targets)
+            max_k = max(topk)
+            _, pred = logits.topk(max_k, dim=1, largest=True, sorted=True)  # [B, max_k]
+            pred = pred.t()  # [max_k, B]
+            correct = pred.eq(hard_targets.view(1, -1).expand_as(pred))  # [max_k, B]
+
+            for k in topk:
+                correct_k[k] += float(correct[:k].reshape(-1).float().sum().item())
+
+        denom = max(total_samples, 1)
+        metrics = {"val_loss": total_loss / denom}
+        for k in topk:
+            metrics[f"top{k}_acc"] = correct_k[k] / denom
+        return metrics
+
+    # -----------------------------
+    # Validation (Regression)
+    # -----------------------------
+    @torch.no_grad()
+    def validate_regression(
+        self,
+        model: nn.Module,
+        criterion: nn.Module,
+        device: Optional[torch.device] = None,
+        amp: bool = True,
+        split: str = "val",
+        max_batches: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """
+        Validate a regression model.
+        Returns dict: {'val_loss': ..., 'mae': ..., 'rmse': ...}
+        """
+        assert split in {"train", "val"}, "split must be 'train' or 'val'"
+
+        model.eval()
+        if device is None:
+            device = next(model.parameters()).device
+
+        loader = self.val_dataloader() if split == "val" else self.train_dataloader()
+
+        total_loss = 0.0
+        total_abs_err = 0.0
+        total_sq_err = 0.0
+        total_samples = 0
+
+        autocast_enabled = amp and (device.type == "cuda")
+
+        for b_idx, (x, y) in enumerate(loader):
+            if max_batches is not None and b_idx >= max_batches:
+                break
+
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+
+            with torch.cuda.amp.autocast(enabled=autocast_enabled):
+                out = model(x)
+                preds = self._unwrap_model_output(out)
+                loss = criterion(preds, y)
+
+            bs = x.size(0)
+            total_loss += float(loss.item()) * bs
+            total_samples += bs
+
+            preds_f = preds.detach().view(bs, -1)
+            y_f = y.detach().view(bs, -1)
+
+            abs_err = (preds_f - y_f).abs().mean(dim=1)        # per-sample MAE
+            sq_err = ((preds_f - y_f) ** 2).mean(dim=1)        # per-sample MSE
+
+            total_abs_err += float(abs_err.sum().item())
+            total_sq_err += float(sq_err.sum().item())
+
+        denom = max(total_samples, 1)
+        mae = total_abs_err / denom
+        rmse = (total_sq_err / denom) ** 0.5
+
+        return {"val_loss": total_loss / denom, "mae": mae, "rmse": rmse}
 
 # ----------------------------
 # CIFAR-100
