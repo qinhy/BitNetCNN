@@ -1,7 +1,9 @@
+import json
 import os
 import math
-from PIL import Image
-from typing import Any, Optional, Sequence, Tuple, Union, List, Dict
+from pathlib import Path
+from PIL import Image, ImageOps
+from typing import Any, Callable, Optional, Sequence, Tuple, Union, List, Dict
 
 import cv2
 from matplotlib import pyplot as plt
@@ -416,9 +418,9 @@ class CIFAR100DataModule(DataSetModule):
         self.std = (0.2675, 0.2565, 0.2761)
         self.p = 0.5
         self.train_tf = A.Compose([
-            A.Rotate(limit=(-10,10), p=0.5),
-            A.HorizontalFlip(p=0.5),
-            AutoRandomResizedCrop(scale=(0.75, 1.0), ratio=(0.75, 1.33),p=0.5),
+            A.Rotate(limit=(-10,10), p=self.p),
+            A.HorizontalFlip(p=self.p),
+            AutoRandomResizedCrop(scale=(0.75, 1.0), ratio=(0.75, 1.33),p=self.p),
             # A.OneOf([
             #     A.ColorJitter(p=1.0,brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
             #     A.ToGray(p=1.0),
@@ -685,6 +687,396 @@ class TinyImageNetDataset(VisionDataset):
 
         return images
 
+
+# -----------------------------------------------------------------------------
+# RetinaFace / DataModule
+# -----------------------------------------------------------------------------
+class RetinaFaceTensor(BaseModel):
+    label:Optional[Any] = Field(default=None,exclude=True)
+    bbox:Optional[Any] = Field(default=None,exclude=True)
+    landmark:Optional[Any] = Field(default=None,exclude=True)
+
+class RetinaFaceDataset(VisionDataset):
+    
+    """
+    Yep — for *geometric* aug (resize/crop/flip/affine), you really want **joint transforms** that see **(image, boxes, landmarks)** together.
+
+    The cleanest way in modern torchvision is:
+
+    * treat `boxes` as `tv_tensors.BoundingBoxes`
+    * treat `landmarks` as `tv_tensors.KeyPoints` (shape `[N, 5, 2]`)
+    * run `torchvision.transforms.v2` so the same ops update everything consistently ([PyTorch Documentation][1])
+    * note: **KeyPoints support landed in torchvision 0.23** (beta feature) ([PyTorch Documentation][2])
+
+    Below is a practical pattern that also handles the one RetinaFace-specific quirk: **when you flip horizontally, you must swap left/right landmark indices** (eye/mouth corners). torchvision can flip keypoint coordinates, but it doesn’t know your semantic ordering.
+
+    ## Joint transforms for RetinaFace (boxes + landmarks)
+
+    ```py
+    import torch
+    from torchvision import tv_tensors
+    from torchvision.transforms import v2
+    from torchvision.transforms.v2 import functional as F
+
+
+    class WrapRetinaFaceTargets:
+        Convert plain tensors to TVTensors so v2 transforms update them.
+        def __call__(self, img, target):
+            H, W = map(int, F.get_size(img))  # [H, W]
+            target = dict(target)
+
+            boxes = target["boxes"]
+            if boxes.numel() == 0:
+                boxes_tv = tv_tensors.BoundingBoxes(boxes.view(-1, 4), format="XYXY", canvas_size=(H, W))
+            else:
+                boxes_tv = tv_tensors.BoundingBoxes(boxes.view(-1, 4), format="XYXY", canvas_size=(H, W))
+
+            # landmarks: (N,10) with -1 for missing -> KeyPoints (N,5,2) + valid mask
+            lm = target.get("landmarks", None)
+            if lm is None or lm.numel() == 0:
+                kp = torch.zeros((boxes_tv.shape[0], 5, 2), dtype=torch.float32)
+                valid = torch.zeros((boxes_tv.shape[0], 5), dtype=torch.bool)
+            else:
+                kp = lm.view(-1, 5, 2).to(torch.float32).clone()
+                valid = (kp[..., 0] >= 0) & (kp[..., 1] >= 0)
+                kp[~valid] = 0.0  # placeholder; we keep "valid" separately
+
+            kps_tv = tv_tensors.KeyPoints(kp, canvas_size=(H, W))
+
+            target["boxes"] = boxes_tv
+            target["keypoints"] = kps_tv
+            target["landmarks_valid"] = valid
+            return img, target
+
+
+    class RandomFaceHorizontalFlip:
+        Flip image/boxes/keypoints and also swap left/right landmark indices.
+        def __init__(self, p=0.5):
+            self.p = float(p)
+
+        def __call__(self, img, target):
+            if torch.rand(()) >= self.p:
+                return img, target
+
+            img = F.horizontal_flip(img)
+            target = dict(target)
+
+            target["boxes"] = F.horizontal_flip(target["boxes"])
+            kps = F.horizontal_flip(target["keypoints"])      # (N,5,2), coords flipped
+            kps = kps[:, [1, 0, 2, 4, 3], :]                  # swap le<->re and lm<->rm
+            target["keypoints"] = kps
+
+            if "landmarks_valid" in target:
+                target["landmarks_valid"] = target["landmarks_valid"][:, [1, 0, 2, 4, 3]]
+
+            return img, target
+
+
+    class UnwrapAndNormalizeRetinaFace:
+        Convert TVTensors back to your model format: boxes/landmarks normalized to [0,1] and -1 missing.
+        def __call__(self, img, target):
+            H, W = map(int, F.get_size(img))
+            target = dict(target)
+
+            boxes = torch.as_tensor(target["boxes"], dtype=torch.float32).view(-1, 4)
+            if boxes.numel():
+                boxes[:, [0, 2]] /= float(W)
+                boxes[:, [1, 3]] /= float(H)
+                boxes = boxes.clamp(0.0, 1.0)
+
+            kps = torch.as_tensor(target["keypoints"], dtype=torch.float32)  # (N,5,2)
+            valid = target.get("landmarks_valid", torch.ones(kps.shape[:2], dtype=torch.bool))
+
+            # after crop/resize, some points may go out of bounds: mark them missing
+            within = (kps[..., 0] >= 0) & (kps[..., 0] <= W) & (kps[..., 1] >= 0) & (kps[..., 1] <= H)
+            valid = valid & within
+
+            kps[..., 0] /= float(W)
+            kps[..., 1] /= float(H)
+            kps = kps.clamp(0.0, 1.0)
+            kps[~valid] = -1.0
+
+            target["boxes"] = boxes
+            target["landmarks"] = kps.view(-1, 10)
+
+            target.pop("keypoints", None)
+            target.pop("landmarks_valid", None)
+            return img, target
+    ```
+
+    ### Example train transform pipeline
+
+    ```py
+    mean = (0.485, 0.456, 0.406)
+    std  = (0.229, 0.224, 0.225)
+
+    train_tf = v2.Compose([
+        v2.ToImage(),                            # makes image a tensor TVTensor
+        WrapRetinaFaceTargets(),                 # boxes->BoundingBoxes, landmarks->KeyPoints
+        v2.RandomResizedCrop((640, 640), antialias=True),
+        RandomFaceHorizontalFlip(p=0.5),         # flip + swap landmark order
+        v2.ClampBoundingBoxes(),                 # optional :contentReference[oaicite:2]{index=2}
+        v2.ClampKeyPoints(),                     # optional :contentReference[oaicite:3]{index=3}
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=mean, std=std),
+        UnwrapAndNormalizeRetinaFace(),          # back to your normalized [0,1] + -1 missing format
+    ])
+    ```
+
+    ### Dataset usage
+
+    Use the **joint** `transforms=` argument (not `transform=`), since `transform=` is image-only:
+
+    ```py
+    ds = RetinaFaceDataset(
+        root=self.data_dir,
+        train=True,
+        download=True,
+        transforms=train_tf,
+    )
+    ```
+
+    If you paste your current `train_tf` (what ops you want: resize? mosaic? iou-crop? affine?), I can tailor the pipeline so every step correctly updates **boxes + landmarks** and matches RetinaFace’s expected input/output shapes.
+
+    [1]: https://docs.pytorch.org/vision/stable/transforms.html "Transforming images, videos, boxes and more — Torchvision 0.24 documentation"
+    [2]: https://docs.pytorch.org/vision/main/auto_examples/transforms/plot_keypoints_transforms.html "Transforms on KeyPoints — Torchvision main documentation"
+
+
+
+    Expected layout (default):
+      root/
+        annotations/
+          train.json
+          val.json
+        (images referenced by JSON paths)
+
+    JSON entries:
+      {
+        "file": "...",
+        "width": 1024, "height": 768,          # optional
+        "boxes": [[x1,y1,x2,y2], ...],          # absolute pixels
+        "landmarks": [[x1,y1, ..., x5,y5], ...] # optional, absolute pixels OR -1 for missing
+      }
+
+    Outputs:
+      image: tensor or PIL (depending on transforms)
+      target:
+        boxes: (N,4) in [0,1]
+        landmarks: (N,10) in [0,1] or -1 for missing
+        labels: (N,) long (all ones)
+    """
+
+    # Hugging Face mirror (default)
+    HF_WIDER_REPO = "https://huggingface.co/datasets/wider_face/resolve/main/data"
+    DEFAULT_WIDER_URLS = {
+        "train": f"{HF_WIDER_REPO}/WIDER_train.zip",
+        "val": f"{HF_WIDER_REPO}/WIDER_val.zip",
+        "test": f"{HF_WIDER_REPO}/WIDER_test.zip",  # unused here (no gt)
+        "split": f"{HF_WIDER_REPO}/wider_face_split.zip",
+    }
+
+    def __init__(
+        self,
+        root: str,
+        train: bool = True,
+        download: bool = False,
+        image_size: int = 640,  # kept for compatibility; unused internally
+        annotation_file: Optional[str] = None,
+        annotations_dir: str = "annotations",
+        train_ann: str = "train.json",
+        val_ann: str = "val.json",
+        download_url: Optional[str] = None,  # optional override (single URL)
+    ) -> None:
+        super().__init__(root=root, transforms=None, transform=None, target_transform=None)
+
+        self.root = Path(root)
+        self.train = bool(train)
+        self.download = bool(download)
+        self.image_size = int(image_size)  # unused
+        self.download_url = download_url
+
+        # pick annotation file
+        if annotation_file is None:
+            ann_name = train_ann if self.train else val_ann
+            annotation_file = str(Path(annotations_dir) / ann_name)
+
+        self.ann_path = Path(annotation_file)
+        if not self.ann_path.is_absolute():
+            self.ann_path = self.root / self.ann_path
+
+        if self.download and not self.ann_path.exists():
+            self._download()
+
+        if not self.ann_path.exists():
+            raise FileNotFoundError(f"Annotation file not found: {self.ann_path}")
+
+        with open(self.ann_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError(f"Annotation file {self.ann_path} must contain a list of samples.")
+        self.items: List[Dict[str, Any]] = data
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def _resolve_path(self, file_path: str) -> Path:
+        p = Path(file_path)
+        return p if p.is_absolute() else (self.root / p)
+
+    @staticmethod
+    def _convert_wider_txt_to_json(txt_path: Path, images_prefix_rel: Path, out_json: Path) -> None:
+        """
+        Convert WIDER FACE bbx gt txt format into our JSON list:
+          [{"file": "<rel path>", "boxes": [[x1,y1,x2,y2], ...]}, ...]
+        Landmarks are not provided by WIDER split → omitted (dataset will fill -1s).
+        """
+        items: List[Dict[str, Any]] = []
+
+        with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
+            while True:
+                img_rel = f.readline()
+                if not img_rel:
+                    break
+                img_rel = img_rel.strip()
+                if img_rel == "":
+                    continue
+
+                n_line = f.readline()
+                if not n_line:
+                    break
+                n = int(n_line.strip())
+
+                boxes: List[List[float]] = []
+                for _ in range(n):
+                    parts = f.readline().strip().split()
+                    if len(parts) < 4:
+                        continue
+                    x, y, w, h = map(float, parts[:4])
+                    boxes.append([x, y, x + w, y + h])
+
+                # store path relative to dataset root
+                file_rel = (images_prefix_rel / img_rel).as_posix()
+                items.append({"file": file_rel, "boxes": boxes})
+
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_json, "w", encoding="utf-8") as g:
+            json.dump(items, g, ensure_ascii=False)
+
+    def _download(self) -> None:
+        """
+        Default behavior (if download_url is None):
+          - downloads WIDER_train.zip OR WIDER_val.zip depending on self.train
+          - downloads wider_face_split.zip
+          - extracts into: <root>/widerface/
+          - converts split txt annotation into: <root>/annotations/train.json or val.json
+
+        If download_url is provided, it is treated as a single archive/file override
+        and no WIDER conversion is attempted.
+        """
+        from torchvision.datasets.utils import download_and_extract_archive
+
+        # If already present, nothing to do.
+        if self.ann_path.exists():
+            return
+
+        # If the user provided a custom URL override, do the simplest possible thing.
+        if self.download_url:
+            self.root.mkdir(parents=True, exist_ok=True)
+            download_and_extract_archive(str(self.download_url), download_root=str(self.root))
+            return
+
+        # Default: WIDER FACE mirrors from Hugging Face
+        urls = self.DEFAULT_WIDER_URLS
+
+        # Use torchvision's conventional folder name to keep things tidy
+        wider_root = self.root / "widerface"
+        wider_root.mkdir(parents=True, exist_ok=True)
+
+        # Always need split to build annotations
+        split_dir = wider_root / "wider_face_split"
+        if not split_dir.exists():
+            download_and_extract_archive(urls["split"], download_root=str(wider_root))
+
+        # Download only the image subset we need for this dataset instance
+        subset = "train" if self.train else "val"
+        subset_dir = wider_root / ("WIDER_train" if self.train else "WIDER_val")
+        if not subset_dir.exists():
+            download_and_extract_archive(urls[subset], download_root=str(wider_root))
+
+        # Locate split txt files (robust to nesting)
+        def find_one(name: str) -> Path:
+            hits = list(wider_root.rglob(name))
+            if len(hits) != 1:
+                raise FileNotFoundError(
+                    f"Expected exactly 1 '{name}' under {wider_root}, found {len(hits)}."
+                )
+            return hits[0]
+
+        if self.train:
+            gt_txt = find_one("wider_face_train_bbx_gt.txt")
+            out_json = self.root / "annotations" / "train.json"
+            images_prefix_rel = Path("widerface") / "WIDER_train" / "images"
+        else:
+            gt_txt = find_one("wider_face_val_bbx_gt.txt")
+            out_json = self.root / "annotations" / "val.json"
+            images_prefix_rel = Path("widerface") / "WIDER_val" / "images"
+
+        if not out_json.exists():
+            self._convert_wider_txt_to_json(gt_txt, images_prefix_rel, out_json)
+
+        # If this dataset instance expects the default annotation path, it should now exist.
+        # If the user passed a different annotation_file path, they should point it to out_json.
+        # We only auto-switch if it matches the default name (train.json/val.json).
+        if self.ann_path.name in ("train.json", "val.json") and out_json.exists():
+            self.ann_path = out_json
+
+    def __getitem__(self, idx: int) -> Tuple[Any, Dict[str, torch.Tensor]]:
+        entry = self.items[idx]
+
+        img_path = self._resolve_path(entry["file"])
+        img = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
+
+        orig_w = int(entry.get("width", img.width))
+        orig_h = int(entry.get("height", img.height))
+        orig_w = max(orig_w, 1)
+        orig_h = max(orig_h, 1)
+
+        boxes = torch.tensor(entry.get("boxes", []), dtype=torch.float32).view(-1, 4)
+        if boxes.numel() == 0:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+
+        if boxes.numel():
+            boxes[:, [0, 2]] /= float(orig_w)
+            boxes[:, [1, 3]] /= float(orig_h)
+            boxes = boxes.clamp(0.0, 1.0)
+
+        land = entry.get("landmarks", [])
+        if not land:
+            landmarks = torch.full((boxes.size(0), 10), -1.0, dtype=torch.float32)
+        else:
+            landmarks = torch.tensor(land, dtype=torch.float32).view(-1, 10)
+            if landmarks.size(0) != boxes.size(0):
+                raise ValueError(
+                    f"Mismatch: {boxes.size(0)} boxes but {landmarks.size(0)} landmark rows "
+                    f"for file={entry.get('file')}"
+                )
+            lm = landmarks.view(-1, 5, 2)
+            valid = lm[..., 0] >= 0
+            lm_x = lm[..., 0].clone()
+            lm_y = lm[..., 1].clone()
+            lm_x[valid] = (lm_x[valid] / float(orig_w)).clamp(0.0, 1.0)
+            lm_y[valid] = (lm_y[valid] / float(orig_h)).clamp(0.0, 1.0)
+            lm[..., 0] = lm_x
+            lm[..., 1] = lm_y
+            landmarks = lm.view(-1, 10)
+
+        target: Dict[str, torch.Tensor] = {
+            "boxes": boxes,
+            "landmarks": landmarks,
+            "labels": torch.ones((boxes.size(0),), dtype=torch.long),
+        }
+
+        return img, target
 
 if __name__ == "__main__":
     for n in ['mnist','cifar100','timnet']:

@@ -28,6 +28,7 @@ class ToTensor(BaseModel):
             "float32":torch.float32,
             "float16":torch.float16,
         }[self.dtype]
+        return self
 
     def build(self):
         return v2.Compose([v2.ToImage(),
