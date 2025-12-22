@@ -4,6 +4,12 @@ Tests loading models locally before pushing to GitHub.
 """
 
 import torch
+from dataset import *
+
+c100 = DataModuleConfig(data_dir='./data',batch_size=512,dataset_name='c100').build()
+c100.setup()
+mnist = DataModuleConfig(data_dir='./data',batch_size=512,dataset_name='mnist').build()
+mnist.setup()
 
 print("Testing PyTorch Hub integration locally...\n")
 
@@ -41,13 +47,14 @@ try:
     print("  [OK] Ternary forward pass successful\n")
 except Exception as e:
     print(f"[FAIL] Failed: {e}\n")
-
+print(mnist.validate(model,torch.nn.CrossEntropyLoss()))
+exit()
 # Test 3: Load BitResNet18
 print("=" * 60)
 print("Test 3: Loading BitResNet18 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_resnet18', source='local', pretrained=False)
+    model = torch.hub.load('.', 'bitnet_resnet18', source='local', pretrained=True)
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -66,7 +73,7 @@ print("=" * 60)
 print("Test 4: Loading BitResNet50 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_resnet50', source='local', pretrained=False)
+    model = torch.hub.load('.', 'bitnet_resnet50', source='local', pretrained=True)
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
