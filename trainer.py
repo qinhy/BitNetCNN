@@ -380,7 +380,7 @@ class AccelTrainer:
         show_progress_bar: bool = True,
         metrics_manager: Optional["MetricsManager"] = None,
         log_every_n_steps: int = 10,
-        logger: Optional[Callable[..., None]] = None,
+        logger: Optional[Callable[..., None]] = TextAppendLogger(),
         # FP8 extras (optional)
         fp8_backend: Optional[Literal["te", "msamp", "ao"]] = None,
         fp8_kwargs: Optional[dict] = None,
