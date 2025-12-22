@@ -231,7 +231,7 @@ class MixupCutmix(BaseModel):
 
     # Shared alpha (you can split later if you want)
     beta_alpha: float = Field(default=1.0, gt=0.0)
-    apply_prob: float = Field(default=0.325, ge=0.0, le=1.0)
+    p: float = Field(default=0.325, ge=0.0, le=1.0)
 
 
     def build(self) -> Optional[v2.Transform]:
@@ -245,7 +245,7 @@ class MixupCutmix(BaseModel):
             return v2.Identity()
 
         chosen = candidates[0] if len(candidates) == 1 else v2.RandomChoice(candidates)
-        return v2.RandomApply([chosen], p=self.apply_prob)
+        return v2.RandomApply([chosen], p=self.p)
 
 class CIFAR100Augment(BaseModel):
     # --- normalization ---
