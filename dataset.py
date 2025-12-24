@@ -63,6 +63,7 @@ class DataModuleConfig(BaseModel):
             "timnet": TinyImageNetDataModule,
             "imnet": ImageNetDataModule,
             "mnist": MNISTDataModule,
+            "retinaface": RetinaFaceDataModule,
         }
 
         ds = self.dataset_name.lower()
@@ -78,6 +79,9 @@ class DataModuleConfig(BaseModel):
         elif ds in ["mnist"]:
             self.num_classes = 10
             self.dataset_name = "mnist"
+        elif ds in ["retinaface","wider-face","wider"]:
+            self.num_classes = -1
+            self.dataset_name = "retinaface"
         else:
             raise ValueError(f"Unsupported dataset: {ds}")
 
@@ -196,7 +200,10 @@ class DataSetModule:
         loader = self.train_dataloader() if split == "train" else self.val_dataloader()
         x, y = next(iter(loader))
         x = x[:n].cpu()
-        y = y[:n].cpu()
+        try:
+            y = y[:n].cpu()
+        except:
+            y = None
 
         # denormalize for display
         mean = torch.tensor(self.mean, dtype=x.dtype).view(1, x.shape[1], 1, 1)
@@ -234,7 +241,7 @@ class DataSetModule:
             else:
                 plt.imshow(img)
             plt.axis("off")
-            plt.title(label_to_text(y[i]), fontsize=8)
+            plt.title(label_to_text(y[i])  if y else 'null', fontsize=8)
         plt.tight_layout()
         plt.show()
         return x, y
@@ -481,7 +488,10 @@ class MNISTDataset(datasets.MNIST):
         img:np.ndarray = img.numpy()
         img:np.ndarray = cv2.cvtColor(img,cv2.COLOR_GRAY2RGB)
         if self.transform is not None:
-            img:torch.Tensor = self.transform(image=img)["image"]
+            if isinstance(self.transform, (BaseCompose, BasicTransform)):
+                img = self.transform(image=img)["image"]
+            else:
+                img = self.transform(Image.fromarray(img))
         if self.target_transform is not None:
             target = self.target_transform(target)
         img = img.mean(0,keepdim=True)
@@ -499,6 +509,56 @@ class MNISTDataModule(DataSetModule):
         self.dataset_cls = MNISTDataset
         # CutMix on MNIST is typically not useful; keep it off by default.
         self.cutmix = False
+
+
+# ----------------------------
+# RetinaFace
+# ----------------------------
+class RetinaFaceDataModule(DataSetModule):
+    def __init__(self, config: "DataModuleConfig"):
+        super().__init__(config)
+        self.num_classes = 100
+        self.mean = (0.485, 0.456, 0.406)
+        self.std = (0.229, 0.224, 0.225)
+        self.p = 0.5
+        self.train_tf = A.Compose([
+            A.Rotate(limit=(-10,10), p=self.p),
+            A.HorizontalFlip(p=self.p),
+            AutoRandomResizedCrop(scale=(0.75, 1.0), ratio=(0.75, 1.33),p=self.p),
+            # A.OneOf([
+            #     A.ColorJitter(p=1.0,brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
+            #     A.ToGray(p=1.0),
+            # ], p=self.p),
+            # A.OneOf([
+            #     A.GaussianBlur(p=1.0,blur_limit=(1, 3)),
+            #     A.GaussNoise(p=1.0,std_range=self.noise_std_range),
+            # ], p=self.p),
+            #  A.CoarseDropout(num_holes_range=(1,4), 
+            #                  hole_height_range=(rmin, rmax), 
+            #                  hole_width_range=(rmin, rmax), p=self.p),
+            A.Normalize(mean=self.mean, std=self.std),
+            A.ToTensorV2(),
+        ])
+        self.train_tf = v2.Compose([
+            v2.RandomHorizontalFlip(p=self.p),
+
+            v2.RandomApply(
+                [v2.RandomChoice([
+                    v2.AutoAugment(
+                        policy=v2.AutoAugmentPolicy.IMAGENET,
+                        interpolation=InterpolationMode.BILINEAR,
+                    ),
+                    v2.RandAugment(num_ops=2, magnitude=9),
+                    v2.AugMix(severity=3, mixture_width=3, chain_depth=-1, alpha=1.0),
+                ])],
+                p=self.p
+            ),
+            v2.Resize((640,640)),
+            ToTensor(mean=self.mean, std=self.std).build(),
+            v2.Normalize(mean=self.mean, std=self.std),
+        ])
+        self.val_tf = SimpleImageValAugment(mean=self.mean,std=self.std).build()
+        self.dataset_cls = RetinaFaceDataset
 
 # ----------------------------
 # ImageNet DataModule
@@ -592,7 +652,7 @@ class TinyImageNetDataset(VisionDataset):
     md5 = '90528d7ca1a48142e341f4ef8d21d0de'
 
     def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
-        super(TinyImageNetDataset, self).__init__(root, transform=transform, target_transform=target_transform)
+        super().__init__(root, transform=transform, target_transform=target_transform)
 
         self.dataset_path = os.path.join(root, self.base_folder)
         self.loader = default_loader
@@ -623,23 +683,15 @@ class TinyImageNetDataset(VisionDataset):
     def _check_integrity(self):
         return check_integrity(os.path.join(self.root, self.filename), self.md5)
 
-    # def __getitem__(self, index):
-    #     img_path, target = self.data[index]
-    #     image = self.loader(img_path)
-
-    #     if self.transform is not None:
-    #         image = self.transform(image)
-    #     if self.target_transform is not None:
-    #         target = self.target_transform(target)
-
-    #     return image, target
-
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         img_path, target = self.data[index]
         img = self.loader(img_path)
         img:np.ndarray = np.asarray(img)
         if self.transform is not None:
-            img = self.transform(image=img)["image"]
+            if isinstance(self.transform, (BaseCompose, BasicTransform)):
+                img = self.transform(image=img)["image"]
+            else:
+                img = self.transform(Image.fromarray(img))
         if self.target_transform is not None:
             target = self.target_transform(target)
         return img, target
@@ -880,6 +932,8 @@ class RetinaFaceDataset(VisionDataset):
         root: str,
         train: bool = True,
         download: bool = False,
+        transform=None,
+        target_transform=None,
         image_size: int = 640,  # kept for compatibility; unused internally
         annotation_file: Optional[str] = None,
         annotations_dir: str = "annotations",
@@ -887,7 +941,7 @@ class RetinaFaceDataset(VisionDataset):
         val_ann: str = "val.json",
         download_url: Optional[str] = None,  # optional override (single URL)
     ) -> None:
-        super().__init__(root=root, transforms=None, transform=None, target_transform=None)
+        super().__init__(root, transform=transform, target_transform=target_transform)
 
         self.root = Path(root)
         self.train = bool(train)
@@ -925,12 +979,12 @@ class RetinaFaceDataset(VisionDataset):
 
     @staticmethod
     def _convert_wider_txt_to_json(txt_path: Path, images_prefix_rel: Path, out_json: Path) -> None:
-        """
-        Convert WIDER FACE bbx gt txt format into our JSON list:
-          [{"file": "<rel path>", "boxes": [[x1,y1,x2,y2], ...]}, ...]
-        Landmarks are not provided by WIDER split → omitted (dataset will fill -1s).
-        """
         items: List[Dict[str, Any]] = []
+        IMG_EXTS = (".jpg", ".jpeg", ".png")
+
+        def is_image_line(s: str) -> bool:
+            s = s.lower()
+            return s.endswith(IMG_EXTS)
 
         with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
             while True:
@@ -938,23 +992,47 @@ class RetinaFaceDataset(VisionDataset):
                 if not img_rel:
                     break
                 img_rel = img_rel.strip()
-                if img_rel == "":
+                if not img_rel:
+                    continue
+
+                # Guard: sometimes a dummy bbox line can be encountered here if parsing got off.
+                if not is_image_line(img_rel):
                     continue
 
                 n_line = f.readline()
                 if not n_line:
                     break
-                n = int(n_line.strip())
+                n_line = n_line.strip()
+
+                try:
+                    n = int(n_line)
+                except ValueError:
+                    # If this happens, the file is desynced or it's a filelist-style txt.
+                    # Treat as 0 faces and continue.
+                    n = 0
 
                 boxes: List[List[float]] = []
                 for _ in range(n):
-                    parts = f.readline().strip().split()
+                    line = f.readline()
+                    if not line:
+                        break
+                    parts = line.strip().split()
                     if len(parts) < 4:
                         continue
                     x, y, w, h = map(float, parts[:4])
                     boxes.append([x, y, x + w, y + h])
 
-                # store path relative to dataset root
+                # IMPORTANT: WIDER sometimes has an extra dummy bbox row even when n == 0.
+                if n == 0:
+                    pos = f.tell()
+                    maybe = f.readline()
+                    if maybe:
+                        maybe = maybe.strip()
+                        if is_image_line(maybe):
+                            # It was actually the next image line; rewind so outer loop reads it.
+                            f.seek(pos)
+                        # else: it was the dummy "0 0 0 0 ..." line; we intentionally dropped it.
+
                 file_rel = (images_prefix_rel / img_rel).as_posix()
                 items.append({"file": file_rel, "boxes": boxes})
 
@@ -1030,7 +1108,7 @@ class RetinaFaceDataset(VisionDataset):
         if self.ann_path.name in ("train.json", "val.json") and out_json.exists():
             self.ann_path = out_json
 
-    def __getitem__(self, idx: int) -> Tuple[Any, Dict[str, torch.Tensor]]:
+    def __getitemdata__(self, idx: int) -> Tuple[Any, Dict[str, torch.Tensor]]:
         entry = self.items[idx]
 
         img_path = self._resolve_path(entry["file"])
@@ -1069,18 +1147,26 @@ class RetinaFaceDataset(VisionDataset):
             lm[..., 0] = lm_x
             lm[..., 1] = lm_y
             landmarks = lm.view(-1, 10)
+        target = RetinaFaceTensor(label=torch.ones((boxes.size(0),), dtype=torch.long),
+                                  bbox=boxes,
+                                  landmark=landmarks).model_dump()
+        return img, target
 
-        target: Dict[str, torch.Tensor] = {
-            "boxes": boxes,
-            "landmarks": landmarks,
-            "labels": torch.ones((boxes.size(0),), dtype=torch.long),
-        }
-
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        img, target = self.__getitemdata__(index)
+        img:np.ndarray = np.asarray(img)
+        if self.transform is not None:
+            if isinstance(self.transform, (BaseCompose, BasicTransform)):
+                img = self.transform(image=img)["image"]
+            else:
+                img = self.transform(Image.fromarray(img))
+        if self.target_transform is not None:
+            target = self.target_transform(target)
         return img, target
 
 if __name__ == "__main__":
-    for n in ['mnist','cifar100','timnet']:
-        ds = DataModuleConfig(dataset_name=n,data_dir='./data',batch_size=32,mixup=True,cutmix=True).build()
+    for n in ['retinaface']:#,'mnist','cifar100','timnet']:
+        ds = DataModuleConfig(dataset_name=n,data_dir='./data',batch_size=32,mixup=False,cutmix=False).build()
         ds.setup()
         for i in range(4):
             ds.show_examples(32)
