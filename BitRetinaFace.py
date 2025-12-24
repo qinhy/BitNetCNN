@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from pydanticV2_argparse import ArgumentParser
 import torch
 
+from dataset import RetinaFaceTensor
 from trainer import LitBit
 
 import torch.nn as nn
@@ -183,11 +184,6 @@ class PredictionHead(nn.Module):
             preds.append(p.view(p.size(0), -1, self.out_per_anchor))
         return torch.cat(preds, dim=1)
 
-class RetinaFaceTensor(BaseModel):
-    label:Optional[torch.Tensor] = Field(default=None,exclude=True)
-    bbox:Optional[torch.Tensor] = Field(default=None,exclude=True)
-    landmark:Optional[torch.Tensor] = Field(default=None,exclude=True)
-
 class BitRetinaFace(nn.Module):
     """Bit-friendly RetinaFace with configurable ResNet backbone."""
 
@@ -236,17 +232,20 @@ class BitRetinaFace(nn.Module):
         self.bbox_head = head(4)
         self.landmark_head = head(10)
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         feats = self.fpn(self.backbone(x))
         feats = [m(f) for m, f in zip(self.ssh, feats)]
-        return RetinaFaceTensor(label=self.classification_head(feats),
-                                bbox=self.bbox_head(feats),
-                                landmark=self.landmark_head(feats),)
-        return {
-            "cls": self.classification_head(feats),
-            "bbox": self.bbox_head(feats),
-            "landmark": self.landmark_head(feats),
-        }
+        return (self.classification_head(feats),
+                self.bbox_head(feats),
+                self.landmark_head(feats))
+        # return RetinaFaceTensor(label=self.classification_head(feats),
+        #                         bbox=self.bbox_head(feats),
+        #                         landmark=self.landmark_head(feats),)
+        # return {
+        #     "cls": self.classification_head(feats),
+        #     "bbox": self.bbox_head(feats),
+        #     "landmark": self.landmark_head(feats),
+        # }
 
     def clone(self) -> "BitRetinaFace":
         model = BitRetinaFace(
@@ -539,8 +538,8 @@ class LitRetinaFace(LitBit):
     
     def training_step(self, batch, batch_idx: int):
         images, targets = batch
-        outputs:RetinaFaceTensor = self.student(images)
-        targets = self._build_targets(targets["boxes"], targets["landmarks"])
+        targets:List[RetinaFaceTensor] = [t.train() for t in targets]
+        outputs:List[RetinaFaceTensor] = self.student(images)
         
         cls = self._cls_loss(outputs.label, targets.label)
         bbox = self._bbox_loss(outputs.bbox, targets.bbox, targets.label)
