@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional, Sequence, Tuple, Union, List, Dict
 
 import cv2
 from matplotlib import pyplot as plt
+from matplotlib.patches import Rectangle
 import numpy as np
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 import torch
@@ -184,7 +185,7 @@ class DataSetModule:
         n: int = 16,
         split: str = "train",
         cols: int = 8,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         figsize=(12, 6),
     ):
         """
@@ -196,25 +197,40 @@ class DataSetModule:
             torch.manual_seed(seed)
 
         assert self.train_ds is not None and self.val_ds is not None, "Call setup() first."
-
         loader = self.train_dataloader() if split == "train" else self.val_dataloader()
-        x, y = next(iter(loader))
-        x = x[:n].cpu()
-        try:
-            y = y[:n].cpu()
-        except:
-            y = None
 
-        # denormalize for display
-        mean = torch.tensor(self.mean, dtype=x.dtype).view(1, x.shape[1], 1, 1)
-        std = torch.tensor(self.std, dtype=x.dtype).view(1, x.shape[1], 1, 1)
-        x_vis = (x * std + mean).clamp(0, 1)
+        batch = next(iter(loader))
+        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+            x, y = batch[0], batch[1]
+        else:
+            raise ValueError("Dataloader must return (x, y)")
 
+        # ---- handle x being Tensor or list of Tensors (variable-sized images) ----
+        if torch.is_tensor(x):
+            x = x[:n].detach().cpu()
+            x_list = [x[i] for i in range(x.shape[0])]
+        else:
+            x_list = [xi.detach().cpu() for xi in list(x)[:n]]
+
+        n = min(n, len(x_list))
+        x_list = x_list[:n]
+
+        # ---- move y to CPU if possible ----
+        y_is_list = isinstance(y, (list, tuple))
+        if y_is_list:
+            y_list = list(y)[:n]
+        else:
+            try:
+                y_list = y[:n].detach().cpu()
+            except Exception:
+                y_list = None
+
+        # ---- dataset class names (if classification) ----
         ds = self.train_ds if split == "train" else self.val_ds
         class_names = getattr(ds, "classes", None)
 
         def label_to_text(target):
-            # target can be int tensor, or soft one-hot (MixUp/CutMix)
+            # for classification display
             if torch.is_tensor(target):
                 if target.ndim == 0:
                     idx = int(target.item())
@@ -230,23 +246,82 @@ class DataSetModule:
                     return " | ".join(parts) if parts else "mixed"
             return str(target)
 
+        def denorm_for_vis(img_t: torch.Tensor) -> torch.Tensor:
+            # img_t: (C,H,W)
+            if not torch.is_tensor(img_t) or img_t.ndim != 3:
+                return img_t
+            # if already uint8, just scale to [0,1] for matplotlib
+            if img_t.dtype == torch.uint8:
+                return (img_t.float() / 255.0).clamp(0, 1)
+
+            mean = torch.tensor(self.mean, dtype=img_t.dtype).view(-1, 1, 1)
+            std = torch.tensor(self.std, dtype=img_t.dtype).view(-1, 1, 1)
+            return (img_t * std + mean).clamp(0, 1)
+
+        def is_retina_target(t) -> bool:
+            # supports RetinaFaceTensor or dict with bbox/landmark
+            if t is None:
+                return False
+            if hasattr(t, "bbox") and hasattr(t, "landmark"):
+                return True
+            if isinstance(t, dict) and ("bbox" in t) and ("landmark" in t):
+                return True
+            return False
+
+        # ---- decide whether this is detection-style batch ----
+        detection = False
+        if y_is_list and len(y_list) > 0 and is_retina_target(y_list[0]):
+            detection = True
+
         cols = max(1, min(cols, n))
         rows = math.ceil(n / cols)
         plt.figure(figsize=figsize)
+
         for i in range(n):
             plt.subplot(rows, cols, i + 1)
-            img = x_vis[i].permute(1, 2, 0).numpy()
-            if img.shape[2] == 1:
-                plt.imshow(img[:, :, 0], cmap="gray")
-            else:
-                plt.imshow(img)
+
+            img_vis = denorm_for_vis(x_list[i])
+            img_np = img_vis.permute(1, 2, 0).numpy()
+            H, W = img_np.shape[:2]
+
+            plt.imshow(img_np)
             plt.axis("off")
-            plt.title(label_to_text(y[i])  if y else 'null', fontsize=8)
+
+            title = "null"
+            if detection and y_list is not None:
+                t = y_list[i]
+                if is_retina_target(t):
+                    t:RetinaFaceTensor = t
+                    boxes = torch.as_tensor(t.bbox).detach().cpu().view(-1, 4)
+
+                    # draw boxes
+                    for b in boxes:
+                        x1, y1, x2, y2 = [float(v) for v in b.tolist()]
+                        w = max(0.0, x2 - x1)
+                        h = max(0.0, y2 - y1)
+                        plt.gca().add_patch(Rectangle((x1, y1), w, h, fill=False, linewidth=1.0))
+
+                    xs,ys = t.landmark_xs_ys()
+                    if xs.size > 0:
+                        plt.scatter(xs, ys, s=6)
+
+                    title = f"faces:{boxes.shape[0]}"
+
+            elif y_list is not None:
+                # classification display
+                title = label_to_text(y_list[i])
+
+            plt.title(title, fontsize=8)
+
         plt.tight_layout()
         plt.show()
-        return x, y
 
-
+        # return something consistent with your old function
+        if torch.is_tensor(x):
+            x_out = x[:n]
+        else:
+            x_out = x_list
+        return x_out, y_list
     # -----------------------------
     # Validation (Classification)
     # -----------------------------
@@ -514,52 +589,6 @@ class MNISTDataModule(DataSetModule):
 # ----------------------------
 # RetinaFace
 # ----------------------------
-class RetinaFaceDataModule(DataSetModule):
-    def __init__(self, config: "DataModuleConfig"):
-        super().__init__(config)
-        self.num_classes = 100
-        self.mean = (0.485, 0.456, 0.406)
-        self.std = (0.229, 0.224, 0.225)
-        self.p = 0.5
-        self.train_tf = A.Compose([
-            A.Rotate(limit=(-10,10), p=self.p),
-            A.HorizontalFlip(p=self.p),
-            AutoRandomResizedCrop(scale=(0.75, 1.0), ratio=(0.75, 1.33),p=self.p),
-            # A.OneOf([
-            #     A.ColorJitter(p=1.0,brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
-            #     A.ToGray(p=1.0),
-            # ], p=self.p),
-            # A.OneOf([
-            #     A.GaussianBlur(p=1.0,blur_limit=(1, 3)),
-            #     A.GaussNoise(p=1.0,std_range=self.noise_std_range),
-            # ], p=self.p),
-            #  A.CoarseDropout(num_holes_range=(1,4), 
-            #                  hole_height_range=(rmin, rmax), 
-            #                  hole_width_range=(rmin, rmax), p=self.p),
-            A.Normalize(mean=self.mean, std=self.std),
-            A.ToTensorV2(),
-        ])
-        self.train_tf = v2.Compose([
-            v2.RandomHorizontalFlip(p=self.p),
-
-            v2.RandomApply(
-                [v2.RandomChoice([
-                    v2.AutoAugment(
-                        policy=v2.AutoAugmentPolicy.IMAGENET,
-                        interpolation=InterpolationMode.BILINEAR,
-                    ),
-                    v2.RandAugment(num_ops=2, magnitude=9),
-                    v2.AugMix(severity=3, mixture_width=3, chain_depth=-1, alpha=1.0),
-                ])],
-                p=self.p
-            ),
-            v2.Resize((640,640)),
-            ToTensor(mean=self.mean, std=self.std).build(),
-            v2.Normalize(mean=self.mean, std=self.std),
-        ])
-        self.val_tf = SimpleImageValAugment(mean=self.mean,std=self.std).build()
-        self.dataset_cls = RetinaFaceDataset
-
 # ----------------------------
 # ImageNet DataModule
 # ----------------------------
@@ -744,180 +773,172 @@ class TinyImageNetDataset(VisionDataset):
 # RetinaFace / DataModule
 # -----------------------------------------------------------------------------
 class RetinaFaceTensor(BaseModel):
+    file:str
+    img_h: int = Field(default=0)
+    img_w: int = Field(default=0)
+    img:Optional[Any] = Field(default=None,exclude=True)
     label:Optional[Any] = Field(default=None,exclude=True)
-    bbox:Optional[Any] = Field(default=None,exclude=True)
-    landmark:Optional[Any] = Field(default=None,exclude=True)
+    bbox:Optional[Any] = Field(default=None,exclude=True) # xyxy
+    landmark:Optional[Any] = Field(default=None,exclude=True) # [lx, ly, rx, ry, nx, ny, mlx, mly, mrx, mry] as shape (5,2)
+    landmark_vis:Optional[Any] = Field(default=None,exclude=True) # [lv, rv, nv, mlv, mrv] as shape (5)
+
+    def model_post_init(self, context):
+        img_pil = ImageOps.exif_transpose(Image.open(self.file)).convert("RGB")
+        self.img = np.asarray(img_pil)  # (H,W,3) uint8
+        self.img_h, self.img_w = self.img.shape[:2]
+        
+        # --- landmark: raw pixels (5,2), missing = -1 (numpy float32) ---
+        land = self.landmark
+        if not land:
+            landmark = np.full((self.bbox.shape[0], 15), -1.0, dtype=np.float32)
+        else:
+            landmark = np.asarray(land, dtype=np.float32).reshape(-1, 15)
+            if landmark.shape[0] != self.bbox.shape[0]:
+                raise ValueError(
+                    f"Mismatch: {self.bbox.shape[0]} boxes but {landmark.shape[0]} landmark rows "
+                    f"for file={self.file}"
+                )
+
+            lm = landmark.reshape(-1, 5, 3).copy()
+            valid = (lm[..., 0] >= 0) & (lm[..., 1] >= 0)
+
+            # force invalid points to -1 exactly
+            lm[..., 0][~valid] = -1.0
+            lm[..., 1][~valid] = -1.0
+            lm[..., 2][~valid] = -1.0
+
+            lm = lm.reshape(-1, 5, 3).reshape(-1,3)
+            self.landmark = lm[:,:2]
+            self.landmark_vis = lm[:,2]
+        
+        self.label = np.ones((self.bbox.shape[0],), dtype=np.int64)
+
+        return super().model_post_init(context)
+    
+    def landmark_xs_ys(self):
+        pts = self.landmark
+        valid = (pts[..., 0] >= 0) & (pts[..., 1] >= 0)
+        xs = pts[..., 0][valid]
+        ys = pts[..., 1][valid]
+        if type(pts) is torch.Tensor:
+            xs = xs.numpy()
+            ys = ys.numpy()
+        return xs,ys
+    
+    def norm_to_0_1(self, clip: bool = True):    
+        if type(self.img) is torch.Tensor:
+            C, self.img_h, self.img_w = self.img.shape
+        else:
+            self.img_h, self.img_w = self.img.shape[:2]
+
+        """Normalize bbox/landmarks from pixel coords to [0,1]. Keeps -1 as missing."""
+
+        # bbox: xyxy
+        if self.bbox is not None:
+            b = self.bbox.astype(np.float32)
+            b_norm = b.copy()
+            # only normalize non-negative coords (keep -1)
+            xmask = b_norm[:, [0, 2]] >= 0
+            ymask = b_norm[:, [1, 3]] >= 0
+            b_norm[:, [0, 2]][xmask] /= float(self.img_w)
+            b_norm[:, [1, 3]][ymask] /= float(self.img_h)
+            if clip:
+                b_norm[:, [0, 2]] = np.clip(b_norm[:, [0, 2]], -1.0, 1.0)
+                b_norm[:, [1, 3]] = np.clip(b_norm[:, [1, 3]], -1.0, 1.0)
+            self.bbox = b_norm
+
+        # landmarks: (N,5,2)
+        if self.landmark is not None:
+            p = self.landmark.astype(np.float32)
+            p_norm = p.copy()
+            xmask = p_norm[..., 0] >= 0
+            ymask = p_norm[..., 1] >= 0
+            p_norm[..., 0][xmask] /= float(self.img_w)
+            p_norm[..., 1][ymask] /= float(self.img_h)
+            if clip:
+                p_norm = np.clip(p_norm, -1.0, 1.0)
+            self.landmark = p_norm
+        return self
+    
+    def train(self):
+        res = self.norm_to_0_1()
+        res.bbox = torch.as_tensor(res.bbox).flatten()
+        res.landmark = torch.as_tensor(res.landmark).flatten()
+        res.landmark_vis = torch.as_tensor(res.landmark_vis).flatten()
+        return res
+
+class RetinaFaceDataModule(DataSetModule):
+    def __init__(self, config: "DataModuleConfig"):
+        super().__init__(config)
+        self.num_classes = 100
+        self.mean = (0.485, 0.456, 0.406)
+        self.std = (0.229, 0.224, 0.225)
+        self.p = 0.5
+        noise_std_range: Tuple[float, float] = (0.125, 0.25)
+        rmin, rmax = (0.1, 0.2)
+        self.train_tf = A.Compose([
+            A.Rotate(limit=(-15,15), p=self.p),      
+            A.RandomResizedCrop((640,640), scale=(0.6, 1.0)),
+            A.HorizontalFlip(p=self.p),
+            # A.Resize(640, 640),
+            A.OneOf([
+                A.ColorJitter(p=1.0,brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
+                A.ToGray(p=1.0),
+            ], p=self.p),
+            A.OneOf([
+                A.GaussianBlur(p=1.0,blur_limit=(1, 3)),
+                A.GaussNoise(p=1.0,std_range=noise_std_range),
+            ], p=self.p),
+            #  A.CoarseDropout(num_holes_range=(1,4), 
+            #                  hole_height_range=(rmin, rmax), 
+            #                  hole_width_range=(rmin, rmax), p=self.p),
+            A.Normalize(mean=self.mean, std=self.std),
+            A.ToTensorV2(),
+            ],
+            bbox_params=A.BboxParams(
+                format="pascal_voc",
+                min_visibility=0.0,
+            ),
+            keypoint_params=A.KeypointParams(
+                format="xy",
+                remove_invisible=False,      # keep keypoints even if they go outside; we’ll handle them
+            ),
+        )
+        # self.train_tf = v2.Compose([
+        #     v2.RandomHorizontalFlip(p=self.p),
+
+        #     v2.RandomApply(
+        #         [v2.RandomChoice([
+        #             v2.AutoAugment(
+        #                 policy=v2.AutoAugmentPolicy.IMAGENET,
+        #                 interpolation=InterpolationMode.BILINEAR,
+        #             ),
+        #             v2.RandAugment(num_ops=2, magnitude=9),
+        #             v2.AugMix(severity=3, mixture_width=3, chain_depth=-1, alpha=1.0),
+        #         ])],
+        #         p=self.p
+        #     ),
+        #     v2.Resize((640,640)),
+        #     ToTensor(mean=self.mean, std=self.std).build(),
+        #     v2.Normalize(mean=self.mean, std=self.std),
+        # ])
+        self.val_tf = SimpleImageValAugment(mean=self.mean,std=self.std).build()
+        self.dataset_cls = RetinaFaceDataset
+
+    def _build_collate_transform(self):
+        def collate_fn(batch):
+            x, y = zip(*batch)
+            x = torch.stack(x, dim=0)
+            return x, list(y)
+        self._collate_transform = collate_fn
+
+    def train_collate_fn(self, batch):
+        if self._collate_transform is not None:
+            x, y = self._collate_transform(batch)
+        return x, y
+
 
 class RetinaFaceDataset(VisionDataset):
-    
-    """
-    Yep — for *geometric* aug (resize/crop/flip/affine), you really want **joint transforms** that see **(image, boxes, landmarks)** together.
-
-    The cleanest way in modern torchvision is:
-
-    * treat `boxes` as `tv_tensors.BoundingBoxes`
-    * treat `landmarks` as `tv_tensors.KeyPoints` (shape `[N, 5, 2]`)
-    * run `torchvision.transforms.v2` so the same ops update everything consistently ([PyTorch Documentation][1])
-    * note: **KeyPoints support landed in torchvision 0.23** (beta feature) ([PyTorch Documentation][2])
-
-    Below is a practical pattern that also handles the one RetinaFace-specific quirk: **when you flip horizontally, you must swap left/right landmark indices** (eye/mouth corners). torchvision can flip keypoint coordinates, but it doesn’t know your semantic ordering.
-
-    ## Joint transforms for RetinaFace (boxes + landmarks)
-
-    ```py
-    import torch
-    from torchvision import tv_tensors
-    from torchvision.transforms import v2
-    from torchvision.transforms.v2 import functional as F
-
-
-    class WrapRetinaFaceTargets:
-        Convert plain tensors to TVTensors so v2 transforms update them.
-        def __call__(self, img, target):
-            H, W = map(int, F.get_size(img))  # [H, W]
-            target = dict(target)
-
-            boxes = target["boxes"]
-            if boxes.numel() == 0:
-                boxes_tv = tv_tensors.BoundingBoxes(boxes.view(-1, 4), format="XYXY", canvas_size=(H, W))
-            else:
-                boxes_tv = tv_tensors.BoundingBoxes(boxes.view(-1, 4), format="XYXY", canvas_size=(H, W))
-
-            # landmarks: (N,10) with -1 for missing -> KeyPoints (N,5,2) + valid mask
-            lm = target.get("landmarks", None)
-            if lm is None or lm.numel() == 0:
-                kp = torch.zeros((boxes_tv.shape[0], 5, 2), dtype=torch.float32)
-                valid = torch.zeros((boxes_tv.shape[0], 5), dtype=torch.bool)
-            else:
-                kp = lm.view(-1, 5, 2).to(torch.float32).clone()
-                valid = (kp[..., 0] >= 0) & (kp[..., 1] >= 0)
-                kp[~valid] = 0.0  # placeholder; we keep "valid" separately
-
-            kps_tv = tv_tensors.KeyPoints(kp, canvas_size=(H, W))
-
-            target["boxes"] = boxes_tv
-            target["keypoints"] = kps_tv
-            target["landmarks_valid"] = valid
-            return img, target
-
-
-    class RandomFaceHorizontalFlip:
-        Flip image/boxes/keypoints and also swap left/right landmark indices.
-        def __init__(self, p=0.5):
-            self.p = float(p)
-
-        def __call__(self, img, target):
-            if torch.rand(()) >= self.p:
-                return img, target
-
-            img = F.horizontal_flip(img)
-            target = dict(target)
-
-            target["boxes"] = F.horizontal_flip(target["boxes"])
-            kps = F.horizontal_flip(target["keypoints"])      # (N,5,2), coords flipped
-            kps = kps[:, [1, 0, 2, 4, 3], :]                  # swap le<->re and lm<->rm
-            target["keypoints"] = kps
-
-            if "landmarks_valid" in target:
-                target["landmarks_valid"] = target["landmarks_valid"][:, [1, 0, 2, 4, 3]]
-
-            return img, target
-
-
-    class UnwrapAndNormalizeRetinaFace:
-        Convert TVTensors back to your model format: boxes/landmarks normalized to [0,1] and -1 missing.
-        def __call__(self, img, target):
-            H, W = map(int, F.get_size(img))
-            target = dict(target)
-
-            boxes = torch.as_tensor(target["boxes"], dtype=torch.float32).view(-1, 4)
-            if boxes.numel():
-                boxes[:, [0, 2]] /= float(W)
-                boxes[:, [1, 3]] /= float(H)
-                boxes = boxes.clamp(0.0, 1.0)
-
-            kps = torch.as_tensor(target["keypoints"], dtype=torch.float32)  # (N,5,2)
-            valid = target.get("landmarks_valid", torch.ones(kps.shape[:2], dtype=torch.bool))
-
-            # after crop/resize, some points may go out of bounds: mark them missing
-            within = (kps[..., 0] >= 0) & (kps[..., 0] <= W) & (kps[..., 1] >= 0) & (kps[..., 1] <= H)
-            valid = valid & within
-
-            kps[..., 0] /= float(W)
-            kps[..., 1] /= float(H)
-            kps = kps.clamp(0.0, 1.0)
-            kps[~valid] = -1.0
-
-            target["boxes"] = boxes
-            target["landmarks"] = kps.view(-1, 10)
-
-            target.pop("keypoints", None)
-            target.pop("landmarks_valid", None)
-            return img, target
-    ```
-
-    ### Example train transform pipeline
-
-    ```py
-    mean = (0.485, 0.456, 0.406)
-    std  = (0.229, 0.224, 0.225)
-
-    train_tf = v2.Compose([
-        v2.ToImage(),                            # makes image a tensor TVTensor
-        WrapRetinaFaceTargets(),                 # boxes->BoundingBoxes, landmarks->KeyPoints
-        v2.RandomResizedCrop((640, 640), antialias=True),
-        RandomFaceHorizontalFlip(p=0.5),         # flip + swap landmark order
-        v2.ClampBoundingBoxes(),                 # optional :contentReference[oaicite:2]{index=2}
-        v2.ClampKeyPoints(),                     # optional :contentReference[oaicite:3]{index=3}
-        v2.ToDtype(torch.float32, scale=True),
-        v2.Normalize(mean=mean, std=std),
-        UnwrapAndNormalizeRetinaFace(),          # back to your normalized [0,1] + -1 missing format
-    ])
-    ```
-
-    ### Dataset usage
-
-    Use the **joint** `transforms=` argument (not `transform=`), since `transform=` is image-only:
-
-    ```py
-    ds = RetinaFaceDataset(
-        root=self.data_dir,
-        train=True,
-        download=True,
-        transforms=train_tf,
-    )
-    ```
-
-    If you paste your current `train_tf` (what ops you want: resize? mosaic? iou-crop? affine?), I can tailor the pipeline so every step correctly updates **boxes + landmarks** and matches RetinaFace’s expected input/output shapes.
-
-    [1]: https://docs.pytorch.org/vision/stable/transforms.html "Transforming images, videos, boxes and more — Torchvision 0.24 documentation"
-    [2]: https://docs.pytorch.org/vision/main/auto_examples/transforms/plot_keypoints_transforms.html "Transforms on KeyPoints — Torchvision main documentation"
-
-
-
-    Expected layout (default):
-      root/
-        annotations/
-          train.json
-          val.json
-        (images referenced by JSON paths)
-
-    JSON entries:
-      {
-        "file": "...",
-        "width": 1024, "height": 768,          # optional
-        "boxes": [[x1,y1,x2,y2], ...],          # absolute pixels
-        "landmarks": [[x1,y1, ..., x5,y5], ...] # optional, absolute pixels OR -1 for missing
-      }
-
-    Outputs:
-      image: tensor or PIL (depending on transforms)
-      target:
-        boxes: (N,4) in [0,1]
-        landmarks: (N,10) in [0,1] or -1 for missing
-        labels: (N,) long (all ones)
-    """
-
     # Hugging Face mirror (default)
     HF_WIDER_REPO = "https://huggingface.co/datasets/wider_face/resolve/main/data"
     DEFAULT_WIDER_URLS = {
@@ -926,6 +947,13 @@ class RetinaFaceDataset(VisionDataset):
         "test": f"{HF_WIDER_REPO}/WIDER_test.zip",  # unused here (no gt)
         "split": f"{HF_WIDER_REPO}/wider_face_split.zip",
     }
+
+    # RetinaFace GT zip (annotations with bbox + 5 landmarks) used by common training repos.
+    # We try dl=1 first (direct download). If that fails, dl=0 can still work in some setups.
+    RETINAFACE_GT_V1_1_URLS = [
+        "https://drive.usercontent.google.com/u/0/uc?id=1tU_IjyOwGQfGNUvZGwWWM4SwxKp2PUQ8&export=download",
+    ]
+    RETINAFACE_GT_FILENAME = "retinaface_gt_v1.1.zip"
 
     def __init__(
         self,
@@ -936,7 +964,7 @@ class RetinaFaceDataset(VisionDataset):
         target_transform=None,
         image_size: int = 640,  # kept for compatibility; unused internally
         annotation_file: Optional[str] = None,
-        annotations_dir: str = "annotations",
+        annotations_dir: str = "widerface",
         train_ann: str = "train.json",
         val_ann: str = "val.json",
         download_url: Optional[str] = None,  # optional override (single URL)
@@ -948,6 +976,7 @@ class RetinaFaceDataset(VisionDataset):
         self.download = bool(download)
         self.image_size = int(image_size)  # unused
         self.download_url = download_url
+        self.annotations_dir = annotations_dir
 
         # pick annotation file
         if annotation_file is None:
@@ -979,6 +1008,10 @@ class RetinaFaceDataset(VisionDataset):
 
     @staticmethod
     def _convert_wider_txt_to_json(txt_path: Path, images_prefix_rel: Path, out_json: Path) -> None:
+        """
+        Convert official WIDER bbox GT txt into json:
+          { "file": "...", "boxes": [[x1,y1,x2,y2], ...] }
+        """
         items: List[Dict[str, Any]] = []
         IMG_EXTS = (".jpg", ".jpeg", ".png")
 
@@ -1007,8 +1040,6 @@ class RetinaFaceDataset(VisionDataset):
                 try:
                     n = int(n_line)
                 except ValueError:
-                    # If this happens, the file is desynced or it's a filelist-style txt.
-                    # Treat as 0 faces and continue.
                     n = 0
 
                 boxes: List[List[float]] = []
@@ -1029,12 +1060,142 @@ class RetinaFaceDataset(VisionDataset):
                     if maybe:
                         maybe = maybe.strip()
                         if is_image_line(maybe):
-                            # It was actually the next image line; rewind so outer loop reads it.
                             f.seek(pos)
-                        # else: it was the dummy "0 0 0 0 ..." line; we intentionally dropped it.
 
                 file_rel = (images_prefix_rel / img_rel).as_posix()
                 items.append({"file": file_rel, "boxes": boxes})
+
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_json, "w", encoding="utf-8") as g:
+            json.dump(items, g, ensure_ascii=False)
+
+    @staticmethod
+    def _convert_retinaface_label_to_json(label_txt: Path, images_prefix_rel: Path, out_json: Path) -> None:
+        """
+        Convert RetinaFace train/label.txt format into json:
+
+        {
+            "file": "...",
+            "boxes": [[x1,y1,x2,y2], ...],
+            "landmarks": [[15 floats], ...],   # 5*(x,y,v)
+            "scores": [float or null, ...]     # per-face final score (blur/quality) if present
+        }
+
+        Expected per-face row (common format):
+        x y w h  (le_x le_y le_v) (re_x re_y re_v) (n_x n_y n_v) (lm_x lm_y lm_v) (rm_x rm_y rm_v)  score
+
+        Visibility convention commonly used:
+        0 = visible, 1 = invisible/occluded; sometimes -1 means missing.
+        We store missing coords as -1, but we KEEP v as provided.
+        """
+        items: List[Dict[str, Any]] = []
+
+        cur_img: Optional[str] = None
+        cur_boxes: List[List[float]] = []
+        cur_landmarks: List[List[float]] = []
+        cur_scores: List[Optional[float]] = []
+
+        def flush() -> None:
+            nonlocal cur_img, cur_boxes, cur_landmarks, cur_scores
+            if cur_img is None:
+                return
+            file_rel = (images_prefix_rel / cur_img).as_posix()
+            items.append(
+                {
+                    "file": file_rel,
+                    "boxes": cur_boxes,
+                    "landmarks": cur_landmarks,
+                    "scores": cur_scores,
+                }
+            )
+            cur_img = None
+            cur_boxes = []
+            cur_landmarks = []
+            cur_scores = []
+
+        with open(label_txt, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+
+                if line.startswith("#"):
+                    flush()
+                    cur_img = line.lstrip("#").strip()
+                    continue
+
+                if cur_img is None:
+                    continue
+
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+
+                try:
+                    x, y, w, h = map(float, parts[:4])
+                except ValueError:
+                    continue
+
+                cur_boxes.append([x, y, x + w, y + h])
+
+                # Default: 5*(x,y,v) all missing
+                lm15 = [-1.0] * 15
+                face_score: Optional[float] = None
+
+                # Common case: bbox + 15 landmark vals (+ optional trailing score)
+                if len(parts) >= 4 + 15:
+                    # Parse the 15 landmark numbers
+                    try:
+                        vals15 = list(map(float, parts[4:4 + 15]))
+                        for i in range(5):
+                            px, py, vis = vals15[i * 3 : i * 3 + 3]
+
+                            # Keep vis always; coords become -1 only if clearly missing
+                            lm15[i * 3 + 2] = vis
+                            if px >= 0.0 and py >= 0.0 and vis != -1.0:
+                                lm15[i * 3 + 0] = px
+                                lm15[i * 3 + 1] = py
+                            else:
+                                lm15[i * 3 + 0] = -1.0
+                                lm15[i * 3 + 1] = -1.0
+                    except ValueError:
+                        pass
+
+                    # Parse trailing score if present (immediately after the 15 vals)
+                    if len(parts) >= 4 + 15 + 1:
+                        try:
+                            face_score = float(parts[4 + 15])
+                        except ValueError:
+                            face_score = None
+
+                # Variant: bbox + 10 coords (+ optional trailing score), no vis flags
+                elif len(parts) >= 4 + 10:
+                    try:
+                        vals10 = list(map(float, parts[4:4 + 10]))
+                        for i in range(5):
+                            px, py = vals10[i * 2 : i * 2 + 2]
+                            # Unknown vis -> set to -1.0
+                            lm15[i * 3 + 2] = -1.0
+                            if px >= 0.0 and py >= 0.0:
+                                lm15[i * 3 + 0] = px
+                                lm15[i * 3 + 1] = py
+                            else:
+                                lm15[i * 3 + 0] = -1.0
+                                lm15[i * 3 + 1] = -1.0
+                    except ValueError:
+                        pass
+
+                    # Optional trailing score right after the 10 coords
+                    if len(parts) >= 4 + 10 + 1:
+                        try:
+                            face_score = float(parts[4 + 10])
+                        except ValueError:
+                            face_score = None
+
+                cur_landmarks.append(lm15)
+                cur_scores.append(face_score)
+
+        flush()
 
         out_json.parent.mkdir(parents=True, exist_ok=True)
         with open(out_json, "w", encoding="utf-8") as g:
@@ -1046,12 +1207,14 @@ class RetinaFaceDataset(VisionDataset):
           - downloads WIDER_train.zip OR WIDER_val.zip depending on self.train
           - downloads wider_face_split.zip
           - extracts into: <root>/widerface/
-          - converts split txt annotation into: <root>/annotations/train.json or val.json
+          - tries to download retinaface_gt_v1.1.zip and build:
+              train.json (bbox + 5 landmarks) from train/label.txt when available
+              val.json from WIDER official bbox gt (landmarks absent) unless val/label.txt exists
 
         If download_url is provided, it is treated as a single archive/file override
         and no WIDER conversion is attempted.
         """
-        from torchvision.datasets.utils import download_and_extract_archive
+        from torchvision.datasets.utils import download_and_extract_archive, download_url, extract_archive
 
         # If already present, nothing to do.
         if self.ann_path.exists():
@@ -1063,14 +1226,12 @@ class RetinaFaceDataset(VisionDataset):
             download_and_extract_archive(str(self.download_url), download_root=str(self.root))
             return
 
-        # Default: WIDER FACE mirrors from Hugging Face
         urls = self.DEFAULT_WIDER_URLS
 
-        # Use torchvision's conventional folder name to keep things tidy
         wider_root = self.root / "widerface"
         wider_root.mkdir(parents=True, exist_ok=True)
 
-        # Always need split to build annotations
+        # Always need split to build fallback annotations
         split_dir = wider_root / "wider_face_split"
         if not split_dir.exists():
             download_and_extract_archive(urls["split"], download_root=str(wider_root))
@@ -1081,7 +1242,7 @@ class RetinaFaceDataset(VisionDataset):
         if not subset_dir.exists():
             download_and_extract_archive(urls[subset], download_root=str(wider_root))
 
-        # Locate split txt files (robust to nesting)
+        # Helpers
         def find_one(name: str) -> Path:
             hits = list(wider_root.rglob(name))
             if len(hits) != 1:
@@ -1090,74 +1251,84 @@ class RetinaFaceDataset(VisionDataset):
                 )
             return hits[0]
 
+        def find_retinaface_label(which: str) -> Optional[Path]:
+            # look for train/label.txt or val/label.txt anywhere under wider_root
+            candidates = []
+            for nm in ("label.txt", "labels.txt"):
+                candidates.extend([p for p in wider_root.rglob(nm) if p.parent.name == which])
+            if not candidates:
+                return None
+            # prefer paths that look like they came from retinaface_gt
+            for p in candidates:
+                if "retinaface_gt" in str(p).lower() or "retinaface" in str(p).lower():
+                    return p
+            return candidates[0]
+
+        def ensure_retinaface_gt_present() -> None:
+            # if we can already locate train label, assume extracted.
+            if find_retinaface_label("train") is not None:
+                return
+
+            for url in self.RETINAFACE_GT_V1_1_URLS:
+                try:
+                    # IMPORTANT: override filename so query params don't break basename parsing.
+                    download_url(url, root=str(wider_root), filename=self.RETINAFACE_GT_FILENAME)
+                    archive_path = wider_root / self.RETINAFACE_GT_FILENAME
+                    if archive_path.exists():
+                        extract_archive(str(archive_path), to_path=str(wider_root))
+                    # If extracted successfully, stop.
+                    if find_retinaface_label("train") is not None:
+                        return
+                except Exception:
+                    continue
+
+        # Try to fetch RetinaFace GT (for train landmarks)
+        ensure_retinaface_gt_present()
+        train_label = find_retinaface_label("train")
+        val_label = find_retinaface_label("val")
+
         if self.train:
-            gt_txt = find_one("wider_face_train_bbx_gt.txt")
-            out_json = self.root / "annotations" / "train.json"
+            out_json = self.root / self.annotations_dir / "train.json"
             images_prefix_rel = Path("widerface") / "WIDER_train" / "images"
+            if not out_json.exists():
+                if train_label is not None:
+                    self._convert_retinaface_label_to_json(train_label, images_prefix_rel, out_json)
+                else:
+                    # fallback: WIDER bbox only
+                    gt_txt = find_one("wider_face_train_bbx_gt.txt")
+                    self._convert_wider_txt_to_json(gt_txt, images_prefix_rel, out_json)
         else:
-            gt_txt = find_one("wider_face_val_bbx_gt.txt")
-            out_json = self.root / "annotations" / "val.json"
+            out_json = self.root / self.annotations_dir / "val.json"
             images_prefix_rel = Path("widerface") / "WIDER_val" / "images"
+            if not out_json.exists():
+                if val_label is not None:
+                    self._convert_retinaface_label_to_json(val_label, images_prefix_rel, out_json)
+                else:
+                    # fallback: WIDER bbox only (landmarks absent)
+                    gt_txt = find_one("wider_face_val_bbx_gt.txt")
+                    self._convert_wider_txt_to_json(gt_txt, images_prefix_rel, out_json)
 
-        if not out_json.exists():
-            self._convert_wider_txt_to_json(gt_txt, images_prefix_rel, out_json)
-
-        # If this dataset instance expects the default annotation path, it should now exist.
-        # If the user passed a different annotation_file path, they should point it to out_json.
-        # We only auto-switch if it matches the default name (train.json/val.json).
+        # Auto-switch ann_path if it matches default names.
         if self.ann_path.name in ("train.json", "val.json") and out_json.exists():
             self.ann_path = out_json
-
-    def __getitemdata__(self, idx: int) -> Tuple[Any, Dict[str, torch.Tensor]]:
-        entry = self.items[idx]
-
-        img_path = self._resolve_path(entry["file"])
-        img = ImageOps.exif_transpose(Image.open(img_path)).convert("RGB")
-
-        orig_w = int(entry.get("width", img.width))
-        orig_h = int(entry.get("height", img.height))
-        orig_w = max(orig_w, 1)
-        orig_h = max(orig_h, 1)
-
-        boxes = torch.tensor(entry.get("boxes", []), dtype=torch.float32).view(-1, 4)
-        if boxes.numel() == 0:
-            boxes = torch.zeros((0, 4), dtype=torch.float32)
-
-        if boxes.numel():
-            boxes[:, [0, 2]] /= float(orig_w)
-            boxes[:, [1, 3]] /= float(orig_h)
-            boxes = boxes.clamp(0.0, 1.0)
-
-        land = entry.get("landmarks", [])
-        if not land:
-            landmarks = torch.full((boxes.size(0), 10), -1.0, dtype=torch.float32)
-        else:
-            landmarks = torch.tensor(land, dtype=torch.float32).view(-1, 10)
-            if landmarks.size(0) != boxes.size(0):
-                raise ValueError(
-                    f"Mismatch: {boxes.size(0)} boxes but {landmarks.size(0)} landmark rows "
-                    f"for file={entry.get('file')}"
-                )
-            lm = landmarks.view(-1, 5, 2)
-            valid = lm[..., 0] >= 0
-            lm_x = lm[..., 0].clone()
-            lm_y = lm[..., 1].clone()
-            lm_x[valid] = (lm_x[valid] / float(orig_w)).clamp(0.0, 1.0)
-            lm_y[valid] = (lm_y[valid] / float(orig_h)).clamp(0.0, 1.0)
-            lm[..., 0] = lm_x
-            lm[..., 1] = lm_y
-            landmarks = lm.view(-1, 10)
-        target = RetinaFaceTensor(label=torch.ones((boxes.size(0),), dtype=torch.long),
-                                  bbox=boxes,
-                                  landmark=landmarks).model_dump()
-        return img, target
-
+    
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        img, target = self.__getitemdata__(index)
-        img:np.ndarray = np.asarray(img)
+        entry = self.items[index]
+        img_path = self._resolve_path(entry["file"])
+        target = RetinaFaceTensor(file=str(img_path),
+                              bbox=np.asarray(entry.get("boxes", []), dtype=np.float32).reshape(-1, 4),
+                              landmark=entry.get("landmarks", [])
+                              )
+        img:np.ndarray = target.img
         if self.transform is not None:
             if isinstance(self.transform, (BaseCompose, BasicTransform)):
-                img = self.transform(image=img)["image"]
+                res = self.transform(image=img,
+                                    bboxes=target.bbox,
+                                    keypoints=target.landmark,
+                                )
+                target.img = img = res["image"]
+                target.bbox = res["bboxes"]
+                target.landmark = res["keypoints"]
             else:
                 img = self.transform(Image.fromarray(img))
         if self.target_transform is not None:
@@ -1169,4 +1340,4 @@ if __name__ == "__main__":
         ds = DataModuleConfig(dataset_name=n,data_dir='./data',batch_size=32,mixup=False,cutmix=False).build()
         ds.setup()
         for i in range(4):
-            ds.show_examples(32)
+            ds.show_examples(4)
