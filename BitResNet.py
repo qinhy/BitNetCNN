@@ -447,7 +447,7 @@ def main() -> None:
     
     trainer = AccelTrainer(
         max_epochs=args.epochs,
-        mixed_precision="no",                 # start with "no" to debug
+        mixed_precision="bf16" if args.amp else "no",
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
     )

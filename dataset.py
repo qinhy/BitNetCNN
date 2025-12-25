@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import math
@@ -784,35 +785,35 @@ class RetinaFaceTensor(BaseModel):
 
     def model_post_init(self, context):
         img_pil = ImageOps.exif_transpose(Image.open(self.file)).convert("RGB")
-        self.img = np.asarray(img_pil)  # (H,W,3) uint8
-        self.img_h, self.img_w = self.img.shape[:2]
-        
-        # --- landmark: raw pixels (5,2), missing = -1 (numpy float32) ---
-        land = self.landmark
-        if not land:
-            landmark = np.full((self.bbox.shape[0], 15), -1.0, dtype=np.float32)
-        else:
-            landmark = np.asarray(land, dtype=np.float32).reshape(-1, 15)
-            if landmark.shape[0] != self.bbox.shape[0]:
-                raise ValueError(
-                    f"Mismatch: {self.bbox.shape[0]} boxes but {landmark.shape[0]} landmark rows "
-                    f"for file={self.file}"
-                )
+        if self.img is None:
+            self.img = np.asarray(img_pil)  # (H,W,3) uint8
+            self.img_h, self.img_w = self.img.shape[:2]
+            
+            # --- landmark: raw pixels (5,2), missing = -1 (numpy float32) ---
+            land = self.landmark
+            if not land:
+                landmark = np.full((self.bbox.shape[0], 15), -1.0, dtype=np.float32)
+            else:
+                landmark = np.asarray(land, dtype=np.float32).reshape(-1, 15)
+                if landmark.shape[0] != self.bbox.shape[0]:
+                    raise ValueError(
+                        f"Mismatch: {self.bbox.shape[0]} boxes but {landmark.shape[0]} landmark rows "
+                        f"for file={self.file}"
+                    )
 
-            lm = landmark.reshape(-1, 5, 3).copy()
-            valid = (lm[..., 0] >= 0) & (lm[..., 1] >= 0)
+                lm = landmark.reshape(-1, 5, 3).copy()
+                valid = (lm[..., 0] >= 0) & (lm[..., 1] >= 0)
 
-            # force invalid points to -1 exactly
-            lm[..., 0][~valid] = -1.0
-            lm[..., 1][~valid] = -1.0
-            lm[..., 2][~valid] = -1.0
+                # force invalid points to -1 exactly
+                lm[..., 0][~valid] = -1.0
+                lm[..., 1][~valid] = -1.0
+                lm[..., 2][~valid] = -1.0
 
-            lm = lm.reshape(-1, 5, 3).reshape(-1,3)
-            self.landmark = lm[:,:2]
-            self.landmark_vis = lm[:,2]
-        
-        self.label = np.ones((self.bbox.shape[0],), dtype=np.int64)
-
+                lm = lm.reshape(-1, 5, 3).reshape(-1,3)
+                self.landmark = lm[:,:2]
+                self.landmark_vis = lm[:,2]
+            
+            self.label = np.ones((self.bbox.shape[0],), dtype=np.int64)
         return super().model_post_init(context)
     
     def landmark_xs_ys(self):
@@ -832,40 +833,69 @@ class RetinaFaceTensor(BaseModel):
             self.img_h, self.img_w = self.img.shape[:2]
 
         """Normalize bbox/landmarks from pixel coords to [0,1]. Keeps -1 as missing."""
-
+        bbox,landmark = None,None
         # bbox: xyxy
         if self.bbox is not None:
-            b = self.bbox.astype(np.float32)
-            b_norm = b.copy()
-            # only normalize non-negative coords (keep -1)
-            xmask = b_norm[:, [0, 2]] >= 0
-            ymask = b_norm[:, [1, 3]] >= 0
-            b_norm[:, [0, 2]][xmask] /= float(self.img_w)
-            b_norm[:, [1, 3]][ymask] /= float(self.img_h)
+            b_norm = self.bbox.astype(np.float32).copy() #xyxy in pixel
+            whwh = np.asarray([self.img_w, self.img_h, self.img_w, self.img_h], dtype=np.float32)
+            b_norm /= whwh
             if clip:
-                b_norm[:, [0, 2]] = np.clip(b_norm[:, [0, 2]], -1.0, 1.0)
-                b_norm[:, [1, 3]] = np.clip(b_norm[:, [1, 3]], -1.0, 1.0)
-            self.bbox = b_norm
+                b_norm = np.clip(b_norm, 0.0, 1.0)
+            bbox = b_norm
 
         # landmarks: (N,5,2)
         if self.landmark is not None:
-            p = self.landmark.astype(np.float32)
-            p_norm = p.copy()
-            xmask = p_norm[..., 0] >= 0
-            ymask = p_norm[..., 1] >= 0
-            p_norm[..., 0][xmask] /= float(self.img_w)
-            p_norm[..., 1][ymask] /= float(self.img_h)
+            p_norm = self.landmark.astype(np.float32).copy() # (N,5,2)
+            p_norm[..., 0] /= float(self.img_w)
+            p_norm[..., 1] /= float(self.img_h)
             if clip:
-                p_norm = np.clip(p_norm, -1.0, 1.0)
-            self.landmark = p_norm
-        return self
+                p_norm = np.clip(p_norm, 0.0, 1.0)
+            landmark = p_norm
+        return bbox,landmark
     
-    def train(self):
-        res = self.norm_to_0_1()
-        res.bbox = torch.as_tensor(res.bbox).flatten()
-        res.landmark = torch.as_tensor(res.landmark).flatten()
-        res.landmark_vis = torch.as_tensor(res.landmark_vis).flatten()
+    def clone(self, update={}, deep=False):
+        if not deep:
+            return RetinaFaceTensor(file=self.file,
+                                    img=self.img,
+                                    img_h=self.img_h,
+                                    img_w=self.img_w,
+                                  **update)
+        else:
+            return copy.deepcopy(self)
+
+    def as_tensor(self):
+        if self.bbox.is_tensor:
+            return self
+        bbox,landmark = self.norm_to_0_1()
+        res = self.clone(update=dict(bbox=bbox,landmark=landmark,
+                                     landmark_vis=self.landmark_vis))
+        res.bbox = torch.as_tensor(res.bbox)
+        res.landmark = torch.as_tensor(res.landmark)
+        res.landmark_vis = torch.as_tensor(res.landmark_vis)
         return res
+        
+    def norm_to_pixel(self):
+        """Normalize bbox/landmarks from [0,1] to pixel coords."""
+        bbox,landmark = None,None
+        # bbox: xyxy
+        if self.bbox is not None:
+            b_norm = self.bbox.clone() #xyxy in pixel
+            whwh = torch.Tensor([self.img_w, self.img_h, self.img_w, self.img_h]).to(dtype=torch.float32)
+            b_norm *= whwh
+            bbox = b_norm.detach().cpu().numpy()
+        # landmarks: (N,5,2)
+        if self.landmark is not None:
+            p_norm = self.landmark.clone() # (N,5,2)
+            p_norm[..., 0] *= float(self.img_w)
+            p_norm[..., 1] *= float(self.img_h)
+            landmark = p_norm.detach().cpu().numpy()
+        return bbox,landmark
+    
+    def as_numpy(self):
+        bbox,landmark = self.norm_to_pixel()
+        return self.clone(update=dict(bbox=bbox,landmark=landmark,
+                                     landmark_vis=self.landmark_vis))
+        
 
 class RetinaFaceDataModule(DataSetModule):
     def __init__(self, config: "DataModuleConfig"):
@@ -1335,9 +1365,9 @@ class RetinaFaceDataset(VisionDataset):
             target = self.target_transform(target)
         return img, target
 
-if __name__ == "__main__":
-    for n in ['retinaface']:#,'mnist','cifar100','timnet']:
-        ds = DataModuleConfig(dataset_name=n,data_dir='./data',batch_size=32,mixup=False,cutmix=False).build()
-        ds.setup()
-        for i in range(4):
-            ds.show_examples(4)
+# if __name__ == "__main__":
+#     for n in ['retinaface']:#,'mnist','cifar100','timnet']:
+#         ds = DataModuleConfig(dataset_name=n,data_dir='./data',batch_size=32,mixup=False,cutmix=False).build()
+#         ds.setup()
+#         for i in range(4):
+#             ds.show_examples(4)

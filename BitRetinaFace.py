@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 from pydanticV2_argparse import ArgumentParser
 import torch
 
-from dataset import RetinaFaceTensor
-from trainer import LitBit
+from dataset import DataModuleConfig, RetinaFaceTensor
+from trainer import LitBit, Metrics
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -75,6 +75,8 @@ def _conv_block(
         scale_op=scale_op,
         norm=norm,
     )
+    act = ActModels.SiLU(inplace=True) if act else None
+    norm = NormModels.BatchNorm2d(num_features=-1) if norm else None
     if act and norm:
         return Conv2dModels.Conv2dNormAct(**conf,act=act).build()
     if not act and norm:
@@ -232,15 +234,21 @@ class BitRetinaFace(nn.Module):
         self.bbox_head = head(4)
         self.landmark_head = head(10)
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> List[RetinaFaceTensor]:
         feats = self.fpn(self.backbone(x))
         feats = [m(f) for m, f in zip(self.ssh, feats)]
-        return (self.classification_head(feats),
-                self.bbox_head(feats),
-                self.landmark_head(feats))
-        # return RetinaFaceTensor(label=self.classification_head(feats),
-        #                         bbox=self.bbox_head(feats),
-        #                         landmark=self.landmark_head(feats),)
+        imgs = x
+        labels = self.classification_head(feats)
+        bboxs = self.bbox_head(feats)
+        landmarks = self.landmark_head(feats)
+        return [
+            RetinaFaceTensor(img=img, label=label, bbox=bbox, landmark=landmark,
+                ) for img, label, bbox, landmark in zip(imgs, labels, bboxs, landmarks)
+        ]
+    
+        # return (self.classification_head(feats),
+        #         self.bbox_head(feats),
+        #         self.landmark_head(feats))
         # return {
         #     "cls": self.classification_head(feats),
         #     "bbox": self.bbox_head(feats),
@@ -410,7 +418,7 @@ class LitRetinaFace(LitBit):
             in_ch=3,
             small_stem=config.small_stem,
         )
-        self.student = self.model  # for compatibility with ternary export helper
+        self.student:BitRetinaFace = self.model  # for compatibility with ternary export helper
         self.lr = config.lr
         self.wd = config.wd
         self.input_size = config.image_size
@@ -438,17 +446,14 @@ class LitRetinaFace(LitBit):
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         return self.model(images)
 
-    def _build_targets(
-        self,
-        target_boxes: List[torch.Tensor],
-        target_landmarks: List[torch.Tensor],):
+    def build_targets_by_anchors(self, targets: List[RetinaFaceTensor]) -> List[RetinaFaceTensor]:
         device = self.anchors.device
-        labels = []
-        bbox_t = []
-        land_t = []
-        for boxes, lands in zip(target_boxes, target_landmarks):
-            boxes = boxes.to(device)
-            lands = lands.to(device).view(-1, 5, 2)
+        out: List[RetinaFaceTensor] = []
+
+        for t in targets:
+            boxes = t.bbox.to(device)
+            lands = t.landmark.to(device).view(-1, 5, 2)
+
             l, b, ld = match_anchors(
                 self.anchors,
                 boxes,
@@ -457,13 +462,9 @@ class LitRetinaFace(LitBit):
                 self.neg_iou,
                 self.variances,
             )
-            labels.append(l)
-            bbox_t.append(b)
-            land_t.append(ld)
-        return RetinaFaceTensor(
-            label=torch.stack(labels, dim=0),
-            bbox=torch.stack(bbox_t, dim=0),
-            landmark=torch.stack(land_t, dim=0),)
+            out.append(RetinaFaceTensor(img=t.img, label=l, bbox=b, landmark=ld))
+
+        return out
 
 
     def _cls_loss(
@@ -536,44 +537,45 @@ class LitRetinaFace(LitBit):
             / denom
         )
     
-    def training_step(self, batch, batch_idx: int):
+    def _compute_losses(self, outputs: List[RetinaFaceTensor], targets: List[RetinaFaceTensor]):
+        anchor_targets = self.build_targets_by_anchors(targets)  # now it's a list
+
+        out_label  = torch.stack([o.label for o in outputs], dim=0)      # [B, N, 2]
+        out_bbox   = torch.stack([o.bbox for o in outputs], dim=0)       # [B, N, 4]
+        out_land   = torch.stack([o.landmark for o in outputs], dim=0)   # [B, N, 10]
+
+        tgt_label  = torch.stack([t.label for t in anchor_targets], dim=0)     # [B, N]
+        tgt_bbox   = torch.stack([t.bbox for t in anchor_targets], dim=0)      # [B, N, 4]
+        tgt_land   = torch.stack([t.landmark for t in anchor_targets], dim=0)  # [B, N, 10]
+
+        cls_loss = self._cls_loss(out_label, tgt_label)
+        bbox_loss = self._bbox_loss(out_bbox, tgt_bbox, tgt_label)
+        landmark_loss = self._landmark_loss(out_land, tgt_land)
+
+        total = cls_loss + self.box_weight * bbox_loss + self.landmark_weight * landmark_loss
+        stats = {"loss": total, "ce": cls_loss, "bb": bbox_loss, "lm": landmark_loss}
+        return total, stats
+    
+    def _step_one(self, batch, batch_idx: int):
         images, targets = batch
-        targets:List[RetinaFaceTensor] = [t.train() for t in targets]
+        targets:List[RetinaFaceTensor] = [t.as_tensor() for t in targets]
+
+        # if need
+        # t = targets[0] 
+        # if t.bbox.numel():
+        #     assert 0.0 <= t.bbox.min() and t.bbox.max() <= 1.01
+        # lm = t.landmark
+        # valid = (lm >= 0)
+        # if valid.any():
+        #     assert lm[valid].max() <= 1.01
+
         outputs:List[RetinaFaceTensor] = self.student(images)
-        
-        cls = self._cls_loss(outputs.label, targets.label)
-        bbox = self._bbox_loss(outputs.bbox, targets.bbox, targets.label)
-        landmark = self._landmark_loss(outputs.landmark, targets.landmark)
+        total, stats = self._compute_losses(outputs, targets)
+        return Metrics(loss=total, metrics=stats)
 
-        total = cls + self.box_weight * bbox + self.landmark_weight * landmark
-        stats = {
-            "loss": total,
-            "cls": cls,
-            "bbox": bbox,
-            "landmark": landmark,
-        }
-        self.log_dict(
-            {f"train/{k}": v for k, v in stats.items()},
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=images.size(0),
-        )
-        return total
+    def training_step(self, batch, batch_idx: int):return self._step_one(batch, batch_idx)
 
-    def validation_step(self, batch, batch_idx: int):
-        images, targets = batch
-        outputs = self(images)
-        labels, bbox_t, land_t = self._build_targets(targets["boxes"], targets["landmarks"])
-        total, stats = self._compute_losses(outputs, labels, bbox_t, land_t)
-        self.log_dict(
-            {f"val/{k}": v for k, v in stats.items()},
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=images.size(0),
-        )
-        return total
+    def validation_step(self, batch, batch_idx: int):return self._step_one(batch, batch_idx)
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
@@ -649,4 +651,26 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    student = BitRetinaFace(
+            backbone_size="18",
+            fpn_channels=256,
+            num_priors=(2, 2, 2),
+            scale_op="median",
+            in_ch=3,
+            small_stem=False,
+    )
+    ds = DataModuleConfig(dataset_name='retinaface',data_dir='./data',batch_size=4,mixup=False,cutmix=False).build()
+    ds.setup()
+    loader = ds.train_dataloader()
+    batch = next(iter(loader))
+    images, targets = batch
+    
+    # targets:List[RetinaFaceTensor] = [t.as_tensor() for t in targets]
+    # outputs:List[RetinaFaceTensor] = student(images)
+    
+    # cls = self._cls_loss(outputs.label, targets.label)
+    # bbox = self._bbox_loss(outputs.bbox, targets.bbox, targets.label)
+    # landmark = self._landmark_loss(outputs.landmark, targets.landmark)
+
+    # total = cls + self.box_weight * bbox + self.landmark_weight * landmark
+    # stats = {
