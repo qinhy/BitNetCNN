@@ -626,8 +626,9 @@ class AccelTrainer:
                 with accelerator.accumulate(model):
                     # ✅ This is the key for fp16/bf16/fp8:
                     with accelerator.autocast():
-                        m = model.training_step(batch, micro_step).model_copy(
-                            update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
+                        m = self.accelerator.unwrap_model(model
+                            ).training_step(batch, micro_step).model_copy(
+                                update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
                         )
 
                     if optimizer is not None:
@@ -676,7 +677,8 @@ class AccelTrainer:
             else:
                 with torch.no_grad():
                     with accelerator.autocast():
-                        m = model.validation_step(batch, micro_step).model_copy(
+                        m =self.accelerator.unwrap_model(model
+                            ).validation_step(batch, micro_step).model_copy(
                             update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
                         )
                 epoch_accum.update(m, batch_size=bs, stage=stage)

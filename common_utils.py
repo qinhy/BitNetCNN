@@ -10,20 +10,15 @@ from tkinter import filedialog, ttk, messagebox
 import warnings
 from PIL import Image, ImageTk
 
-import random
-from typing import Any, Callable, List, Literal, Optional, Sequence, Tuple, Type, Union
-from matplotlib import pyplot as plt
-from pydantic import BaseModel, Field, PrivateAttr
+from typing import Optional, Sequence, Tuple, List, Union
 import torch
 
 from bitlayers.bit import Bit
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import transforms
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
