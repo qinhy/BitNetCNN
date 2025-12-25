@@ -382,6 +382,7 @@ def bitnet_mobilenetv2(
     model = BitMobileNetV2(num_classes=_num_classes_for(ds), width_mult=width_mult, scale_op=scale_op)
 
     state_dict: Optional[Dict[str, torch.Tensor]] = None
+    _convert_to_ternary_if_needed(model, ternary, state_dict)
     if checkpoint_path or pretrained:
         size_tag = _format_mbnv2_width_tag(width_mult)
         filenames = [
