@@ -3,12 +3,7 @@ Common utilities for BitNetCNN implementations.
 This module contains shared components used across different BitNet model implementations.
 """
 
-import datetime
-from functools import partial
 import os
-import math
-import copy
-
 import re
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -26,22 +21,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torchvision.transforms import v2
-from torch.utils.data import default_collate
-from torchvision.transforms import InterpolationMode
-from torchmetrics.classification import MulticlassAccuracy
-from torchvision.datasets import VisionDataset
-from torchvision.datasets.folder import default_loader
-from torchvision.datasets.utils import extract_archive, check_integrity, download_url, verify_str_arg
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from accelerate import Accelerator
-from tqdm.auto import tqdm
 
 def snap_model(model):
     def snapshot_params(m):
