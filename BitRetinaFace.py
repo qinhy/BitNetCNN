@@ -54,7 +54,7 @@ class BitResNetBackbone(BitResNet):
 # RetinaFace-specific blocks
 # -----------------------------------------------------------------------------
 def _act(inplace=True):
-    return ActModels.SiLU(inplace=inplace)
+    return ActModels.SiLU(inplace=inplace).build()
 
 def _conv_block(
     in_ch: int, out_ch: int,
@@ -408,8 +408,18 @@ def match_anchors(
 # -----------------------------------------------------------------------------
 class LitRetinaFace(LitBit):
     def __init__(self, config: "RetinaFaceConfig") -> None:
-        super().__init__(config)
-        self.save_hyperparameters(config.model_dump())
+        cfg = config.model_dump() if isinstance(config, BaseModel) else dict(config)
+        if cfg.get("dataset") is None:
+            cfg["dataset"] = DataModuleConfig(
+                dataset_name="retinaface",
+                data_dir=cfg.get("data_dir", "./data"),
+                batch_size=cfg.get("batch_size", 16),
+                num_workers=cfg.get("num_workers", 0),
+                mixup=False,
+                cutmix=False,
+            )
+        super().__init__(cfg)
+        self.hparams = cfg
         self.model = BitRetinaFace(
             backbone_size=config.backbone_size,
             fpn_channels=config.fpn_channels,
@@ -480,7 +490,7 @@ class LitRetinaFace(LitBit):
         valid = labels >= 0
 
         if valid.sum() == 0:
-            return torch.tensor(0.0, device=self.device)
+            return torch.tensor(0.0, device=cls_logits.device)
 
         logits = cls_logits.view(-1, cls_logits.size(-1))
         return F.cross_entropy(logits[valid], labels[valid])
@@ -500,7 +510,7 @@ class LitRetinaFace(LitBit):
         pos_count = pos_mask.sum().clamp(min=1)
 
         if not pos_mask.any():
-            return torch.tensor(0.0, device=self.device)
+            return torch.tensor(0.0, device=bbox_preds.device)
 
         return (
             F.smooth_l1_loss(
@@ -525,7 +535,7 @@ class LitRetinaFace(LitBit):
         valid_landmarks = (target_landmarks >= 0).all(dim=2)
 
         if not valid_landmarks.any():
-            return torch.tensor(0.0, device=self.device)
+            return torch.tensor(0.0, device=land_preds.device)
 
         denom = valid_landmarks.sum().clamp(min=1)
         return (
@@ -651,26 +661,18 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    student = BitRetinaFace(
-            backbone_size="18",
-            fpn_channels=256,
-            num_priors=(2, 2, 2),
-            scale_op="median",
-            in_ch=3,
-            small_stem=False,
-    )
-    ds = DataModuleConfig(dataset_name='retinaface',data_dir='./data',batch_size=4,mixup=False,cutmix=False).build()
+    config = RetinaFaceConfig(batch_size=4)
+    model = LitRetinaFace(config)
+    ds = DataModuleConfig(
+        dataset_name="retinaface",
+        data_dir=config.data_dir,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        mixup=False,
+        cutmix=False,
+    ).build()
     ds.setup()
     loader = ds.train_dataloader()
     batch = next(iter(loader))
-    images, targets = batch
-    
-    # targets:List[RetinaFaceTensor] = [t.as_tensor() for t in targets]
-    # outputs:List[RetinaFaceTensor] = student(images)
-    
-    # cls = self._cls_loss(outputs.label, targets.label)
-    # bbox = self._bbox_loss(outputs.bbox, targets.bbox, targets.label)
-    # landmark = self._landmark_loss(outputs.landmark, targets.landmark)
-
-    # total = cls + self.box_weight * bbox + self.landmark_weight * landmark
-    # stats = {
+    metrics = model.training_step(batch, 0)
+    print(metrics.to_dict())
