@@ -9,7 +9,7 @@ from pydanticV2_argparse import ArgumentParser
 import torch
 
 from dataset import DataModuleConfig, RetinaFaceTensor
-from trainer import LitBit, Metrics
+from trainer import AccelTrainer, LitBit, Metrics
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -587,10 +587,10 @@ class LitRetinaFace(LitBit):
 
     def validation_step(self, batch, batch_idx: int):return self._step_one(batch, batch_idx)
 
-    def configure_optimizers(self):
+    def configure_optimizers(self, trainer: 'AccelTrainer'=None):
         opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
-        return opt, sched, 'epoch'
+        return opt, sched, "epoch"
 
 
 # -----------------------------------------------------------------------------
@@ -646,33 +646,39 @@ class RetinaFaceConfig(BaseModel):
 def main() -> None:
     parser = ArgumentParser(model=RetinaFaceConfig)
     config = parser.parse_typed_args()
-
-    # dm = RetinaFaceDataModule(
-    #     data_dir=config.data_dir,
-    #     train_annotations=config.train_annotations,
-    #     val_annotations=config.val_annotations,
-    #     image_size=config.image_size,
-    #     batch_size=config.batch_size,
-    #     num_workers=config.num_workers,
-    # )
-    # model = LitRetinaFace(config)
-    # trainer = setup_retinaface_trainer(config)
-    # trainer.fit(model, datamodule=dm)
-
-
-if __name__ == "__main__":
-    config = RetinaFaceConfig(batch_size=4)
-    model = LitRetinaFace(config)
-    ds = DataModuleConfig(
+    dm = DataModuleConfig(
         dataset_name="retinaface",
         data_dir=config.data_dir,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
-        mixup=False,
-        cutmix=False,
-    ).build()
-    ds.setup()
-    loader = ds.train_dataloader()
-    batch = next(iter(loader))
-    metrics = model.training_step(batch, 0)
-    print(metrics.to_dict())
+        mixup=False,        
+        cutmix=False,)
+    lit = LitRetinaFace(config)
+    dm = dm.build()    
+    trainer = AccelTrainer(
+        max_epochs=config.epochs,
+        mixed_precision="bf16" if config.amp else "no",
+        gradient_accumulation_steps=1,
+        log_every_n_steps=10,
+    )
+    trainer.fit(lit, datamodule=dm)
+
+
+if __name__ == "__main__":
+    main()
+
+    # config = RetinaFaceConfig(batch_size=4)
+    # model = LitRetinaFace(config)
+    # ds = DataModuleConfig(
+    #     dataset_name="retinaface",
+    #     data_dir=config.data_dir,
+    #     batch_size=config.batch_size,
+    #     num_workers=config.num_workers,
+    #     mixup=False,
+    #     cutmix=False,
+    # ).build()
+    # ds.setup()
+    # loader = ds.train_dataloader()
+    # batch = next(iter(loader))
+    # metrics = model.training_step(batch, 0)
+    # print(metrics.to_dict())
