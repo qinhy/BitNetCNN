@@ -791,6 +791,11 @@ class RetinaFaceTensor(BaseModel):
             self.img = np.asarray(img_pil)  # (H,W,3) uint8
             self.img_h, self.img_w = self.img.shape[:2]
             
+            if self.bbox is None:
+                raise ValueError(f"bbox is required for file={self.file}")
+            self.bbox, keep = self._sanitize_xyxy(self.bbox, self.img_h, self.img_w, min_size=1.0)
+            # if len(keep) != keep.sum():
+            #     raise ValueError("invalid bbox included, for file={self.file}")
             # --- landmark: raw pixels (5,2), missing = -1 (numpy float32) ---
             land = self.landmark
             if land is None or len(land) == 0:
@@ -798,7 +803,7 @@ class RetinaFaceTensor(BaseModel):
                 self.landmark = np.full((num_boxes * 5, 2), -1.0, dtype=np.float32)
                 self.landmark_vis = np.full((num_boxes * 5,), -1.0, dtype=np.float32)
             else:
-                landmark = np.asarray(land, dtype=np.float32).reshape(-1, 15)
+                landmark = np.asarray(land, dtype=np.float32).reshape(-1, 15)[keep]
                 if landmark.shape[0] != self.bbox.shape[0]:
                     raise ValueError(
                         f"Mismatch: {self.bbox.shape[0]} boxes but {landmark.shape[0]} landmark rows "
@@ -820,6 +825,27 @@ class RetinaFaceTensor(BaseModel):
             self.label = np.ones((self.bbox.shape[0],), dtype=np.int64)
         return super().model_post_init(context)
     
+    def _sanitize_xyxy(self,bboxes, h, w, min_size=1.0):
+        b = np.asarray(bboxes, dtype=np.float32).reshape(-1, 4)
+        x1, y1, x2, y2 = b.T
+
+        # Fix swapped coords
+        x1_, x2_ = np.minimum(x1, x2), np.maximum(x1, x2)
+        y1_, y2_ = np.minimum(y1, y2), np.maximum(y1, y2)
+
+        # Clip to image bounds (Albumentations allows x==w, y==h for pascal_voc)
+        x1_ = np.clip(x1_, 0.0, float(w))
+        x2_ = np.clip(x2_, 0.0, float(w))
+        y1_ = np.clip(y1_, 0.0, float(h))
+        y2_ = np.clip(y2_, 0.0, float(h))
+
+        bw = x2_ - x1_
+        bh = y2_ - y1_
+        keep = (bw >= min_size) & (bh >= min_size) & np.isfinite(bw) & np.isfinite(bh)
+
+        b2 = np.stack([x1_, y1_, x2_, y2_], axis=1)
+        return b2[keep], keep
+
     def landmark_xs_ys(self):
         pts = self.landmark
         valid = (pts[..., 0] >= 0) & (pts[..., 1] >= 0)
@@ -953,7 +979,9 @@ class RetinaFaceDataModule(DataSetModule):
             ],
             bbox_params=A.BboxParams(
                 format="pascal_voc",
-                min_visibility=0.0,
+                    min_area=1,          # drop boxes with area < 1 px^2
+                    min_visibility=0.0,  # or bump this to 0.1/0.2 to be stricter
+                    check_each_transform=True,
             ),
             keypoint_params=A.KeypointParams(
                 format="xy",
