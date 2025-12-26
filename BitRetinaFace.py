@@ -403,6 +403,10 @@ def match_anchors(
     return labels, bbox_targets, land_targets
 
 
+def make_resnet50_retinaface_teacher(device: str = "cpu"):
+    model = torch.hub.load("qinhy/Pytorch_Retinaface", "retinaface_resnet50", pretrained=True)
+    return model.eval().to(device)
+
 # -----------------------------------------------------------------------------
 # LightningModule
 # -----------------------------------------------------------------------------
@@ -429,6 +433,20 @@ class LitRetinaFace(LitBit):
             small_stem=config.small_stem,
         )
         self.student:BitRetinaFace = self.model  # for compatibility with ternary export helper
+        self.teacher = make_resnet50_retinaface_teacher()
+        self.hint_points = [
+            ("landmark_head","LandmarkHead"),
+            ("bbox_head","BboxHead"),
+            ("classification_head","ClassHead"),
+            ("ssh.0","ssh1"),
+            ("ssh.1","ssh2"),
+            ("ssh.2","ssh3"),
+            ("fpn","fpn"),
+            ("backbone.layer1","body.layer1"),
+            ("backbone.layer2","body.layer2"),
+            ("backbone.layer3","body.layer3"),
+            ("backbone.layer4","body.layer4"),
+        ]
         self.lr = config.lr
         self.wd = config.wd
         self.input_size = config.image_size
@@ -455,7 +473,7 @@ class LitRetinaFace(LitBit):
 
     def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         return self.model(images)
-
+    
     def build_targets_by_anchors(self, targets: List[RetinaFaceTensor]) -> List[RetinaFaceTensor]:
         device = self.anchors.device
         out: List[RetinaFaceTensor] = []
@@ -521,7 +539,6 @@ class LitRetinaFace(LitBit):
             / pos_count
         )
 
-
     def _landmark_loss(
         self,
         land_preds: torch.Tensor,
@@ -547,6 +564,12 @@ class LitRetinaFace(LitBit):
             / denom
         )
     
+    def _kd_loss(self, outputs, targets):
+        pass
+
+    def _hint_loss(self, outputs, targets):
+        pass
+
     def _compute_losses(self, outputs: List[RetinaFaceTensor], targets: List[RetinaFaceTensor]):
         anchor_targets = self.build_targets_by_anchors(targets)  # now it's a list
 
@@ -609,7 +632,7 @@ class RetinaFaceConfig(BaseModel):
     wd: float = 1e-4
 
     image_size: int = 640
-    backbone_size: str = Field(default="18", description="ResNet backbone depth (18 or 50)")
+    backbone_size: str = Field(default="50", description="ResNet backbone depth (18 or 50)")
     fpn_channels: int = 256
     num_priors: Tuple[int, int, int] = (2, 2, 2)
     scale_op: str = "median"
@@ -665,10 +688,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # main()
 
-    # config = RetinaFaceConfig(batch_size=4)
-    # model = LitRetinaFace(config)
+    config = RetinaFaceConfig(batch_size=4)
+    model = LitRetinaFace(config)
     # ds = DataModuleConfig(
     #     dataset_name="retinaface",
     #     data_dir=config.data_dir,

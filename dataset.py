@@ -773,6 +773,18 @@ class TinyImageNetDataset(VisionDataset):
 # -----------------------------------------------------------------------------
 # RetinaFace / DataModule
 # -----------------------------------------------------------------------------
+class RetinaFaceTensors(BaseModel):
+    imgs:Optional[Any] = Field(default=None,exclude=True)
+    labels:Optional[Any] = Field(default=None,exclude=True)
+    bboxes:Optional[Any] = Field(default=None,exclude=True) # xyxy
+    landmarks:Optional[Any] = Field(default=None,exclude=True) # [lx, ly, rx, ry, nx, ny, mlx, mly, mrx, mry] as shape (5,2)    
+
+    def tolist(self):
+        return[
+            RetinaFaceTensor(img=img, label=label, bbox=bbox, landmark=landmark,
+                ) for img, label, bbox, landmark in zip(self.imgs, self.labels, self.bboxs, self.landmarks)
+        ]
+
 class RetinaFaceTensor(BaseModel):
     file: str = ""
     img_h: int = Field(default=0)
