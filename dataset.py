@@ -774,7 +774,7 @@ class TinyImageNetDataset(VisionDataset):
 # RetinaFace / DataModule
 # -----------------------------------------------------------------------------
 class RetinaFaceTensor(BaseModel):
-    file:str
+    file: str = ""
     img_h: int = Field(default=0)
     img_w: int = Field(default=0)
     img:Optional[Any] = Field(default=None,exclude=True)
@@ -784,15 +784,19 @@ class RetinaFaceTensor(BaseModel):
     landmark_vis:Optional[Any] = Field(default=None,exclude=True) # [lv, rv, nv, mlv, mrv] as shape (5)
 
     def model_post_init(self, context):
-        img_pil = ImageOps.exif_transpose(Image.open(self.file)).convert("RGB")
         if self.img is None:
+            if not self.file:
+                raise ValueError("RetinaFaceTensor requires file when img is None.")
+            img_pil = ImageOps.exif_transpose(Image.open(self.file)).convert("RGB")
             self.img = np.asarray(img_pil)  # (H,W,3) uint8
             self.img_h, self.img_w = self.img.shape[:2]
             
             # --- landmark: raw pixels (5,2), missing = -1 (numpy float32) ---
             land = self.landmark
-            if not land:
-                landmark = np.full((self.bbox.shape[0], 15), -1.0, dtype=np.float32)
+            if land is None or len(land) == 0:
+                num_boxes = int(self.bbox.shape[0]) if self.bbox is not None else 0
+                self.landmark = np.full((num_boxes * 5, 2), -1.0, dtype=np.float32)
+                self.landmark_vis = np.full((num_boxes * 5,), -1.0, dtype=np.float32)
             else:
                 landmark = np.asarray(land, dtype=np.float32).reshape(-1, 15)
                 if landmark.shape[0] != self.bbox.shape[0]:
@@ -836,39 +840,61 @@ class RetinaFaceTensor(BaseModel):
         bbox,landmark = None,None
         # bbox: xyxy
         if self.bbox is not None:
-            b_norm = self.bbox.astype(np.float32).copy() #xyxy in pixel
+            b_norm = np.asarray(self.bbox, dtype=np.float32)
+            if b_norm.size == 0:
+                b_norm = b_norm.reshape(0, 4)
+            else:
+                b_norm = b_norm.reshape(-1, 4)
             whwh = np.asarray([self.img_w, self.img_h, self.img_w, self.img_h], dtype=np.float32)
             b_norm /= whwh
             if clip:
                 b_norm = np.clip(b_norm, 0.0, 1.0)
             bbox = b_norm
+        else:
+            bbox = np.zeros((0, 4), dtype=np.float32)
 
         # landmarks: (N,5,2)
         if self.landmark is not None:
-            p_norm = self.landmark.astype(np.float32).copy() # (N,5,2)
+            p_norm = np.asarray(self.landmark, dtype=np.float32)
+            if p_norm.size == 0:
+                p_norm = p_norm.reshape(0, 2)
+            elif p_norm.ndim == 1:
+                p_norm = p_norm.reshape(-1, 2)
+            neg_mask = p_norm < 0
             p_norm[..., 0] /= float(self.img_w)
             p_norm[..., 1] /= float(self.img_h)
             if clip:
                 p_norm = np.clip(p_norm, 0.0, 1.0)
+                p_norm[neg_mask] = -1.0
             landmark = p_norm
+        else:
+            landmark = np.zeros((0, 2), dtype=np.float32)
         return bbox,landmark
     
     def clone(self, update={}, deep=False):
         if not deep:
-            return RetinaFaceTensor(file=self.file,
-                                    img=self.img,
-                                    img_h=self.img_h,
-                                    img_w=self.img_w,
-                                  **update)
+            return self.model_copy(update=update)
         else:
             return copy.deepcopy(self)
 
     def as_tensor(self):
-        if self.bbox.is_tensor:
+        if (
+            torch.is_tensor(self.bbox)
+            and torch.is_tensor(self.landmark)
+            and torch.is_tensor(self.landmark_vis)
+        ):
             return self
         bbox,landmark = self.norm_to_0_1()
+        landmark_vis = self.landmark_vis
+        if landmark_vis is None:
+            if landmark is None:
+                landmark_vis = np.zeros((0,), dtype=np.float32)
+            else:
+                lmk = np.asarray(landmark)
+                count = lmk.reshape(-1, 2).shape[0] if lmk.size else 0
+                landmark_vis = np.full((count,), -1.0, dtype=np.float32)
         res = self.clone(update=dict(bbox=bbox,landmark=landmark,
-                                     landmark_vis=self.landmark_vis))
+                                     landmark_vis=landmark_vis))
         res.bbox = torch.as_tensor(res.bbox)
         res.landmark = torch.as_tensor(res.landmark)
         res.landmark_vis = torch.as_tensor(res.landmark_vis)
