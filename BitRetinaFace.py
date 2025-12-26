@@ -1,7 +1,4 @@
-import json
 import math
-import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field, field_validator
@@ -9,17 +6,13 @@ from pydanticV2_argparse import ArgumentParser
 import torch
 
 from dataset import DataModuleConfig, RetinaFaceTensor
-from trainer import AccelTrainer, LitBit, Metrics
+from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
 from torchvision.ops import box_iou
-from PIL import Image
 
-from bitlayers.convs import ActModels, Conv2dModels, NormModels, Bit
-from common_utils import convert_to_ternary
+from bitlayers.convs import ActModels, Conv2dModels, NormModels
 from BitResNet import BitResNet
 
 # -----------------------------------------------------------------------------
@@ -237,18 +230,16 @@ class BitRetinaFace(nn.Module):
     def forward(self, x: torch.Tensor) -> List[RetinaFaceTensor]:
         feats = self.fpn(self.backbone(x))
         feats = [m(f) for m, f in zip(self.ssh, feats)]
-        imgs = x
+        # imgs = x
         labels = self.classification_head(feats)
-        bboxs = self.bbox_head(feats)
+        bboxes = self.bbox_head(feats)
         landmarks = self.landmark_head(feats)
-        return [
-            RetinaFaceTensor(img=img, label=label, bbox=bbox, landmark=landmark,
-                ) for img, label, bbox, landmark in zip(imgs, labels, bboxs, landmarks)
-        ]
-    
-        # return (self.classification_head(feats),
-        #         self.bbox_head(feats),
-        #         self.landmark_head(feats))
+        # return RetinaFaceTensors(imgs=imgs, labels=labels, bboxes=bboxes, landmarks=landmarks)
+        # return [
+        #     RetinaFaceTensor(img=img, label=label, bbox=bbox, landmark=landmark,
+        #         ) for img, label, bbox, landmark in zip(imgs, labels, bboxes, landmarks)
+        # ]    
+        return (bboxes,labels,landmarks)
         # return {
         #     "cls": self.classification_head(feats),
         #     "bbox": self.bbox_head(feats),
@@ -412,52 +403,14 @@ def make_resnet50_retinaface_teacher(device: str = "cpu"):
 # -----------------------------------------------------------------------------
 class LitRetinaFace(LitBit):
     def __init__(self, config: "RetinaFaceConfig") -> None:
-        cfg = config.model_dump() if isinstance(config, BaseModel) else dict(config)
-        if cfg.get("dataset") is None:
-            cfg["dataset"] = DataModuleConfig(
-                dataset_name="retinaface",
-                data_dir=cfg.get("data_dir", "./data"),
-                batch_size=cfg.get("batch_size", 16),
-                num_workers=cfg.get("num_workers", 0),
-                mixup=False,
-                cutmix=False,
-            )
-        super().__init__(cfg)
-        self.hparams = cfg
-        self.model = BitRetinaFace(
-            backbone_size=config.backbone_size,
-            fpn_channels=config.fpn_channels,
-            num_priors=config.num_priors,
-            scale_op=config.scale_op,
-            in_ch=3,
-            small_stem=config.small_stem,
-        )
-        self.student:BitRetinaFace = self.model  # for compatibility with ternary export helper
-        self.teacher = make_resnet50_retinaface_teacher()
-        self.hint_points = [
-            ("landmark_head","LandmarkHead"),
-            ("bbox_head","BboxHead"),
-            ("classification_head","ClassHead"),
-            ("ssh.0","ssh1"),
-            ("ssh.1","ssh2"),
-            ("ssh.2","ssh3"),
-            ("fpn","fpn"),
-            ("backbone.layer1","body.layer1"),
-            ("backbone.layer2","body.layer2"),
-            ("backbone.layer3","body.layer3"),
-            ("backbone.layer4","body.layer4"),
-        ]
-        self.lr = config.lr
-        self.wd = config.wd
+        super().__init__(config)
+        self.hparams = config.model_dump()
         self.input_size = config.image_size
         self.variances = (config.variance_xy, config.variance_wh)
         self.pos_iou = config.pos_iou
         self.neg_iou = config.neg_iou
         self.box_weight = config.box_weight
         self.landmark_weight = config.landmark_weight
-        self.dataset_name = "widerface"
-        self.model_name = "retinaface"
-        self.model_size = str(config.backbone_size)
 
         self.anchor_generator = RetinaFaceAnchors(
             min_sizes=config.anchor_sizes,
@@ -469,10 +422,6 @@ class LitRetinaFace(LitBit):
             device=torch.device("cpu"),
         )
         self.register_buffer("anchors", anchor_template, persistent=False)
-        self.epochs = config.epochs
-
-    def forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
-        return self.model(images)
     
     def build_targets_by_anchors(self, targets: List[RetinaFaceTensor]) -> List[RetinaFaceTensor]:
         device = self.anchors.device
@@ -564,29 +513,39 @@ class LitRetinaFace(LitBit):
             / denom
         )
     
-    def _kd_loss(self, outputs, targets):
-        pass
-
-    def _hint_loss(self, outputs, targets):
-        pass
-
-    def _compute_losses(self, outputs: List[RetinaFaceTensor], targets: List[RetinaFaceTensor]):
+    def _compute_losses(self, x, outputs, targets: List[RetinaFaceTensor]):
         anchor_targets = self.build_targets_by_anchors(targets)  # now it's a list
-
-        out_label  = torch.stack([o.label for o in outputs], dim=0)      # [B, N, 2]
-        out_bbox   = torch.stack([o.bbox for o in outputs], dim=0)       # [B, N, 4]
-        out_land   = torch.stack([o.landmark for o in outputs], dim=0)   # [B, N, 10]
+        out_bbox,out_labe,out_land = outputs
+        # out_labe [B, N, 2]
+        # out_bbox [B, N, 4]
+        # out_land [B, N, 10]
 
         tgt_label  = torch.stack([t.label for t in anchor_targets], dim=0)     # [B, N]
         tgt_bbox   = torch.stack([t.bbox for t in anchor_targets], dim=0)      # [B, N, 4]
         tgt_land   = torch.stack([t.landmark for t in anchor_targets], dim=0)  # [B, N, 10]
 
-        cls_loss = self._cls_loss(out_label, tgt_label)
-        bbox_loss = self._bbox_loss(out_bbox, tgt_bbox, tgt_label)
-        landmark_loss = self._landmark_loss(out_land, tgt_land)
+        cls_loss = self._cls_loss(out_labe, tgt_label)
+        bbox_loss = self.box_weight * self._bbox_loss(out_bbox, tgt_bbox, tgt_label)
+        landmark_loss = self.landmark_weight * self._landmark_loss(out_land, tgt_land)
 
-        total = cls_loss + self.box_weight * bbox_loss + self.landmark_weight * landmark_loss
-        stats = {"loss": total, "ce": cls_loss, "bb": bbox_loss, "lm": landmark_loss}
+        total = cls_loss + bbox_loss + landmark_loss
+        total = (1.0 - self.alpha_kd)*total
+        stats = { "ce": cls_loss, "bb": bbox_loss, "lm": landmark_loss}
+
+        if self.kd or self.hint:
+            bbox_regressions, classifications, ldm_regressions = self.teacher_forward(x)
+        if self.kd:
+            loss_kd = self.alpha_kd * (
+                        self.kd(out_labe.float(), classifications.float()
+                    ) + self.kd(out_bbox.float(), bbox_regressions.float()
+                    ) + self.kd(out_land.float(), ldm_regressions.float()))
+            
+            stats["kd"] = loss_kd
+            total += loss_kd
+        if self.hint:
+            loss_hint = self.alpha_hint * self.get_loss_hint()
+            stats["hint"] = loss_hint
+            total += loss_hint            
         return total, stats
     
     def _step_one(self, batch, batch_idx: int):
@@ -602,8 +561,8 @@ class LitRetinaFace(LitBit):
         # if valid.any():
         #     assert lm[valid].max() <= 1.01
 
-        outputs:List[RetinaFaceTensor] = self.student(images)
-        total, stats = self._compute_losses(outputs, targets)
+        bboxes,labels,landmarks = self.student(images)
+        total, stats = self._compute_losses(images, (bboxes,labels,landmarks), targets)
         return Metrics(loss=total, metrics=stats)
 
     def training_step(self, batch, batch_idx: int):return self._step_one(batch, batch_idx)
@@ -619,16 +578,25 @@ class LitRetinaFace(LitBit):
 # -----------------------------------------------------------------------------
 # CLI
 # -----------------------------------------------------------------------------
-class RetinaFaceConfig(BaseModel):
+class RetinaFaceConfig(CommonTrainConfig,LitBitConfig):
+    dataset_name:str = "retinaface"
     data_dir: str = "./data"
     train_annotations: str = "widerface_train.json"
     val_annotations: str = "widerface_val.json"
     export_dir: str = "./ckpt_widerface_retinaface"
+    dataset: Optional[Dict] = None
 
     epochs: int = 50
-    batch_size: int = 16
+    batch_size: int = 4
     num_workers: int = 4
+    mixup:bool=False
+    cutmix:bool=False
+    
     lr: float = 1e-3
+    alpha_kd: float = 0.9
+    alpha_hint: float = 0.1
+    box_weight: float = 1.0
+    landmark_weight: float = 0.001
     wd: float = 1e-4
 
     image_size: int = 640
@@ -642,8 +610,6 @@ class RetinaFaceConfig(BaseModel):
     neg_iou: float = 0.2
     variance_xy: float = 0.1
     variance_wh: float = 0.2
-    box_weight: float = 1.0
-    landmark_weight: float = 0.5
 
     anchor_sizes: Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]] = (
         (16, 32),
@@ -669,29 +635,65 @@ class RetinaFaceConfig(BaseModel):
 def main() -> None:
     parser = ArgumentParser(model=RetinaFaceConfig)
     config = parser.parse_typed_args()
-    dm = DataModuleConfig(
-        dataset_name="retinaface",
-        data_dir=config.data_dir,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        mixup=False,        
-        cutmix=False,)
+    dm = DataModuleConfig.model_validate(config.model_dump())
+    config = RetinaFaceConfig.model_validate(config.model_dump())
+    config.dataset = dm.model_dump()
+    
+    config.student = BitRetinaFace(
+        backbone_size=config.backbone_size,
+        fpn_channels=config.fpn_channels,
+        num_priors=config.num_priors,
+        scale_op=config.scale_op,
+        in_ch=3,
+        small_stem=config.small_stem,
+    )
+    config.teacher = make_resnet50_retinaface_teacher()
+    config.hint_points = [            
+        # ("landmark_head.heads.0","LandmarkHead.0"),
+        # ("landmark_head.heads.1","LandmarkHead.1"),
+        # ("landmark_head.heads.2","LandmarkHead.2"),
+        # ("bbox_head.heads.0","BboxHead.0"),
+        # ("bbox_head.heads.1","BboxHead.1"),
+        # ("bbox_head.heads.2","BboxHead.2"),            
+        # ("classification_head.heads.0","ClassHead.0"),
+        # ("classification_head.heads.1","ClassHead.1"),
+        # ("classification_head.heads.2","ClassHead.2"),
+        ("ssh.0","ssh1"),
+        ("ssh.1","ssh2"),
+        ("ssh.2","ssh3"),
+        # ("fpn","fpn"),
+        ("backbone.layer1","body.layer1"),
+        ("backbone.layer2","body.layer2"),
+        ("backbone.layer3","body.layer3"),
+        ("backbone.layer4","body.layer4"),
+    ]
     lit = LitRetinaFace(config)
-    dm = dm.build()    
     trainer = AccelTrainer(
         max_epochs=config.epochs,
         mixed_precision="bf16" if config.amp else "no",
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
     )
-    trainer.fit(lit, datamodule=dm)
+    trainer.fit(lit, datamodule=dm.build())
 
 
 if __name__ == "__main__":
-    # main()
+    main()
 
-    config = RetinaFaceConfig(batch_size=4)
-    model = LitRetinaFace(config)
+    # config = RetinaFaceConfig(batch_size=4)
+    # dm = DataModuleConfig.model_validate(config.model_dump())
+    # config = RetinaFaceConfig.model_validate(config.model_dump())
+    # config.dataset = dm.model_copy()
+    
+    # config.student = BitRetinaFace(
+    #     backbone_size=config.backbone_size,
+    #     fpn_channels=config.fpn_channels,
+    #     num_priors=config.num_priors,
+    #     scale_op=config.scale_op,
+    #     in_ch=3,
+    #     small_stem=config.small_stem,
+    # )
+    # config.teacher = make_resnet50_retinaface_teacher()
     # ds = DataModuleConfig(
     #     dataset_name="retinaface",
     #     data_dir=config.data_dir,
