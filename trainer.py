@@ -770,6 +770,8 @@ class LitBit(AccelLightningModule):
         super().__init__()
         if type(config) is not dict:
             config = config.model_dump()
+        if type(config['dataset']) is dict:
+            config['dataset'] = DataModuleConfig.model_validate(config['dataset'])
         self.config = config = LitBitConfig.model_validate(config)
 
         # --- core ---
