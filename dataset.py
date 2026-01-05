@@ -150,14 +150,14 @@ class DataSetModule:
             p=self.p
         ).build()
 
-    def train_collate_fn(self, batch):
+    def collate_fn(self, batch):
         x, y = default_collate(batch)
         if self._collate_transform is not None:
             x, y = self._collate_transform(x, y)
         return x, y
 
     def train_dataloader(self) -> DataLoader:
-        collate_fn = self.train_collate_fn if self._collate_transform is not None else None
+        collate_fn = self.collate_fn if self._collate_transform is not None else None
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
@@ -170,6 +170,7 @@ class DataSetModule:
         )
 
     def val_dataloader(self) -> DataLoader:
+        collate_fn = self.collate_fn if self._collate_transform is not None else None
         return DataLoader(
             self.val_ds,
             batch_size=self.batch_size,
@@ -177,7 +178,7 @@ class DataSetModule:
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=(self.num_workers > 0),
-            collate_fn=None,
+            collate_fn=collate_fn,
         )
 
     @torch.no_grad()
@@ -991,9 +992,9 @@ class RetinaFaceDataModule(DataSetModule):
             ],
             bbox_params=A.BboxParams(
                 format="pascal_voc",
-                    min_area=1,          # drop boxes with area < 1 px^2
-                    min_visibility=0.0,  # or bump this to 0.1/0.2 to be stricter
-                    check_each_transform=True,
+                min_area=1,          # drop boxes with area < 1 px^2
+                min_visibility=0.0,  # or bump this to 0.1/0.2 to be stricter
+                check_each_transform=True,
             ),
             keypoint_params=A.KeypointParams(
                 format="xy",
@@ -1018,7 +1019,26 @@ class RetinaFaceDataModule(DataSetModule):
         #     ToTensor(mean=self.mean, std=self.std).build(),
         #     v2.Normalize(mean=self.mean, std=self.std),
         # ])
-        self.val_tf = SimpleImageValAugment(mean=self.mean,std=self.std).build()
+        
+        self.val_tf = A.Compose(
+            [
+                # Resize so the LONG side becomes img_size (keeps aspect ratio)
+                A.LongestMaxSize(max_size=640, interpolation=cv2.INTER_LINEAR),
+
+                # Pad to exactly img_size x img_size (stackable)
+                A.PadIfNeeded(
+                    min_height=640,
+                    min_width=640,
+                    position="top_left",          # pads on right/bottom only
+                    border_mode=cv2.BORDER_CONSTANT,
+                    fill=(0, 0, 0),
+                ),
+                A.Normalize(mean=self.mean, std=self.std),
+                A.ToTensorV2(),
+            ],
+            bbox_params=A.BboxParams(format="pascal_voc"),
+            keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
+        )
         self.dataset_cls = RetinaFaceDataset
 
     def _build_collate_transform(self):
@@ -1028,7 +1048,7 @@ class RetinaFaceDataModule(DataSetModule):
             return x, list(y)
         self._collate_transform = collate_fn
 
-    def train_collate_fn(self, batch):
+    def collate_fn(self, batch):
         if self._collate_transform is not None:
             x, y = self._collate_transform(batch)
         return x, y

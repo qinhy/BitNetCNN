@@ -452,6 +452,7 @@ class AccelTrainer:
         datamodule: Optional["DataSetModule"] = None,
         train_dataloader: Optional[DataLoader] = None,
         val_dataloader: Optional[DataLoader] = None,
+        val_first: bool = False,
     ):
         # optional logger dir convention
         if self.logger is not None and hasattr(model, "config") and hasattr(model.config, "export_dir"):
@@ -477,8 +478,13 @@ class AccelTrainer:
         self.accelerator.unwrap_model(model).on_fit_start(self)
 
         for epoch in range(self.max_epochs):
+            # Run validation first if requested, otherwise train first
+            if val_first and val_dataloader is not None:
+                self._run_epoch(stage="val", epoch=epoch, loader=val_dataloader)
+            
             self._run_epoch(stage="train", epoch=epoch, loader=train_dataloader)
-            if val_dataloader is not None:
+            
+            if not val_first and val_dataloader is not None:
                 self._run_epoch(stage="val", epoch=epoch, loader=val_dataloader)
 
             if self.scheduler is not None and self.scheduler_interval == "epoch":
