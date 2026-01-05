@@ -357,7 +357,7 @@ def match_anchors(
 
     # decode_anchors    
     cx, cy, w, h = anchors.unbind(dim=1)
-    anchor_boxes = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=1)
+    anchor_boxes = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=1) #xyxy
     
     ious = box_iou(anchor_boxes, gt_boxes)
     best_anchor_iou, best_gt_idx = ious.max(dim=1)
@@ -713,7 +713,7 @@ class LitRetinaFace(LitBit):
     def training_step(self, batch, batch_idx: int):return self._step_one(batch, batch_idx)
 
 
-    def on_validation_epoch_start(self):
+    def on_validation_epoch_start(self, epoch):
         self._ap_preds = []
         self._ap_gts = []
 
@@ -741,10 +741,11 @@ class LitRetinaFace(LitBit):
         total, stats = self._compute_losses(images, (bboxes, labels, landmarks), targets)
         return Metrics(loss=total, metrics=stats)
 
-    def on_validation_epoch_end(self):
+    def on_validation_epoch_end(self, epoch):
         ap50 = ap_at_iou(self._ap_preds, self._ap_gts, iou_thr=0.5)
         # log however your framework logs
-        # self.log("val/AP50", ap50, prog_bar=True)
+        # self._trainer._log("val/AP50", ap50, prog_bar=True)
+        print("val/AP50", ap50)
 
     def configure_optimizers(self, trainer: 'AccelTrainer'=None):
         opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
