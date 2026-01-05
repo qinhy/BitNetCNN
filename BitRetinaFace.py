@@ -5,12 +5,13 @@ from pydantic import BaseModel, Field, field_validator
 from pydanticV2_argparse import ArgumentParser
 import torch
 
+from common_utils import summ
 from dataset import DataModuleConfig, RetinaFaceTensor
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.ops import box_iou
+from torchvision.ops import nms, box_iou
 
 from bitlayers.convs import ActModels, Conv2dModels, NormModels
 from BitResNet import BitResNet
@@ -227,13 +228,13 @@ class BitRetinaFace(nn.Module):
         self.bbox_head = head(4)
         self.landmark_head = head(10)
 
-    def forward(self, x: torch.Tensor) -> List[RetinaFaceTensor]:
+    def forward(self, x: torch.Tensor):
         feats = self.fpn(self.backbone(x))
         feats = [m(f) for m, f in zip(self.ssh, feats)]
         # imgs = x
-        labels = self.classification_head(feats)
-        bboxes = self.bbox_head(feats)
-        landmarks = self.landmark_head(feats)
+        labels:torch.Tensor = self.classification_head(feats)
+        bboxes:torch.Tensor = self.bbox_head(feats)
+        landmarks:torch.Tensor = self.landmark_head(feats)
         # return RetinaFaceTensors(imgs=imgs, labels=labels, bboxes=bboxes, landmarks=landmarks)
         # return [
         #     RetinaFaceTensor(img=img, label=label, bbox=bbox, landmark=landmark,
@@ -297,12 +298,6 @@ class RetinaFaceAnchors:
             anchors_tensor.clamp_(0.0, 1.0)
         return anchors_tensor
 
-
-def decode_anchors(anchors: torch.Tensor) -> torch.Tensor:
-    cx, cy, w, h = anchors.unbind(dim=1)
-    return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=1)
-
-
 def encode_boxes(
     anchors: torch.Tensor,
     gt_boxes: torch.Tensor,
@@ -326,7 +321,6 @@ def encode_boxes(
     encoded[:, 3] = torch.log((gh + eps) / (h + eps)) / variances[1]
     return encoded
 
-
 def encode_landmarks(
     anchors: torch.Tensor,
     gt_landmarks: torch.Tensor,
@@ -343,7 +337,6 @@ def encode_landmarks(
     encoded[:, :, 0] = (gt_landmarks[:, :, 0] - cx) / (w + eps) / variances[0]
     encoded[:, :, 1] = (gt_landmarks[:, :, 1] - cy) / (h + eps) / variances[0]
     return encoded.view(gt_landmarks.size(0), -1)
-
 
 def match_anchors(
     anchors: torch.Tensor,
@@ -362,7 +355,10 @@ def match_anchors(
         labels.fill_(0)
         return labels, bbox_targets, land_targets
 
-    anchor_boxes = decode_anchors(anchors)
+    # decode_anchors    
+    cx, cy, w, h = anchors.unbind(dim=1)
+    anchor_boxes = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=1)
+    
     ious = box_iou(anchor_boxes, gt_boxes)
     best_anchor_iou, best_gt_idx = ious.max(dim=1)
     best_gt_iou, best_anchor_for_gt = ious.max(dim=0)
@@ -393,10 +389,136 @@ def match_anchors(
 
     return labels, bbox_targets, land_targets
 
-
 def make_resnet50_retinaface_teacher(device: str = "cpu"):
     model = torch.hub.load("qinhy/Pytorch_Retinaface", "retinaface_resnet50", pretrained=True)
     return model.eval().to(device)
+
+def decode_boxes_from_deltas(
+    anchors_cxcywh: torch.Tensor,  # [N,4] (cx,cy,w,h) normalized
+    deltas: torch.Tensor,          # [N,4] (dx,dy,dw,dh)
+    variances=(0.1, 0.2),
+) -> torch.Tensor:
+    v0, v1 = variances
+    cx, cy, w, h = anchors_cxcywh.unbind(dim=1)
+    dx, dy, dw, dh = deltas.unbind(dim=1)
+
+    gx = cx + dx * v0 * w
+    gy = cy + dy * v0 * h
+    gw = w * torch.exp(dw * v1)
+    gh = h * torch.exp(dh * v1)
+
+    x1 = gx - gw / 2
+    y1 = gy - gh / 2
+    x2 = gx + gw / 2
+    y2 = gy + gh / 2
+    boxes = torch.stack([x1, y1, x2, y2], dim=1)
+    return boxes
+
+def detect_one_image(
+    anchors: torch.Tensor,       # [N,4] cxcywh
+    bbox_deltas: torch.Tensor,   # [N,4]
+    cls_logits: torch.Tensor,    # [N,2]
+    variances=(0.1, 0.2),
+    score_thr=0.02,
+    nms_iou=0.4,
+    topk=5000,
+):
+    # face prob = softmax(...)[...,1]
+    scores = cls_logits.softmax(dim=-1)[:, 1]
+
+    boxes = decode_boxes_from_deltas(anchors, bbox_deltas, variances=variances)
+    boxes = boxes.clamp(0.0, 1.0)
+
+    keep = scores > score_thr
+    boxes, scores = boxes[keep], scores[keep]
+    if boxes.numel() == 0:
+        return boxes, scores
+
+    # optional topk before NMS (speed)
+    if scores.numel() > topk:
+        idx = scores.topk(topk).indices
+        boxes, scores = boxes[idx], scores[idx]
+
+    keep = nms(boxes, scores, nms_iou)
+    return boxes[keep], scores[keep]
+
+def compute_ap_voc_integral(prec: torch.Tensor, rec: torch.Tensor) -> float:
+    # precision envelope + integration
+    mpre = torch.cat([torch.tensor([0.0], device=prec.device), prec, torch.tensor([0.0], device=prec.device)])
+    mrec = torch.cat([torch.tensor([0.0], device=rec.device),  rec,  torch.tensor([1.0], device=rec.device)])
+
+    for i in range(mpre.numel() - 1, 0, -1):
+        mpre[i - 1] = torch.maximum(mpre[i - 1], mpre[i])
+
+    idx = (mrec[1:] != mrec[:-1]).nonzero(as_tuple=False).squeeze(1)
+    ap = torch.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]).item()
+    return ap
+
+def ap_at_iou(
+    preds,  # list of dicts: {"boxes": [Mi,4], "scores":[Mi]}
+    gts,    # list of GT boxes: [Ki,4]
+    iou_thr=0.5,
+) -> float:
+    device = preds[0]["boxes"].device if len(preds) else torch.device("cpu")
+
+    # total GT faces
+    total_gt = sum(int(gt.size(0)) for gt in gts)
+    if total_gt == 0:
+        return 0.0
+
+    # flatten detections into (score, img_idx, box)
+    det_scores = []
+    det_img = []
+    det_boxes = []
+    for i, p in enumerate(preds):
+        if p["boxes"].numel() == 0:
+            continue
+        det_scores.append(p["scores"])
+        det_img.append(torch.full((p["scores"].numel(),), i, device=device, dtype=torch.long))
+        det_boxes.append(p["boxes"])
+
+    if len(det_scores) == 0:
+        return 0.0
+
+    det_scores = torch.cat(det_scores, dim=0)
+    det_img    = torch.cat(det_img, dim=0)
+    det_boxes  = torch.cat(det_boxes, dim=0)
+
+    # sort descending by confidence
+    order = det_scores.argsort(descending=True)
+    det_scores = det_scores[order]
+    det_img    = det_img[order]
+    det_boxes  = det_boxes[order]
+
+    # per-image matched GT bookkeeping
+    matched = [torch.zeros((gt.size(0),), dtype=torch.bool, device=device) for gt in gts]
+
+    tp = torch.zeros((det_scores.numel(),), device=device)
+    fp = torch.zeros((det_scores.numel(),), device=device)
+
+    for d in range(det_scores.numel()):
+        i = int(det_img[d].item())
+        gt_boxes = gts[i]
+        if gt_boxes.numel() == 0:
+            fp[d] = 1.0
+            continue
+
+        ious = box_iou(det_boxes[d].unsqueeze(0), gt_boxes).squeeze(0)  # [Ki]
+        best_iou, best_j = ious.max(dim=0)
+
+        if best_iou >= iou_thr and not matched[i][best_j]:
+            tp[d] = 1.0
+            matched[i][best_j] = True
+        else:
+            fp[d] = 1.0
+
+    tp_cum = torch.cumsum(tp, dim=0)
+    fp_cum = torch.cumsum(fp, dim=0)
+
+    rec = tp_cum / max(total_gt, 1)
+    prec = tp_cum / torch.clamp(tp_cum + fp_cum, min=1e-12)
+
+    return compute_ap_voc_integral(prec, rec)
 
 # -----------------------------------------------------------------------------
 # LightningModule
@@ -422,6 +544,16 @@ class LitRetinaFace(LitBit):
             device=torch.device("cpu"),
         )
         self.register_buffer("anchors", anchor_template, persistent=False)
+
+        # after model + anchors exist, sanity check once
+        with torch.no_grad():
+            x = torch.randn(1, 3, self.input_size, self.input_size, device="cpu")
+            out_bbox, out_cls, out_land = self.student(x)
+            assert out_bbox.shape[1] == self.anchors.shape[0], (out_bbox.shape, self.anchors.shape)
+
+            tb, tc, tl = self.teacher_forward(x)  # whatever this returns
+            assert tb.shape[1] == self.anchors.shape[0], (tb.shape, self.anchors.shape)
+
     
     def build_targets_by_anchors(self, targets: List[RetinaFaceTensor]) -> List[RetinaFaceTensor]:
         device = self.anchors.device
@@ -447,20 +579,34 @@ class LitRetinaFace(LitBit):
     def _cls_loss(
         self,
         cls_logits: torch.Tensor,
-        target_labels: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Classification loss over anchors.
-        Ignores labels < 0.
-        """
+        target_labels: torch.Tensor, neg_pos_ratio=3) -> torch.Tensor:
         labels = target_labels.view(-1)
-        valid = labels >= 0
-
-        if valid.sum() == 0:
-            return torch.tensor(0.0, device=cls_logits.device)
-
         logits = cls_logits.view(-1, cls_logits.size(-1))
-        return F.cross_entropy(logits[valid], labels[valid])
+
+        pos = labels == 1
+        neg = labels == 0
+
+        if pos.sum() == 0:
+            # fallback: just background CE
+            return F.cross_entropy(logits[neg], labels[neg])
+
+        # per-anchor CE (no reduction)
+        ce = F.cross_entropy(logits, labels.clamp(min=0), reduction="none")  # clamp for ignore
+        ce[pos == 0] = ce[pos == 0]  # keep
+        ce[labels < 0] = 0           # ignore
+
+        num_pos = pos.sum()
+        num_neg = torch.clamp(neg_pos_ratio * num_pos, max=neg.sum())
+
+        # pick hardest negatives
+        neg_ce = ce.clone()
+        neg_ce[~neg] = -1
+        _, idx = neg_ce.sort(descending=True)
+        hard_neg = torch.zeros_like(neg, dtype=torch.bool)
+        hard_neg[idx[:num_neg]] = True
+
+        keep = pos | hard_neg
+        return F.cross_entropy(logits[keep], labels[keep])
 
 
     def _bbox_loss(
@@ -529,7 +675,6 @@ class LitRetinaFace(LitBit):
         landmark_loss = self.landmark_weight * self._landmark_loss(out_land, tgt_land)
 
         total = cls_loss + bbox_loss + landmark_loss
-        total = (1.0 - self.alpha_kd)*total
         stats = { "ce": cls_loss, "bb": bbox_loss, "lm": landmark_loss}
 
         if self.kd or self.hint:
@@ -541,7 +686,7 @@ class LitRetinaFace(LitBit):
                     ) + self.kd(out_land.float(), ldm_regressions.float()))
             
             stats["kd"] = loss_kd
-            total += loss_kd
+            total = (1.0 - self.alpha_kd) * total + loss_kd
         if self.hint:
             loss_hint = self.alpha_hint * self.get_loss_hint()
             stats["hint"] = loss_hint
@@ -567,7 +712,39 @@ class LitRetinaFace(LitBit):
 
     def training_step(self, batch, batch_idx: int):return self._step_one(batch, batch_idx)
 
-    def validation_step(self, batch, batch_idx: int):return self._step_one(batch, batch_idx)
+
+    def on_validation_epoch_start(self):
+        self._ap_preds = []
+        self._ap_gts = []
+
+    def validation_step(self, batch, batch_idx):
+        images, targets = batch
+        targets = [t.as_tensor() for t in targets]
+
+        bboxes, labels, landmarks = self.student(images)
+
+        # store detections + gts for AP
+        anchors = self.anchors.to(images.device)  # [N,4]
+        for i in range(images.size(0)):
+            boxes_i, scores_i = detect_one_image(
+                anchors=anchors,
+                bbox_deltas=bboxes[i],
+                cls_logits=labels[i],
+                variances=self.variances,
+                score_thr=0.02,
+                nms_iou=0.4,
+            )
+            self._ap_preds.append({"boxes": boxes_i.detach(), "scores": scores_i.detach()})
+            self._ap_gts.append(targets[i].bbox.to(images.device).detach())
+
+        # keep your existing loss logging
+        total, stats = self._compute_losses(images, (bboxes, labels, landmarks), targets)
+        return Metrics(loss=total, metrics=stats)
+
+    def on_validation_epoch_end(self):
+        ap50 = ap_at_iou(self._ap_preds, self._ap_gts, iou_thr=0.5)
+        # log however your framework logs
+        # self.log("val/AP50", ap50, prog_bar=True)
 
     def configure_optimizers(self, trainer: 'AccelTrainer'=None):
         opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
@@ -648,20 +825,10 @@ def main() -> None:
         small_stem=config.small_stem,
     )
     config.teacher = make_resnet50_retinaface_teacher()
-    config.hint_points = [            
-        # ("landmark_head.heads.0","LandmarkHead.0"),
-        # ("landmark_head.heads.1","LandmarkHead.1"),
-        # ("landmark_head.heads.2","LandmarkHead.2"),
-        # ("bbox_head.heads.0","BboxHead.0"),
-        # ("bbox_head.heads.1","BboxHead.1"),
-        # ("bbox_head.heads.2","BboxHead.2"),            
-        # ("classification_head.heads.0","ClassHead.0"),
-        # ("classification_head.heads.1","ClassHead.1"),
-        # ("classification_head.heads.2","ClassHead.2"),
+    config.hint_points = [
         ("ssh.0","ssh1"),
         ("ssh.1","ssh2"),
         ("ssh.2","ssh3"),
-        # ("fpn","fpn"),
         ("backbone.layer1","body.layer1"),
         ("backbone.layer2","body.layer2"),
         ("backbone.layer3","body.layer3"),
