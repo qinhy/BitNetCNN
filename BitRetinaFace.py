@@ -472,7 +472,6 @@ class RetinaFaceConfig(CommonTrainConfig, LitBitConfig):
     export_dir: str = "./ckpt_widerface_retinaface"
     dataset: Optional[Dict] = None
 
-    device: str = "mps:0"
     epochs: int = 50
     batch_size: int = 2
     num_workers: int = 0
@@ -523,12 +522,10 @@ class LitRetinaFace(LitBit):
             box_weight=config.box_weight, land_weight=config.landmark_weight
         )
 
-        self.device = config.device
-
     def on_train_start(self):
         # Sanity check
         with torch.no_grad():
-            dummy = torch.randn(1, 3, self.hparams_cfg.image_size, self.hparams_cfg.image_size, device=self.device)
+            dummy = torch.randn(1, 3, self.hparams_cfg.image_size, self.hparams_cfg.image_size, device=self.anchors.device)
             out = self.student(dummy) # returns (box, cls, lm)
             assert out[0].shape[1] == self.anchors.shape[0], \
                 f"Anchor mismatch! Model: {out[0].shape[1]}, Anchors: {self.anchors.shape[0]}"
@@ -536,16 +533,17 @@ class LitRetinaFace(LitBit):
     def prepare_targets(self, targets: List[RetinaFaceTensor]):
         """Match anchors to GT on the fly."""
         t_cls, t_box, t_land = [], [], []
-        
+        device = self.anchors.device
+
         for t in targets:
             # t.landmark is [N, 10] or [N, 5, 2]. Ensure [N, 5, 2] for match_anchors
             if t.landmark.dim() == 2:
-                lm_reshaped = t.landmark.view(-1, 5, 2).to(self.device)
+                lm_reshaped = t.landmark.view(-1, 5, 2)
             else:
-                lm_reshaped = t.landmark.to(self.device)
+                lm_reshaped = t.landmark
             
             l, b, lm = match_anchors(
-                self.anchors, t.bbox.to(self.device), lm_reshaped,
+                self.anchors, t.bbox.to(device), lm_reshaped.to(device),
                 self.hparams_cfg.pos_iou, self.hparams_cfg.neg_iou, self.variances
             )
             t_cls.append(l); t_box.append(b); t_land.append(lm)
