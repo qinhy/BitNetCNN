@@ -181,31 +181,16 @@ class DataSetModule:
             collate_fn=collate_fn,
         )
 
-    @torch.no_grad()
-    def show_examples(
-        self,
+    @staticmethod
+    def show_examples_static(
+        x,
+        y,
+        mean,std,
+        class_names=None,
         n: int = 16,
-        split: str = "train",
         cols: int = 8,
-        seed: int | None = None,
         figsize=(12, 6),
     ):
-        """
-        Randomly show examples from train/val.
-        - If split='train', MixUp/CutMix will be shown if enabled (applied in collate_fn).
-        """
-        assert split in {"train", "val"}, "split must be 'train' or 'val'"
-        if seed is not None:
-            torch.manual_seed(seed)
-
-        assert self.train_ds is not None and self.val_ds is not None, "Call setup() first."
-        loader = self.train_dataloader() if split == "train" else self.val_dataloader()
-
-        batch = next(iter(loader))
-        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
-            x, y = batch[0], batch[1]
-        else:
-            raise ValueError("Dataloader must return (x, y)")
 
         # ---- handle x being Tensor or list of Tensors (variable-sized images) ----
         if torch.is_tensor(x):
@@ -228,8 +213,6 @@ class DataSetModule:
                 y_list = None
 
         # ---- dataset class names (if classification) ----
-        ds = self.train_ds if split == "train" else self.val_ds
-        class_names = getattr(ds, "classes", None)
 
         def label_to_text(target):
             # for classification display
@@ -248,7 +231,7 @@ class DataSetModule:
                     return " | ".join(parts) if parts else "mixed"
             return str(target)
 
-        def denorm_for_vis(img_t: torch.Tensor) -> torch.Tensor:
+        def denorm_for_vis(img_t: torch.Tensor,mean=mean,std=std) -> torch.Tensor:
             # img_t: (C,H,W)
             if not torch.is_tensor(img_t) or img_t.ndim != 3:
                 return img_t
@@ -256,8 +239,8 @@ class DataSetModule:
             if img_t.dtype == torch.uint8:
                 return (img_t.float() / 255.0).clamp(0, 1)
 
-            mean = torch.tensor(self.mean, dtype=img_t.dtype).view(-1, 1, 1)
-            std = torch.tensor(self.std, dtype=img_t.dtype).view(-1, 1, 1)
+            mean = torch.tensor(mean, dtype=img_t.dtype).view(-1, 1, 1)
+            std = torch.tensor(std, dtype=img_t.dtype).view(-1, 1, 1)
             return (img_t * std + mean).clamp(0, 1)
 
         def is_retina_target(t) -> bool:
@@ -324,6 +307,35 @@ class DataSetModule:
         else:
             x_out = x_list
         return x_out, y_list
+    @torch.no_grad()
+    def show_examples(
+        self,
+        n: int = 16,
+        split: str = "train",
+        cols: int = 8,
+        seed: int | None = None,
+        figsize=(12, 6),
+    ):
+        """
+        Randomly show examples from train/val.
+        - If split='train', MixUp/CutMix will be shown if enabled (applied in collate_fn).
+        """
+        assert split in {"train", "val"}, "split must be 'train' or 'val'"
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        assert self.train_ds is not None and self.val_ds is not None, "Call setup() first."
+        loader = self.train_dataloader() if split == "train" else self.val_dataloader()
+
+        batch = next(iter(loader))
+        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+            x, y = batch[0], batch[1]
+        else:
+            raise ValueError("Dataloader must return (x, y)")
+        ds = self.train_ds if split == "train" else self.val_ds
+        self.show_examples_static(x, y, self.mean, self.std,
+                                    getattr(ds, "classes", None),
+                                    n, cols, figsize)
     # -----------------------------
     # Validation (Classification)
     # -----------------------------
