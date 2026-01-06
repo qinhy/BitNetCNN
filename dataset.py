@@ -795,8 +795,8 @@ class RetinaFaceTensor(BaseModel):
     img:Optional[Any] = Field(default=None,exclude=True)
     label:Optional[Any] = Field(default=None,exclude=True)
     bbox:Optional[Any] = Field(default=None,exclude=True) # xyxy
-    landmark:Optional[Any] = Field(default=None,exclude=True) # [lx, ly, rx, ry, nx, ny, mlx, mly, mrx, mry] as shape (5,2)
-    landmark_vis:Optional[Any] = Field(default=None,exclude=True) # [lv, rv, nv, mlv, mrv] as shape (5)
+    landmark:Optional[Any] = Field(default=None,exclude=True) # [lx, ly, rx, ry, nx, ny, mlx, mly, mrx, mry] as shape (N * 5,2)
+    landmark_vis:Optional[Any] = Field(default=None,exclude=True) # [lv, rv, nv, mlv, mrv] as shape (N * 5)
 
     def model_post_init(self, context):
         if self.img is None:
@@ -860,7 +860,7 @@ class RetinaFaceTensor(BaseModel):
 
         b2 = np.stack([x1_, y1_, x2_, y2_], axis=1)
         return b2[keep], keep
-
+    
     def landmark_xs_ys(self):
         pts = self.landmark
         valid = (pts[..., 0] >= 0) & (pts[..., 1] >= 0)
@@ -1051,14 +1051,23 @@ class RetinaFaceTensor(BaseModel):
                 landmark_targets[pos_mask] = current_targets
 
         return labels, bbox_targets, landmark_targets
+    
+    def filter_landmarks(self, bbox_ids):
+        self.landmark = self.landmark.reshape(-1, 5, 2)[bbox_ids].reshape(-1, 2)
+        self.landmark_vis = self.landmark_vis.reshape(-1, 5)[bbox_ids].reshape(-1)
 
-    def prepare(self, anchors, pos_iou, neg_iou, variances):    
-        # pts = self.landmark
-        # valid = (pts[..., 0] >= 0) & (pts[..., 1] >= 0)
+        invisible = (self.landmark[:,0]<0) | (self.landmark[:,1]<0)
+        invisible = invisible | (self.landmark[:,1]>=self.img.shape[0]) | (self.landmark[:,0]>=self.img.shape[1])
+        self.landmark[invisible] = -1.0
+        self.landmark_vis[invisible] = -1.0
+        
+        self.landmark = self.landmark.reshape(-1, 2)
+        self.landmark_vis = self.landmark_vis.reshape(-1)
+
+
+    def prepare(self, anchors, pos_iou, neg_iou, variances):
 
         if len(self.landmark)//5 != len(self.bbox):
-            print(self.landmark)
-            print(self.bbox)  
             self.show()
             raise ValueError(f"{len(self.landmark)//5}(x5 points) landmarks must same to {len(self.bbox)} bboxes!")  
         
@@ -1296,6 +1305,7 @@ class RetinaFaceDataModule(DataSetModule):
             ],
             bbox_params=A.BboxParams(
                 format="pascal_voc",
+                label_fields=["bbox_ids"],
                 min_area=1,          # drop boxes with area < 1 px^2
                 min_visibility=0.0,  # or bump this to 0.1/0.2 to be stricter
                 check_each_transform=True,
@@ -1747,13 +1757,17 @@ class RetinaFaceDataset(VisionDataset):
         img:np.ndarray = target.img
         if self.transform is not None:
             if isinstance(self.transform, (BaseCompose, BasicTransform)):
+                bbox_ids = np.arange(len(target.bbox))
                 res = self.transform(image=img,
                                     bboxes=target.bbox,
                                     keypoints=target.landmark,
+                                    bbox_ids=bbox_ids
                                 )
                 target.img = img = res["image"]
                 target.bbox = res["bboxes"]
                 target.landmark = res["keypoints"]
+                bbox_ids = np.asarray(res["bbox_ids"]).astype(int)
+                target.filter_landmarks(bbox_ids=bbox_ids)
                 target = target.prepare(self.anchors, self.pos_iou, self.neg_iou, self.variances)
             else:
                 img = self.transform(Image.fromarray(img))
