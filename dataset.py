@@ -1053,6 +1053,94 @@ class RetinaFaceDataModule(DataSetModule):
         )
         self.dataset_cls = RetinaFaceDataset
 
+    @staticmethod
+    def encode_boxes(anchors, gt_boxes, variances):
+        """Encodes GT boxes into delta offsets relative to anchors."""
+        cx, cy, w, h = anchors.unbind(1)
+        gx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
+        gy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
+        gw = gt_boxes[:, 2] - gt_boxes[:, 0]
+        gh = gt_boxes[:, 3] - gt_boxes[:, 1]
+
+        eps = 1e-6
+        dx = (gx - cx) / (w + eps) / variances[0]
+        dy = (gy - cy) / (h + eps) / variances[0]
+        dw = torch.log((gw + eps) / (w + eps)) / variances[1]
+        dh = torch.log((gh + eps) / (h + eps)) / variances[1]
+        return torch.stack([dx, dy, dw, dh], dim=1)
+
+    @staticmethod
+    def match_anchors(anchors, gt_boxes, gt_landmarks, pos_iou, neg_iou, variances):
+        """
+        Matches anchors to Ground Truth.
+        Returns:
+            labels: [N] (-1: ignore, 0: bg, 1: face)
+            bbox_targets: [N, 4]
+            landmark_targets: [N, 10]
+        """
+        if gt_boxes.numel() == 0:
+            device = anchors.device
+            return (torch.zeros(anchors.size(0), dtype=torch.long, device=device),
+                    torch.zeros(anchors.size(0), 4, device=device),
+                    torch.full((anchors.size(0), 10), -1.0, device=device))
+
+        # Convert anchors to xyxy for IoU
+        cx, cy, w, h = anchors.unbind(1)
+        anchor_boxes = torch.stack([cx - w/2, cy - h/2, cx + w/2, cy + h/2], dim=1)
+
+        # IoU Matrix [N_anchors, K_gt]
+        ious = box_iou(anchor_boxes, gt_boxes)
+        
+        # 1. Best GT for each anchor
+        best_target_iou, best_target_idx = ious.max(dim=1)
+        
+        # 2. Best anchor for each GT (Force match)
+        best_anchor_iou, best_anchor_idx = ious.max(dim=0)
+        
+        # Force include the best anchor for every GT by artifically boosting IoU
+        best_target_iou.index_fill_(0, best_anchor_idx, 2.0) 
+        for i, anchor_idx in enumerate(best_anchor_idx):
+            best_target_idx[anchor_idx] = i
+
+        # Assign labels
+        labels = torch.full((anchors.size(0),), -1, dtype=torch.long, device=anchors.device) # -1 ignore
+        labels[best_target_iou < neg_iou] = 0  # BG
+        labels[best_target_iou >= pos_iou] = 1 # Face
+
+        # Prepare targets
+        matched_gt_boxes = gt_boxes[best_target_idx]
+        bbox_targets = encode_boxes(anchors, matched_gt_boxes, variances)
+        
+        # Landmark encoding (only for positives)
+        matched_landmarks = gt_landmarks[best_target_idx]
+        landmark_targets = torch.full((anchors.size(0), 10), -1.0, device=anchors.device)
+        
+        pos_mask = labels == 1
+        if pos_mask.any():
+            # Check validity: [K, 5, 2] -> all coords >= 0
+            valid_lm_mask = (matched_landmarks >= 0).all(dim=1).all(dim=1)
+            
+            # We need to process all positive anchors, but only write valid LMs
+            # We can do this by masking the positive set
+            p_anchors = anchors[pos_mask]
+            p_lm = matched_landmarks[pos_mask]
+            p_valid = valid_lm_mask[pos_mask]
+            
+            if p_valid.any():
+                # Encoding logic: (x - cx)/w, (y - cy)/h
+                # p_lm: [P, 5, 2], p_anchors: [P, 4]
+                enc_lm_x = (p_lm[..., 0] - p_anchors[:, 0].unsqueeze(1)) / (p_anchors[:, 2].unsqueeze(1) * variances[0])
+                enc_lm_y = (p_lm[..., 1] - p_anchors[:, 1].unsqueeze(1)) / (p_anchors[:, 3].unsqueeze(1) * variances[0])
+                enc_lm = torch.stack([enc_lm_x, enc_lm_y], dim=-1).view(-1, 10)
+                
+                # Apply to targets
+                current_targets = landmark_targets[pos_mask]
+                # Only update valid ones
+                current_targets[p_valid] = enc_lm[p_valid]
+                landmark_targets[pos_mask] = current_targets
+
+        return labels, bbox_targets, landmark_targets
+    
     def _build_collate_transform(self):
         def collate_fn(batch):
             x, y = zip(*batch)
