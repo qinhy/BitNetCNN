@@ -12,7 +12,7 @@ from torchvision.ops import nms, box_iou
 # Imports from your specific environment (BitNet & Trainer Stack)
 # -----------------------------------------------------------------------------
 from common_utils import summ
-from dataset import DataModuleConfig, RetinaFaceTensor
+from dataset import DataModuleConfig, RetinaFaceDataModule, RetinaFaceTensor
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 
 from bitlayers.convs import ActModels, Conv2dModels, NormModels
@@ -327,7 +327,7 @@ def detect_one_image(anchors, bbox_deltas, cls_logits, variances, score_thr=0.02
         return boxes, scores
 
     keep_idx = nms(boxes, scores, nms_iou)
-    return boxes[keep_idx], scores[keep_idx]
+    return boxes[keep_idx], scores[keep_idx], keep_idx
 
 def ap_at_iou(preds, gts, iou_thr=0.5):
     """Simplified AP calculation for validation logging."""
@@ -596,7 +596,7 @@ class LitRetinaFace(LitBit):
         
         # Store for AP calc
         for i in range(images.size(0)):
-            boxes, scores = detect_one_image(
+            boxes, scores, keep_idx = detect_one_image(
                 self.anchors, out_box[i], out_cls[i], self.variances, 
                 score_thr=0.02, nms_iou=0.4
             )
@@ -617,6 +617,24 @@ class LitRetinaFace(LitBit):
         opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
         return opt, sched, "epoch"
+    
+    def show_predict_examples(self, images):
+        self.student.eval()
+        preds = []
+        with torch.no_grad():
+            mean = (0.485, 0.456, 0.406)
+            std = (0.229, 0.224, 0.225)
+            out_box, out_cls, out_land = self.student(images)
+            for i in range(images.size(0)):
+                boxes, scores, keep_idx = detect_one_image(
+                    self.anchors, out_box[i], out_cls[i], self.variances, 
+                    score_thr=0.02, nms_iou=0.4
+                )
+                land  = out_land[i][keep_idx]
+                y = RetinaFaceTensor(img=images[i], bbox=boxes, landmark=land, score=scores)
+                preds.append(y)
+        RetinaFaceDataModule.show_examples_static(images, preds, mean, std)
+
 
 def make_resnet50_teacher(device="cpu"):
     m = torch.hub.load("qinhy/Pytorch_Retinaface", "retinaface_resnet50", pretrained=True)
@@ -651,6 +669,10 @@ def main():
         log_every_n_steps=10,
     )
     trainer.fit(lit, datamodule=dm_conf.build())
+    return lit, dm_conf.build()
 
 if __name__ == "__main__":
-    main()
+    lit, dm =  main()
+    dm.setup()
+    images, targets = next(iter(dm.val_dataloader()))
+    lit.show_predict_examples(images)
