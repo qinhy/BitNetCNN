@@ -787,17 +787,6 @@ class TinyImageNetDataset(VisionDataset):
 # -----------------------------------------------------------------------------
 # RetinaFace / DataModule
 # -----------------------------------------------------------------------------
-class RetinaFaceTensors(BaseModel):
-    imgs:Optional[Any] = Field(default=None,exclude=True)
-    labels:Optional[Any] = Field(default=None,exclude=True)
-    bboxes:Optional[Any] = Field(default=None,exclude=True) # xyxy
-    landmarks:Optional[Any] = Field(default=None,exclude=True) # [lx, ly, rx, ry, nx, ny, mlx, mly, mrx, mry] as shape (5,2)    
-
-    def tolist(self):
-        return[
-            RetinaFaceTensor(img=img, label=label, bbox=bbox, landmark=landmark,
-                ) for img, label, bbox, landmark in zip(self.imgs, self.labels, self.bboxs, self.landmarks)
-        ]
 
 class RetinaFaceTensor(BaseModel):
     file: str = ""
@@ -932,6 +921,7 @@ class RetinaFaceTensor(BaseModel):
     def as_tensor(self):
         if (
             torch.is_tensor(self.bbox)
+            and torch.is_tensor(self.label)
             and torch.is_tensor(self.landmark)
             and torch.is_tensor(self.landmark_vis)
         ):
@@ -1063,23 +1053,27 @@ class RetinaFaceTensor(BaseModel):
         return labels, bbox_targets, landmark_targets
 
     def prepare(self, anchors, pos_iou, neg_iou, variances):
-        self.as_tensor()
+        t = self.as_tensor()
         device = anchors.device
         # t.landmark is [N, 10] or [N, 5, 2]. Ensure [N, 5, 2] for match_anchors
-        if self.landmark.dim() == 2:
-            lm_reshaped = self.landmark.view(-1, 5, 2)
+        if t.landmark.dim() == 2:
+            lm_reshaped = t.landmark.view(-1, 5, 2)
         else:
-            lm_reshaped = self.landmark
+            lm_reshaped = t.landmark
         
-        self.label, self.bbox, self.landmark = RetinaFaceTensor.match_anchors(
-            anchors, self.bbox.to(device), lm_reshaped.to(device),
+        t.label, t.bbox, t.landmark = RetinaFaceTensor.match_anchors(
+            anchors, t.bbox.to(device), lm_reshaped.to(device),
             pos_iou, neg_iou, variances
         )
-        return self
+        return t
 
 class RetinaFaceDataModule(DataSetModule):
-    def __init__(self, config: "DataModuleConfig"):
+    def __init__(self, config: "DataModuleConfig", anchors, pos_iou, neg_iou, variances):
         super().__init__(config)
+        self.anchors = anchors
+        self.pos_iou = pos_iou
+        self.neg_iou = neg_iou
+        self.variances = variances
         self.num_classes = 100
         self.mean = (0.485, 0.456, 0.406)
         self.std = (0.229, 0.224, 0.225)
@@ -1154,7 +1148,10 @@ class RetinaFaceDataModule(DataSetModule):
             bbox_params=A.BboxParams(format="pascal_voc"),
             keypoint_params=A.KeypointParams(format="xy", remove_invisible=False),
         )
-        self.dataset_cls = RetinaFaceDataset
+        self.dataset_cls = lambda **kwargs: RetinaFaceDataset(**kwargs, anchors=anchors,
+                                                              pos_iou=pos_iou, neg_iou=neg_iou,
+                                                              variances=variances,)
+
 
     def _build_collate_transform(self):
         def collate_fn(batch):
@@ -1167,7 +1164,6 @@ class RetinaFaceDataModule(DataSetModule):
         if self._collate_transform is not None:
             x, y = self._collate_transform(batch)
         return x, y
-
 
 class RetinaFaceDataset(VisionDataset):
     # Hugging Face mirror (default)
@@ -1199,9 +1195,12 @@ class RetinaFaceDataset(VisionDataset):
         train_ann: str = "train.json",
         val_ann: str = "val.json",
         download_url: Optional[str] = None,  # optional override (single URL)
-    ) -> None:
+        anchors=None, pos_iou=None, neg_iou=None, variances=None):
         super().__init__(root, transform=transform, target_transform=target_transform)
-
+        self.anchors = anchors.cpu()
+        self.pos_iou = pos_iou
+        self.neg_iou = neg_iou
+        self.variances = variances
         self.root = Path(root)
         self.train = bool(train)
         self.download = bool(download)
@@ -1560,6 +1559,7 @@ class RetinaFaceDataset(VisionDataset):
                 target.img = img = res["image"]
                 target.bbox = res["bboxes"]
                 target.landmark = res["keypoints"]
+                target = target.prepare(self.anchors, self.pos_iou, self.neg_iou, self.variances)
             else:
                 img = self.transform(Image.fromarray(img))
         if self.target_transform is not None:
