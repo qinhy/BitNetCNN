@@ -12,7 +12,7 @@ from torchvision.ops import nms, box_iou
 # Imports from your specific environment (BitNet & Trainer Stack)
 # -----------------------------------------------------------------------------
 from common_utils import summ
-from dataset import DataModuleConfig, RetinaFaceDataModule, RetinaFaceTensor
+from dataset import DataModuleConfig, RetinaFaceDataModule, RetinaFaceTensor, RetinaFaceTensors
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 
 from bitlayers.convs import ActModels, Conv2dModels, NormModels
@@ -217,21 +217,6 @@ class RetinaFaceAnchors:
         if self.clip: anchors.clamp_(0.0, 1.0)
         return anchors
 
-def encode_boxes(anchors, gt_boxes, variances):
-    """Encodes GT boxes into delta offsets relative to anchors."""
-    cx, cy, w, h = anchors.unbind(1)
-    gx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
-    gy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
-    gw = gt_boxes[:, 2] - gt_boxes[:, 0]
-    gh = gt_boxes[:, 3] - gt_boxes[:, 1]
-
-    eps = 1e-6
-    dx = (gx - cx) / (w + eps) / variances[0]
-    dy = (gy - cy) / (h + eps) / variances[0]
-    dw = torch.log((gw + eps) / (w + eps)) / variances[1]
-    dh = torch.log((gh + eps) / (h + eps)) / variances[1]
-    return torch.stack([dx, dy, dw, dh], dim=1)
-
 def decode_boxes(anchors, deltas, variances):
     """Decodes deltas back to [x1, y1, x2, y2]."""
     v0, v1 = variances
@@ -244,77 +229,6 @@ def decode_boxes(anchors, deltas, variances):
     gh = h * torch.exp(dh * v1)
 
     return torch.stack([gx - gw/2, gy - gh/2, gx + gw/2, gy + gh/2], dim=1)
-
-def match_anchors(anchors, gt_boxes, gt_landmarks, pos_iou, neg_iou, variances):
-    """
-    Matches anchors to Ground Truth.
-    Returns:
-        labels: [N] (-1: ignore, 0: bg, 1: face)
-        bbox_targets: [N, 4]
-        landmark_targets: [N, 10]
-    """
-    if gt_boxes.numel() == 0:
-        device = anchors.device
-        return (torch.zeros(anchors.size(0), dtype=torch.long, device=device),
-                torch.zeros(anchors.size(0), 4, device=device),
-                torch.full((anchors.size(0), 10), -1.0, device=device))
-
-    # Convert anchors to xyxy for IoU
-    cx, cy, w, h = anchors.unbind(1)
-    anchor_boxes = torch.stack([cx - w/2, cy - h/2, cx + w/2, cy + h/2], dim=1)
-
-    # IoU Matrix [N_anchors, K_gt]
-    ious = box_iou(anchor_boxes, gt_boxes)
-    
-    # 1. Best GT for each anchor
-    best_target_iou, best_target_idx = ious.max(dim=1)
-    
-    # 2. Best anchor for each GT (Force match)
-    best_anchor_iou, best_anchor_idx = ious.max(dim=0)
-    
-    # Force include the best anchor for every GT by artifically boosting IoU
-    best_target_iou.index_fill_(0, best_anchor_idx, 2.0) 
-    for i, anchor_idx in enumerate(best_anchor_idx):
-        best_target_idx[anchor_idx] = i
-
-    # Assign labels
-    labels = torch.full((anchors.size(0),), -1, dtype=torch.long, device=anchors.device) # -1 ignore
-    labels[best_target_iou < neg_iou] = 0  # BG
-    labels[best_target_iou >= pos_iou] = 1 # Face
-
-    # Prepare targets
-    matched_gt_boxes = gt_boxes[best_target_idx]
-    bbox_targets = encode_boxes(anchors, matched_gt_boxes, variances)
-    
-    # Landmark encoding (only for positives)
-    matched_landmarks = gt_landmarks[best_target_idx]
-    landmark_targets = torch.full((anchors.size(0), 10), -1.0, device=anchors.device)
-    
-    pos_mask = labels == 1
-    if pos_mask.any():
-        # Check validity: [K, 5, 2] -> all coords >= 0
-        valid_lm_mask = (matched_landmarks >= 0).all(dim=1).all(dim=1)
-        
-        # We need to process all positive anchors, but only write valid LMs
-        # We can do this by masking the positive set
-        p_anchors = anchors[pos_mask]
-        p_lm = matched_landmarks[pos_mask]
-        p_valid = valid_lm_mask[pos_mask]
-        
-        if p_valid.any():
-            # Encoding logic: (x - cx)/w, (y - cy)/h
-            # p_lm: [P, 5, 2], p_anchors: [P, 4]
-            enc_lm_x = (p_lm[..., 0] - p_anchors[:, 0].unsqueeze(1)) / (p_anchors[:, 2].unsqueeze(1) * variances[0])
-            enc_lm_y = (p_lm[..., 1] - p_anchors[:, 1].unsqueeze(1)) / (p_anchors[:, 3].unsqueeze(1) * variances[0])
-            enc_lm = torch.stack([enc_lm_x, enc_lm_y], dim=-1).view(-1, 10)
-            
-            # Apply to targets
-            current_targets = landmark_targets[pos_mask]
-            # Only update valid ones
-            current_targets[p_valid] = enc_lm[p_valid]
-            landmark_targets[pos_mask] = current_targets
-
-    return labels, bbox_targets, landmark_targets
 
 def detect_one_image(anchors, bbox_deltas, cls_logits, variances, score_thr=0.02, nms_iou=0.4):
     """Inference utility for a single image."""
@@ -472,8 +386,8 @@ class RetinaFaceConfig(CommonTrainConfig, LitBitConfig):
     export_dir: str = "./ckpt_widerface_retinaface"
     dataset: Optional[Dict] = None
 
-    epochs: int = 10
-    batch_size: int = 8
+    epochs: int = 50
+    batch_size: int = 2
     num_workers: int = 0
     
     # Loss Weights
@@ -530,42 +444,23 @@ class LitRetinaFace(LitBit):
             assert out[0].shape[1] == self.anchors.shape[0], \
                 f"Anchor mismatch! Model: {out[0].shape[1]}, Anchors: {self.anchors.shape[0]}"
 
-    def prepare_targets(self, targets: List[RetinaFaceTensor]):
-        """Match anchors to GT on the fly."""
-        t_cls, t_box, t_land = [], [], []
-        device = self.anchors.device
-
-        for t in targets:
-            # t.landmark is [N, 10] or [N, 5, 2]. Ensure [N, 5, 2] for match_anchors
-            if t.landmark.dim() == 2:
-                lm_reshaped = t.landmark.view(-1, 5, 2)
-            else:
-                lm_reshaped = t.landmark
-            
-            l, b, lm = match_anchors(
-                self.anchors, t.bbox.to(device), lm_reshaped.to(device),
-                self.hparams_cfg.pos_iou, self.hparams_cfg.neg_iou, self.variances
-            )
-            t_cls.append(l); t_box.append(b); t_land.append(lm)
-            
-        return torch.stack(t_box), torch.stack(t_cls), torch.stack(t_land)
-
     def training_step(self, batch, batch_idx):
         images, raw_targets = batch
-        raw_targets = [t.as_tensor() for t in raw_targets] 
+        raw_targets: List[RetinaFaceTensor]= [t.as_tensor() for t in raw_targets]
+        raw_targets = [t.prepare(self.anchors, self.hparams_cfg.pos_iou,
+                                 self.hparams_cfg.neg_iou, self.variances) for t in raw_targets]
         
-        # 1. Forward Student
         out_box, out_cls, out_land = self.student(images)
+        tgt_box = torch.stack([t.bbox for t in raw_targets])
+        tgt_cls = torch.stack([t.label for t in raw_targets])
+        tgt_land = torch.stack([t.landmark for t in raw_targets])        
         
-        # 2. Prepare Targets
-        tgt_box, tgt_cls, tgt_land = self.prepare_targets(raw_targets)
-        
-        # 3. Compute Base Loss
+        # Compute Base Loss
         l_cls, l_box, l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
         base_loss = l_cls + l_box + l_land
         stats = {"ce": l_cls, "bb": l_box, "lm": l_land}
         
-        # 4. Distillation
+        # Distillation
         if self.kd or self.hint:
             with torch.no_grad():
                 # Teacher returns [loc, conf, land]
@@ -576,9 +471,6 @@ class LitRetinaFace(LitBit):
                 self.kd(out_cls, t_cls) + self.kd(out_box, t_box) + self.kd(out_land, t_land)
             )
             stats["kd"] = loss_kd
-            stats["ce"] *= (1.0 - self.alpha_kd)
-            stats["bb"] *= (1.0 - self.alpha_kd)
-            stats["lm"] *= (1.0 - self.alpha_kd)
             base_loss = (1.0 - self.alpha_kd) * base_loss + loss_kd
 
         if self.hint:
@@ -590,32 +482,35 @@ class LitRetinaFace(LitBit):
 
     def validation_step(self, batch, batch_idx):
         images, raw_targets = batch
-        raw_targets = [t.as_tensor() for t in raw_targets]
+        raw_targets: List[RetinaFaceTensor]= [t.as_tensor() for t in raw_targets]
+        raw_targets = [t.prepare(self.anchors, self.hparams_cfg.pos_iou,
+                                 self.hparams_cfg.neg_iou, self.variances) for t in raw_targets]
         
         out_box, out_cls, out_land = self.student(images)
-        tgt_box, tgt_cls, tgt_land = self.prepare_targets(raw_targets)
+        tgt_box = torch.stack([t.bbox for t in raw_targets])
+        tgt_cls = torch.stack([t.label for t in raw_targets])
+        tgt_land = torch.stack([t.landmark for t in raw_targets])
         
         l_cls, l_box, l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
         
-        # Store for AP calc TODO: too slow
-        # for i in range(images.size(0)):
-        #     boxes, scores, keep_idx = detect_one_image(
-        #         self.anchors, out_box[i], out_cls[i], self.variances, 
-        #         score_thr=0.02, nms_iou=0.4
-        #     )
-        #     self._ap_preds.append({"boxes": boxes.cpu(), "scores": scores.cpu()})
-        #     self._ap_gts.append(raw_targets[i].bbox.cpu())
+        # Store for AP calc
+        for i in range(images.size(0)):
+            boxes, scores, keep_idx = detect_one_image(
+                self.anchors, out_box[i], out_cls[i], self.variances, 
+                score_thr=0.02, nms_iou=0.4
+            )
+            self._ap_preds.append({"boxes": boxes.cpu(), "scores": scores.cpu()})
+            self._ap_gts.append(raw_targets[i].bbox.cpu())
 
-        return Metrics(loss=l_cls + l_box + l_land, metrics={"val/acc": 1.0/l_box})
+        return Metrics(loss=l_cls + l_box + l_land, metrics={"val_ce": l_cls})
 
     def on_validation_epoch_start(self, epoch):
         self._ap_preds, self._ap_gts = [], []
-        self._ternary_snapshot = self._clone_student()
 
-    # def on_validation_epoch_end(self, epoch): TODO: too slow
-    #     ap50 = ap_at_iou(self._ap_preds, self._ap_gts, iou_thr=0.5)
-    #     # Log via print or trainer logger
-    #     print(f"\nEpoch {epoch} | Val AP50: {ap50:.4f}")
+    def on_validation_epoch_end(self, epoch):
+        ap50 = ap_at_iou(self._ap_preds, self._ap_gts, iou_thr=0.5)
+        # Log via print or trainer logger
+        print(f"\nEpoch {epoch} | Val AP50: {ap50:.4f}")
 
     def configure_optimizers(self, trainer=None):
         opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
