@@ -12,7 +12,7 @@ from torchvision.ops import nms, box_iou
 # Imports from your specific environment (BitNet & Trainer Stack)
 # -----------------------------------------------------------------------------
 from common_utils import summ
-from dataset import DataModuleConfig, RetinaFaceDataModule, RetinaFaceTensor, RetinaFaceTensors
+from dataset import DataModuleConfig, RetinaFaceDataModule, RetinaFaceTensor
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 
 from bitlayers.convs import ActModels, Conv2dModels, NormModels
@@ -445,15 +445,11 @@ class LitRetinaFace(LitBit):
                 f"Anchor mismatch! Model: {out[0].shape[1]}, Anchors: {self.anchors.shape[0]}"
 
     def training_step(self, batch, batch_idx):
-        images, raw_targets = batch
-        raw_targets: List[RetinaFaceTensor]= [t.as_tensor() for t in raw_targets]
-        raw_targets = [t.prepare(self.anchors, self.hparams_cfg.pos_iou,
-                                 self.hparams_cfg.neg_iou, self.variances) for t in raw_targets]
-        
+        images, raw_targets = batch        
         out_box, out_cls, out_land = self.student(images)
-        tgt_box = torch.stack([t.bbox for t in raw_targets])
-        tgt_cls = torch.stack([t.label for t in raw_targets])
-        tgt_land = torch.stack([t.landmark for t in raw_targets])        
+        tgt_box = torch.stack([t.bbox for t in raw_targets]).to(device=images.device)
+        tgt_cls = torch.stack([t.label for t in raw_targets]).to(device=images.device)
+        tgt_land = torch.stack([t.landmark for t in raw_targets]).to(device=images.device)
         
         # Compute Base Loss
         l_cls, l_box, l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
@@ -481,15 +477,11 @@ class LitRetinaFace(LitBit):
         return Metrics(loss=base_loss, metrics=stats)
 
     def validation_step(self, batch, batch_idx):
-        images, raw_targets = batch
-        raw_targets: List[RetinaFaceTensor]= [t.as_tensor() for t in raw_targets]
-        raw_targets = [t.prepare(self.anchors, self.hparams_cfg.pos_iou,
-                                 self.hparams_cfg.neg_iou, self.variances) for t in raw_targets]
-        
+        images, raw_targets = batch        
         out_box, out_cls, out_land = self.student(images)
-        tgt_box = torch.stack([t.bbox for t in raw_targets])
-        tgt_cls = torch.stack([t.label for t in raw_targets])
-        tgt_land = torch.stack([t.landmark for t in raw_targets])
+        tgt_box = torch.stack([t.bbox for t in raw_targets]).to(device=images.device)
+        tgt_cls = torch.stack([t.label for t in raw_targets]).to(device=images.device)
+        tgt_land = torch.stack([t.landmark for t in raw_targets]).to(device=images.device)
         
         l_cls, l_box, l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
         
@@ -559,6 +551,7 @@ def main():
     ]
 
     lit = LitRetinaFace(config)
+    anchors, pos_iou, neg_iou, variances = lit.anchors, lit.hparams_cfg.pos_iou, lit.hparams_cfg.neg_iou, lit.variances
     
     # Use your Trainer stack
     trainer = AccelTrainer(
@@ -567,7 +560,7 @@ def main():
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
     )
-    trainer.fit(lit, datamodule=dm_conf.build())
+    trainer.fit(lit, datamodule=RetinaFaceDataModule(dm_conf,anchors, pos_iou, neg_iou, variances))
     return lit, dm_conf.build()
 
 if __name__ == "__main__":
