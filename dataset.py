@@ -1052,7 +1052,16 @@ class RetinaFaceTensor(BaseModel):
 
         return labels, bbox_targets, landmark_targets
 
-    def prepare(self, anchors, pos_iou, neg_iou, variances):
+    def prepare(self, anchors, pos_iou, neg_iou, variances):    
+        # pts = self.landmark
+        # valid = (pts[..., 0] >= 0) & (pts[..., 1] >= 0)
+
+        if len(self.landmark)//5 != len(self.bbox):
+            print(self.landmark)
+            print(self.bbox)  
+            self.show()
+            raise ValueError(f"{len(self.landmark)//5}(x5 points) landmarks must same to {len(self.bbox)} bboxes!")  
+        
         t = self.as_tensor()
         device = anchors.device
         # t.landmark is [N, 10] or [N, 5, 2]. Ensure [N, 5, 2] for match_anchors
@@ -1060,12 +1069,198 @@ class RetinaFaceTensor(BaseModel):
             lm_reshaped = t.landmark.view(-1, 5, 2)
         else:
             lm_reshaped = t.landmark
+
         
         t.label, t.bbox, t.landmark = RetinaFaceTensor.match_anchors(
             anchors, t.bbox.to(device), lm_reshaped.to(device),
             pos_iou, neg_iou, variances
         )
         return t
+    
+    def show(
+        self,
+        ax=None,
+        figsize=(8, 8),
+        title: str = "",
+        show_landmarks: bool = True,
+        show_boxes: bool = True,
+        show_indices: bool = False,
+        show_vis: bool = False,
+        vis_threshold: float = 0.0,
+        box_lw: float = 2.0,
+        point_size: float = 20.0,
+        assume_normalized: bool | None = None,  # None=auto, True=[0,1], False=pixels
+    ):
+        """
+        Plot image with bbox (xyxy) and 5-point landmarks.
+
+        - If assume_normalized is None, it auto-detects based on value ranges.
+        - Missing landmarks are expected as -1 and will be skipped.
+        - If landmark_vis exists and show_vis=True, will only plot points with vis>=vis_threshold (and vis>=0).
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+
+        # --------- get image (H,W,3) uint8 for display ----------
+        img = self.img
+        if img is None:
+            raise ValueError("No image loaded. Provide `img` or `file`.")
+
+        if hasattr(img, "detach"):  # torch tensor
+            img_np = img.detach().cpu().numpy()
+            # allow CHW or HWC
+            if img_np.ndim == 3 and img_np.shape[0] in (1, 3) and img_np.shape[-1] not in (1, 3):
+                img_np = np.transpose(img_np, (1, 2, 0))
+        else:
+            img_np = np.asarray(img)
+
+        if img_np.ndim == 2:
+            img_np = np.stack([img_np] * 3, axis=-1)
+        if img_np.shape[-1] == 1:
+            img_np = np.repeat(img_np, 3, axis=-1)
+
+        # infer H,W if needed
+        H, W = img_np.shape[:2]
+        self.img_h, self.img_w = H, W
+
+        # --------- prepare bbox/landmarks as numpy ----------
+        def to_np(x):
+            if x is None:
+                return None
+            if hasattr(x, "detach"):
+                return x.detach().cpu().numpy()
+            return np.asarray(x)
+
+        b = to_np(self.bbox)
+        lm = to_np(self.landmark)
+        lmv = to_np(self.landmark_vis)
+
+        # Normalize shapes
+        if b is not None:
+            b = np.asarray(b, dtype=np.float32).reshape(-1, 4)
+        else:
+            b = np.zeros((0, 4), dtype=np.float32)
+
+        if lm is not None:
+            lm = np.asarray(lm, dtype=np.float32)
+            if lm.size == 0:
+                lm = lm.reshape(0, 2)
+            elif lm.ndim == 1:
+                lm = lm.reshape(-1, 2)
+            elif lm.ndim == 3 and lm.shape[-1] == 2:  # (N,5,2)
+                lm = lm.reshape(-1, 2)
+        else:
+            lm = np.zeros((0, 2), dtype=np.float32)
+
+        if lmv is not None:
+            lmv = np.asarray(lmv, dtype=np.float32).reshape(-1)
+        # else: None is ok
+
+        # --------- decide coord space (pixels vs normalized) ----------
+        def looks_normalized(arr: np.ndarray) -> bool:
+            if arr.size == 0:
+                return False
+            finite = arr[np.isfinite(arr)]
+            if finite.size == 0:
+                return False
+            # ignore -1 "missing"
+            finite = finite[finite >= 0]
+            if finite.size == 0:
+                return False
+            return float(finite.max()) <= 1.5  # small cushion
+
+        if assume_normalized is None:
+            # If either bbox or landmark look normalized, treat as normalized
+            assume_normalized = looks_normalized(b) or looks_normalized(lm)
+
+        if assume_normalized:
+            # convert to pixels for display
+            if b.size:
+                b = b * np.array([W, H, W, H], dtype=np.float32)
+            if lm.size:
+                lm_pix = lm.copy()
+                neg_mask = lm_pix < 0
+                lm_pix[:, 0] *= float(W)
+                lm_pix[:, 1] *= float(H)
+                lm_pix[neg_mask] = -1.0
+                lm = lm_pix
+
+        # --------- build axes ----------
+        created_ax = False
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=figsize)
+            created_ax = True
+
+        ax.imshow(img_np.astype(np.uint8))
+        ax.set_axis_off()
+        if title:
+            ax.set_title(title)
+
+        # --------- draw boxes ----------
+        if show_boxes and b.size:
+            for i, (x1, y1, x2, y2) in enumerate(b):
+                # skip invalid
+                if not np.isfinite([x1, y1, x2, y2]).all():
+                    continue
+                w_box, h_box = (x2 - x1), (y2 - y1)
+                if w_box <= 0 or h_box <= 0:
+                    continue
+                rect = Rectangle(
+                    (x1, y1), w_box, h_box,
+                    fill=False, linewidth=box_lw
+                )
+                ax.add_patch(rect)
+                if show_indices:
+                    ax.text(x1, y1, f"{i}", fontsize=10, va="top")
+
+        # --------- draw landmarks (assumes 5 points per box if aligned) ----------
+        if show_landmarks and lm.size:
+            pts = lm.reshape(-1, 2)
+
+            # If landmarks correspond to boxes: common layouts:
+            # - stored as (num_boxes*5,2). We'll try to group by boxes if b exists.
+            if b.shape[0] > 0 and pts.shape[0] == b.shape[0] * 5:
+                pts = pts.reshape(b.shape[0], 5, 2)
+                if lmv is not None and lmv.shape[0] == b.shape[0] * 5:
+                    lmv_g = lmv.reshape(b.shape[0], 5)
+                else:
+                    lmv_g = None
+
+                for bi in range(b.shape[0]):
+                    for pi in range(5):
+                        x, y = pts[bi, pi]
+                        if x < 0 or y < 0:
+                            continue
+                        if lmv_g is not None and show_vis:
+                            v = lmv_g[bi, pi]
+                            if v < 0 or v < vis_threshold:
+                                continue
+                            ax.text(x + 2, y + 2, f"{v:.2f}", fontsize=8)
+                        ax.scatter([x], [y], s=point_size)
+                        if show_indices:
+                            ax.text(x + 2, y - 2, f"{bi}:{pi}", fontsize=8)
+
+            else:
+                # fallback: plot all valid points as a flat list
+                if lmv is not None and show_vis and lmv.shape[0] == pts.shape[0]:
+                    mask = (pts[:, 0] >= 0) & (pts[:, 1] >= 0) & (lmv >= vis_threshold) & (lmv >= 0)
+                else:
+                    mask = (pts[:, 0] >= 0) & (pts[:, 1] >= 0)
+
+                xs, ys = pts[mask, 0], pts[mask, 1]
+                ax.scatter(xs, ys, s=point_size)
+
+                if show_indices:
+                    idxs = np.where(mask)[0]
+                    for j, (x, y) in zip(idxs, pts[mask]):
+                        ax.text(x + 2, y - 2, f"{j}", fontsize=8)
+
+        if created_ax:
+            plt.tight_layout()
+            plt.show()
+
+        return ax
 
 class RetinaFaceDataModule(DataSetModule):
     def __init__(self, config: "DataModuleConfig", anchors, pos_iou, neg_iou, variances):
