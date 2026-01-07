@@ -1281,7 +1281,7 @@ class RetinaFaceTensor(BaseModel):
         return ax
 
 class RetinaFaceDataModule(DataSetModule):
-    def __init__(self, config: "DataModuleConfig", anchors, pos_iou, neg_iou, variances):
+    def __init__(self, config: "DataModuleConfig", anchors=None, pos_iou=None, neg_iou=None, variances=None):
         super().__init__(config)
         self.anchors = anchors
         self.pos_iou = pos_iou
@@ -1411,7 +1411,7 @@ class RetinaFaceDataset(VisionDataset):
         download_url: Optional[str] = None,  # optional override (single URL)
         anchors=None, pos_iou=None, neg_iou=None, variances=None):
         super().__init__(root, transform=transform, target_transform=target_transform)
-        self.anchors = anchors.cpu()
+        self.anchors = anchors.cpu() if anchors is not None else None
         self.pos_iou = pos_iou
         self.neg_iou = neg_iou
         self.variances = variances
@@ -1777,7 +1777,8 @@ class RetinaFaceDataset(VisionDataset):
                 target.landmark = res["keypoints"]
                 bbox_ids = np.asarray(res["bbox_ids"]).astype(int)
                 target.filter_landmarks(bbox_ids=bbox_ids)
-                target = target.prepare(self.anchors, self.pos_iou, self.neg_iou, self.variances)
+                if self.anchors is not None:
+                    target = target.prepare(self.anchors, self.pos_iou, self.neg_iou, self.variances)
             else:
                 img = self.transform(Image.fromarray(img))
         if self.target_transform is not None:
