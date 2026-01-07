@@ -13,7 +13,7 @@ from torchvision.ops import nms, box_iou
 # -----------------------------------------------------------------------------
 from common_utils import summ
 from dataset import DataModuleConfig, RetinaFaceDataModule, RetinaFaceTensor
-from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
+from trainer import AccelTrainer, CommonTrainConfig, ExportBestTernary, LitBit, LitBitConfig, Metrics, MetricsManager, MetricsTracer
 
 from bitlayers.convs import ActModels, Conv2dModels, NormModels
 from BitResNet import BitResNet
@@ -496,13 +496,13 @@ class LitRetinaFace(LitBit):
         out_box, out_cls, out_land = self._ternary_snapshot(images)
         s_l_cls, s_l_box, s_l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
         
-        metrics: Dict[str, Any] = {"val/acc_fp": 1.0/fp_l_box, "val/acc_tern": 1.0/s_l_box}
+        metrics: Dict[str, Any] = {"val/bb_fp": fp_l_box, "val/bb_tern": s_l_box}
 
         if self.has_teacher and self.teacher is not None and self.alpha_kd > 0:
             if self.t_acc_fps.get(batch_idx) is None:
                 out_box, out_cls, out_land = self.teacher_forward(images)
                 t_l_cls, t_l_box, t_l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
-            metrics["val/t_acc_fp"] = 1.0/t_l_box
+            metrics["val/t_bb_fp"] = t_l_box
 
         # # Store for AP calc
         # for i in range(images.size(0)):
@@ -579,6 +579,16 @@ def main():
         mixed_precision="bf16" if config.amp else "no",
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
+        metrics_manager = MetricsManager(
+            epoch_metric_tracers=[
+                MetricsTracer(
+                    stage="val",
+                    key="val/bb_tern_mean",
+                    mode="min",
+                    callback=ExportBestTernary(),
+                )
+            ]
+        )
     )
     dm = RetinaFaceDataModule(dm_conf,anchors, pos_iou, neg_iou, variances)
     trainer.fit(lit, datamodule=dm)
