@@ -153,6 +153,8 @@ class BitRetinaFace(nn.Module):
     def __init__(self, backbone_size: str = "50", fpn_channels: int = 256, 
                  num_classes: int = 2, num_priors: Sequence[int] = (2, 2, 2),
                  scale_op: str = "median", in_ch: int = 3, small_stem: bool = False):
+        # Save initialization args for cloning/inference later
+        self.cfg = locals(); del self.cfg['self']; del self.cfg['__class__']
         super().__init__()
         self.backbone = BitResNetBackbone(backbone_size, scale_op, in_ch, small_stem)
         self.fpn = FPN(self.backbone.feature_channels, fpn_channels, scale_op)
@@ -164,8 +166,6 @@ class BitRetinaFace(nn.Module):
         self.box_head = PredictionHead(out_per_anchor=4, **head_cfg)
         self.lm_head  = PredictionHead(out_per_anchor=10, **head_cfg)
         
-        # Save initialization args for cloning/inference later
-        self.cfg = locals(); del self.cfg['self']; del self.cfg['__class__']
 
     def forward(self, x: torch.Tensor):
         feats = self.backbone(x)
@@ -178,6 +178,11 @@ class BitRetinaFace(nn.Module):
             self.cls_head(feats),   # [B, N, 2]
             self.lm_head(feats)     # [B, N, 10]
         )
+
+    def clone(self):
+        res = BitRetinaFace(**self.cfg)
+        res.load_state_dict(self.state_dict())
+        return res
 
 # =============================================================================
 # 2. LOGIC (Anchors, Matching, Decoding, Loss)
@@ -481,13 +486,24 @@ class LitRetinaFace(LitBit):
 
     def validation_step(self, batch, batch_idx):
         images, raw_targets = batch        
-        out_box, out_cls, out_land = self.student(images)
         tgt_box = torch.stack([t.bbox for t in raw_targets]).to(device=images.device)
         tgt_cls = torch.stack([t.label for t in raw_targets]).to(device=images.device)
         tgt_land = torch.stack([t.landmark for t in raw_targets]).to(device=images.device)
         
-        l_cls, l_box, l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
+        out_box, out_cls, out_land = self.student(images)
+        fp_l_cls, fp_l_box, fp_l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
+
+        out_box, out_cls, out_land = self._ternary_snapshot(images)
+        s_l_cls, s_l_box, s_l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
         
+        metrics: Dict[str, Any] = {"val/acc_fp": 1.0/fp_l_box, "val/acc_tern": 1.0/s_l_box}
+
+        if self.has_teacher and self.teacher is not None and self.alpha_kd > 0:
+            if self.t_acc_fps.get(batch_idx) is None:
+                out_box, out_cls, out_land = self.teacher_forward(images)
+                t_l_cls, t_l_box, t_l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
+            metrics["val/t_acc_fp"] = 1.0/t_l_box
+
         # # Store for AP calc
         # for i in range(images.size(0)):
         #     boxes, scores, keep_idx = detect_one_image(
@@ -497,14 +513,13 @@ class LitRetinaFace(LitBit):
         #     self._ap_preds.append({"boxes": boxes.cpu(), "scores": scores.cpu()})
         #     self._ap_gts.append(raw_targets[i].bbox.cpu())
 
-        return Metrics(loss=l_cls + l_box + l_land, metrics={"val/acc": 1.0/l_box})
+        return Metrics(loss=s_l_cls+s_l_box+s_l_land, metrics=metrics)
 
-    def on_validation_epoch_start(self, epoch):
-        self._ap_preds, self._ap_gts = [], []
-        self._ternary_snapshot = self._clone_student()
+    # def on_validation_epoch_start(self, epoch):
+    #     self._ap_preds, self._ap_gts = [], []
+    #     self._ternary_snapshot = self._clone_student()
 
-    def on_validation_epoch_end(self, epoch):
-        pass
+    # def on_validation_epoch_end(self, epoch):
         # ap50 = ap_at_iou(self._ap_preds, self._ap_gts, iou_thr=0.5)
         # # Log via print or trainer logger
         # print(f"\nEpoch {epoch} | Val AP50: {ap50:.4f}")
@@ -565,8 +580,9 @@ def main():
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
     )
-    trainer.fit(lit, datamodule=RetinaFaceDataModule(dm_conf,anchors, pos_iou, neg_iou, variances))
-    return lit, dm_conf.build()
+    dm = RetinaFaceDataModule(dm_conf,anchors, pos_iou, neg_iou, variances)
+    trainer.fit(lit, datamodule=dm)
+    return lit, dm
 
 if __name__ == "__main__":
     lit, dm =  main()
