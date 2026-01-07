@@ -444,7 +444,7 @@ class LitRetinaFace(LitBit):
             assert out[0].shape[1] == self.anchors.shape[0], \
                 f"Anchor mismatch! Model: {out[0].shape[1]}, Anchors: {self.anchors.shape[0]}"
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch:Tuple[torch.Tensor, List[RetinaFaceTensor]], batch_idx):
         images, raw_targets = batch        
         out_box, out_cls, out_land = self.student(images)
         tgt_box = torch.stack([t.bbox for t in raw_targets]).to(device=images.device)
@@ -467,6 +467,9 @@ class LitRetinaFace(LitBit):
                 self.kd(out_cls, t_cls) + self.kd(out_box, t_box) + self.kd(out_land, t_land)
             )
             stats["kd"] = loss_kd
+            stats["ce"] *= (1.0 - self.alpha_kd)
+            stats["bb"] *= (1.0 - self.alpha_kd)
+            stats["lm"] *= (1.0 - self.alpha_kd)
             base_loss = (1.0 - self.alpha_kd) * base_loss + loss_kd
 
         if self.hint:
@@ -485,24 +488,26 @@ class LitRetinaFace(LitBit):
         
         l_cls, l_box, l_land = self.loss_fn((out_box, out_cls, out_land), (tgt_box, tgt_cls, tgt_land))
         
-        # Store for AP calc
-        for i in range(images.size(0)):
-            boxes, scores, keep_idx = detect_one_image(
-                self.anchors, out_box[i], out_cls[i], self.variances, 
-                score_thr=0.02, nms_iou=0.4
-            )
-            self._ap_preds.append({"boxes": boxes.cpu(), "scores": scores.cpu()})
-            self._ap_gts.append(raw_targets[i].bbox.cpu())
+        # # Store for AP calc
+        # for i in range(images.size(0)):
+        #     boxes, scores, keep_idx = detect_one_image(
+        #         self.anchors, out_box[i], out_cls[i], self.variances, 
+        #         score_thr=0.02, nms_iou=0.4
+        #     )
+        #     self._ap_preds.append({"boxes": boxes.cpu(), "scores": scores.cpu()})
+        #     self._ap_gts.append(raw_targets[i].bbox.cpu())
 
-        return Metrics(loss=l_cls + l_box + l_land, metrics={"val_ce": l_cls})
+        return Metrics(loss=l_cls + l_box + l_land, metrics={"val/acc": 1.0/l_box})
 
     def on_validation_epoch_start(self, epoch):
         self._ap_preds, self._ap_gts = [], []
+        self._ternary_snapshot = self._clone_student()
 
     def on_validation_epoch_end(self, epoch):
-        ap50 = ap_at_iou(self._ap_preds, self._ap_gts, iou_thr=0.5)
-        # Log via print or trainer logger
-        print(f"\nEpoch {epoch} | Val AP50: {ap50:.4f}")
+        pass
+        # ap50 = ap_at_iou(self._ap_preds, self._ap_gts, iou_thr=0.5)
+        # # Log via print or trainer logger
+        # print(f"\nEpoch {epoch} | Val AP50: {ap50:.4f}")
 
     def configure_optimizers(self, trainer=None):
         opt = torch.optim.AdamW(self.configure_optimizer_params(), lr=self.lr, weight_decay=self.wd)
