@@ -989,6 +989,12 @@ class RetinaFaceTensor(BaseModel):
             bbox_targets: [N, 4]
             landmark_targets: [N, 10]
         """
+        # landmark is [N, 10] or [N, 5, 2]. Ensure [N, 5, 2] for match_anchors
+        if gt_landmarks.dim() == 2:
+            gt_landmarks = gt_landmarks.view(-1, 5, 2)
+        else:
+            gt_landmarks = gt_landmarks
+
         if gt_boxes.numel() == 0:
             device = anchors.device
             return (torch.zeros(anchors.size(0), dtype=torch.long, device=device),
@@ -1053,35 +1059,38 @@ class RetinaFaceTensor(BaseModel):
         return labels, bbox_targets, landmark_targets
     
     def filter_landmarks(self, bbox_ids):
-        self.landmark = self.landmark.reshape(-1, 5, 2)[bbox_ids].reshape(-1, 2)
-        self.landmark_vis = self.landmark_vis.reshape(-1, 5)[bbox_ids].reshape(-1)
+        # land: (num_boxes, 5, 2)
+        land = self.landmark.reshape(-1, 5, 2)[bbox_ids]          # (M, 5, 2)
+        vis  = self.landmark_vis.reshape(-1, 5)[bbox_ids]         # (M, 5)
+        if type(self.img) is torch.Tensor:
+            c, h, w = self.img.shape
+        else:
+            h, w, c = self.img.shape
 
-        invisible = (self.landmark[:,0]<0) | (self.landmark[:,1]<0)
-        invisible = invisible | (self.landmark[:,1]>=self.img.shape[0]) | (self.landmark[:,0]>=self.img.shape[1])
-        self.landmark[invisible] = -1.0
-        self.landmark_vis[invisible] = -1.0
-        
-        self.landmark = self.landmark.reshape(-1, 2)
-        self.landmark_vis = self.landmark_vis.reshape(-1)
+        x = land[..., 0]
+        y = land[..., 1]
+
+        invisible = (x < 0) | (y < 0) | (x >= w) | (y >= h)        # (M, 5)
+
+        land[invisible] = -1.0                                     # broadcasts into last dim (2)
+        vis[invisible] = -1.0
+
+        self.landmark = land.reshape(-1, 2)                        # (M*5, 2)
+        self.landmark_vis = vis.reshape(-1)                        # (M*5,)
+
 
 
     def prepare(self, anchors, pos_iou, neg_iou, variances):
 
         if len(self.landmark)//5 != len(self.bbox):
             self.show()
-            raise ValueError(f"{len(self.landmark)//5}(x5 points) landmarks must same to {len(self.bbox)} bboxes!")  
+            raise ValueError(f"{len(self.landmark)//5}(x5 points) landmarks not fit {len(self.bbox)} bboxes!")  
         
         t = self.as_tensor()
         device = anchors.device
-        # t.landmark is [N, 10] or [N, 5, 2]. Ensure [N, 5, 2] for match_anchors
-        if t.landmark.dim() == 2:
-            lm_reshaped = t.landmark.view(-1, 5, 2)
-        else:
-            lm_reshaped = t.landmark
-
         
         t.label, t.bbox, t.landmark = RetinaFaceTensor.match_anchors(
-            anchors, t.bbox.to(device), lm_reshaped.to(device),
+            anchors, t.bbox.to(device), t.landmark.to(device),
             pos_iou, neg_iou, variances
         )
         return t
