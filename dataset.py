@@ -1096,7 +1096,7 @@ class RetinaFaceTensor(BaseModel):
         return t
     
     def show(
-        self,
+        self,mean=None,std=None,
         ax=None,
         figsize=(8, 8),
         title: str = "",
@@ -1126,12 +1126,17 @@ class RetinaFaceTensor(BaseModel):
             raise ValueError("No image loaded. Provide `img` or `file`.")
 
         if hasattr(img, "detach"):  # torch tensor
-            img_np = img.detach().cpu().numpy()
+            mean = torch.tensor(mean, dtype=img.dtype).view(-1, 1, 1)
+            std = torch.tensor(std, dtype=img.dtype).view(-1, 1, 1)
+            img = img * std + mean.clamp(0, 1)
+            img_np = img.detach().cpu().numpy() *255
             # allow CHW or HWC
             if img_np.ndim == 3 and img_np.shape[0] in (1, 3) and img_np.shape[-1] not in (1, 3):
                 img_np = np.transpose(img_np, (1, 2, 0))
         else:
             img_np = np.asarray(img)
+        
+        img_np = img_np.astype(np.uint8)
 
         if img_np.ndim == 2:
             img_np = np.stack([img_np] * 3, axis=-1)
