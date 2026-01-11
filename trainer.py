@@ -210,7 +210,7 @@ class ExportBestTernary:
 
         acc_tern = _as_float(metrics.get("val/acc_tern_mean"))
         if acc_tern is None:
-            return
+            acc_tern = _as_float(metrics.get("val/loss_mean"))
 
         unwrapped: "LitBit" = trainer.accelerator.unwrap_model(model)
         config = unwrapped.config
@@ -764,7 +764,7 @@ class LitBitConfig(BaseModel):
     student: Optional[Any] = None
     teacher: Optional[Any] = None
 
-    model_name: str = Field(default="mbv2", description="Model family/name identifier.")
+    model_name: str = Field(default="", description="Model family/name identifier.")
     model_size: str = Field(default="", description="Optional model size preset (empty = default).")
     model_weights: str = Field(default="", description="Optional path/name for pretrained weights (empty = none).")
 
