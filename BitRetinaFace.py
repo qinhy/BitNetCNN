@@ -390,6 +390,8 @@ class RetinaFaceConfig(CommonTrainConfig, LitBitConfig):
     data_dir: str = "./data"
     export_dir: str = "./ckpt_widerface_retinaface"
     dataset: Optional[Dict] = None
+    model_name: str = Field(default="retface", description="Model family/name identifier.")
+    model_size: str = Field(default="rn50", description="Optional model size preset (empty = default).")
 
     epochs: int = 50
     batch_size: int = 2
