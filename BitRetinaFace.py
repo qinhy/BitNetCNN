@@ -194,32 +194,33 @@ class RetinaFaceAnchors:
         self.steps = steps
         self.clip = clip
 
-    def __call__(self, image_size: Tuple[int, int], device="cpu") -> torch.Tensor:
+    def __call__(self, image_size: Tuple[int, int], device="cpu", dtype=torch.float32) -> torch.Tensor:
         img_h, img_w = image_size
-        anchors = []
-        for step, sizes in zip(self.steps, self.min_sizes):
-            feature_h, feature_w = math.ceil(img_h / step), math.ceil(img_w / step)
-            
-            # Vectorized grid generation
-            shifts_x = torch.arange(0, feature_w, device=device) * step
-            shifts_y = torch.arange(0, feature_h, device=device) * step
-            shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x, indexing='ij')
-            
-            # Center points
-            cx = (shift_x + 0.5 * step) / img_w
-            cy = (shift_y + 0.5 * step) / img_h
-            
-            # Expand for each anchor size at this level
-            for size in sizes:
-                anchors.append(torch.stack([
-                    cx, cy, 
-                    torch.full_like(cx, size / img_w), 
-                    torch.full_like(cy, size / img_h)
-                ], dim=-1)) # [H, W, 4]
+        all_levels = []
 
-        # Flatten list of tensors
-        anchors = torch.cat([a.view(-1, 4) for a in anchors], dim=0)
-        if self.clip: anchors.clamp_(0.0, 1.0)
+        for step, sizes in zip(self.steps, self.min_sizes):
+            feat_h, feat_w = math.ceil(img_h / step), math.ceil(img_w / step)
+
+            shifts_x = torch.arange(feat_w, device=device, dtype=dtype) * step
+            shifts_y = torch.arange(feat_h, device=device, dtype=dtype) * step
+            yy, xx = torch.meshgrid(shifts_y, shifts_x, indexing="ij")
+
+            cx = (xx + 0.5 * step) / img_w   # [H,W]
+            cy = (yy + 0.5 * step) / img_h   # [H,W]
+
+            A = len(sizes)
+            cx = cx[..., None].expand(feat_h, feat_w, A)  # [H,W,A]
+            cy = cy[..., None].expand(feat_h, feat_w, A)
+
+            ws = (torch.tensor(sizes, device=device, dtype=dtype) / img_w).view(1, 1, A).expand(feat_h, feat_w, A)
+            hs = (torch.tensor(sizes, device=device, dtype=dtype) / img_h).view(1, 1, A).expand(feat_h, feat_w, A)
+
+            anchors_lvl = torch.stack([cx, cy, ws, hs], dim=-1)  # [H,W,A,4]
+            all_levels.append(anchors_lvl.reshape(-1, 4))        # flatten with A fastest (matches PriorBox)
+
+        anchors = torch.cat(all_levels, dim=0)
+        if self.clip:
+            anchors.clamp_(0.0, 1.0)
         return anchors
 
 def decode_boxes(anchors, deltas, variances):
@@ -243,7 +244,7 @@ def detect_one_image(anchors, bbox_deltas, cls_logits, variances, score_thr=0.02
     keep = scores > score_thr
     boxes, scores = boxes[keep], scores[keep]
     if boxes.numel() == 0:
-        return boxes, scores
+        return boxes, scores, None
 
     keep_idx = nms(boxes, scores, nms_iou)
     return boxes[keep_idx], scores[keep_idx], keep_idx
@@ -531,23 +532,23 @@ class LitRetinaFace(LitBit):
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
         return opt, sched, "epoch"
     
-    def show_predict_examples(self, images):
-        self.student.eval()
+    def show_predict_examples(self, images, score_thr=0.5, nms_iou=0.4):
+        model = self.teacher
+        model.eval()
         preds = []
         with torch.no_grad():
             mean = (0.485, 0.456, 0.406)
             std = (0.229, 0.224, 0.225)
-            out_box, out_cls, out_land = self.student(images)
+            out_box, out_cls, out_land = model(images)
             for i in range(images.size(0)):
                 boxes, scores, keep_idx = detect_one_image(
                     self.anchors, out_box[i], out_cls[i], self.variances, 
-                    score_thr=0.02, nms_iou=0.4
+                    score_thr=score_thr, nms_iou=nms_iou
                 )
                 land  = out_land[i][keep_idx]
                 y = RetinaFaceTensor(img=images[i], bbox=boxes, landmark=land, score=scores)
                 preds.append(y)
-        RetinaFaceDataModule.show_examples_static(images, preds, mean, std)
-
+                y.show(mean,std)
 
 def make_resnet50_teacher(device="cpu"):
     m = torch.hub.load("qinhy/Pytorch_Retinaface", "retinaface_resnet50", pretrained=True)
@@ -599,5 +600,7 @@ def main():
 if __name__ == "__main__":
     lit, dm =  main()
     dm.setup()
-    images, targets = next(iter(dm.val_dataloader()))
+    it = iter(dm.val_dataloader())
+    images, targets = next(it)
+    images, targets = next(it)
     lit.show_predict_examples(images)
