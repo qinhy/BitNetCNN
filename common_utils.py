@@ -5,10 +5,8 @@ This module contains shared components used across different BitNet model implem
 
 import os
 import re
-import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
 import warnings
-from PIL import Image, ImageTk
+from PIL import Image
 
 from typing import Optional, Sequence, Tuple, List, Union
 import torch
@@ -589,6 +587,11 @@ def GUI_tool(model,
                The preview image may be scaled ONLY for display.
     """
     # --- Setup model/device ---
+
+    import tkinter as tk
+    from tkinter import filedialog, ttk, messagebox
+    from PIL import Image, ImageTk
+    
     model.eval()
     if device is None:
         try:
