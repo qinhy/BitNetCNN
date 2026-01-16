@@ -11,7 +11,7 @@ from torchvision.ops import nms, box_iou
 # -----------------------------------------------------------------------------
 # Imports from your specific environment (BitNet & Trainer Stack)
 # -----------------------------------------------------------------------------
-from common_utils import summ
+from common_utils import convert_to_ternary, load_zip_weights, summ
 from dataset import DataModuleConfig, RetinaFaceDataModule, RetinaFaceTensor
 from trainer import AccelTrainer, CommonTrainConfig, ExportBestTernary, LitBit, LitBitConfig, Metrics, MetricsManager, MetricsTracer
 
@@ -223,31 +223,20 @@ class RetinaFaceAnchors:
             anchors.clamp_(0.0, 1.0)
         return anchors
 
-def decode_boxes(anchors, deltas, variances):
-    """Decodes deltas back to [x1, y1, x2, y2]."""
-    v0, v1 = variances
-    cx, cy, w, h = anchors.unbind(1)
-    dx, dy, dw, dh = deltas.unbind(1)
-
-    gx = cx + dx * v0 * w
-    gy = cy + dy * v0 * h
-    gw = w * torch.exp(dw * v1)
-    gh = h * torch.exp(dh * v1)
-
-    return torch.stack([gx - gw/2, gy - gh/2, gx + gw/2, gy + gh/2], dim=1)
-
-def detect_one_image(anchors, bbox_deltas, cls_logits, variances, score_thr=0.02, nms_iou=0.4):
+def detect_one_image(anchors, bbox_deltas, cls_logits, landms, variances, score_thr=0.02, nms_iou=0.4):
     """Inference utility for a single image."""
     scores = cls_logits.softmax(dim=-1)[:, 1]
-    boxes = decode_boxes(anchors, bbox_deltas, variances).clamp(0.0, 1.0)
+    boxes = RetinaFaceTensor.decode_boxes(anchors, bbox_deltas, variances).clamp(0.0, 1.0)
+    lms_norm = RetinaFaceTensor.decode_landmarks(anchors, landms, variances).clamp(0.0, 1.0)
 
     keep = scores > score_thr
-    boxes, scores = boxes[keep], scores[keep]
+    boxes, scores, lms_norm = boxes[keep], scores[keep], lms_norm[keep]
+
     if boxes.numel() == 0:
-        return boxes, scores, None
+        return boxes, scores, lms_norm, None
 
     keep_idx = nms(boxes, scores, nms_iou)
-    return boxes[keep_idx], scores[keep_idx], keep_idx
+    return boxes[keep_idx], scores[keep_idx], lms_norm[keep_idx], keep_idx
 
 def ap_at_iou(preds, gts, iou_thr=0.5):
     """Simplified AP calculation for validation logging."""
@@ -533,7 +522,8 @@ class LitRetinaFace(LitBit):
         return opt, sched, "epoch"
     
     def show_predict_examples(self, images, score_thr=0.5, nms_iou=0.4):
-        model = self.teacher
+        model = self.student
+        # model = self.teacher
         model.eval()
         preds = []
         with torch.no_grad():
@@ -541,12 +531,12 @@ class LitRetinaFace(LitBit):
             std = (0.229, 0.224, 0.225)
             out_box, out_cls, out_land = model(images)
             for i in range(images.size(0)):
-                boxes, scores, keep_idx = detect_one_image(
-                    self.anchors, out_box[i], out_cls[i], self.variances, 
+                boxes, scores, lands, keep_idx = detect_one_image(
+                    self.anchors, out_box[i], out_cls[i], out_land[i], 
+                    self.variances, 
                     score_thr=score_thr, nms_iou=nms_iou
                 )
-                land  = out_land[i][keep_idx]
-                y = RetinaFaceTensor(img=images[i], bbox=boxes, landmark=land, score=scores)
+                y = RetinaFaceTensor(img=images[i], bbox=boxes, landmark=lands, score=scores)
                 preds.append(y)
                 y.show(mean,std)
 
@@ -601,6 +591,5 @@ if __name__ == "__main__":
     lit, dm =  main()
     dm.setup()
     it = iter(dm.val_dataloader())
-    images, targets = next(it)
-    images, targets = next(it)
-    lit.show_predict_examples(images)
+    for images, targets in it:
+        lit.show_predict_examples(images)

@@ -794,7 +794,10 @@ class RetinaFaceTensor(BaseModel):
     img_w: int = Field(default=0)
     img:Optional[Any] = Field(default=None,exclude=True)
     label:Optional[Any] = Field(default=None,exclude=True)
-    bbox:Optional[Any] = Field(default=None,exclude=True) # xyxy
+    # xyxy
+    # tensor : Normalized coords (ratio, 0–1)
+    # numpy : Pixel coords (up to image size)
+    bbox:Optional[Any] = Field(default=None,exclude=True) 
     landmark:Optional[Any] = Field(default=None,exclude=True) # [lx, ly, rx, ry, nx, ny, mlx, mly, mrx, mry] as shape (N * 5,2)
     landmark_vis:Optional[Any] = Field(default=None,exclude=True) # [lv, rv, nv, mlv, mrv] as shape (N * 5)
 
@@ -953,10 +956,10 @@ class RetinaFaceTensor(BaseModel):
             bbox = b_norm.detach().cpu().numpy()
         # landmarks: (N,5,2)
         if self.landmark is not None:
-            p_norm = self.landmark.clone() # (N,5,2)
-            p_norm[..., 0] *= float(self.img_w)
-            p_norm[..., 1] *= float(self.img_h)
-            landmark = p_norm.detach().cpu().numpy()
+            p_norm = self.landmark.clone().reshape(-1, 2)
+            wh = torch.Tensor([self.img_w, self.img_h]).to(dtype=torch.float32)
+            p_norm *= wh
+            landmark = p_norm.detach().cpu().numpy().reshape(-1,5,2) # (N,5,2)
         return bbox,landmark
     
     def as_numpy(self):
@@ -965,23 +968,136 @@ class RetinaFaceTensor(BaseModel):
                                      landmark_vis=self.landmark_vis))
 
     @staticmethod
-    def encode_boxes(anchors, gt_boxes, variances):
-        """Encodes GT boxes into delta offsets relative to anchors."""
-        cx, cy, w, h = anchors.unbind(1)
-        gx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
-        gy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
-        gw = gt_boxes[:, 2] - gt_boxes[:, 0]
-        gh = gt_boxes[:, 3] - gt_boxes[:, 1]
+    def encode_boxes(
+        anchors: torch.Tensor,
+        gt_boxes_xyxy: torch.Tensor,
+        variances: Tuple[float, float] = (0.1, 0.2),
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        anchors:       [N,4] (cx,cy,w,h)
+        gt_boxes_xyxy: [N,4] (x1,y1,x2,y2) in same frame as anchors
+        returns:       [N,4] (dx,dy,dw,dh)
+        """
+        if anchors.ndim != 2 or anchors.shape[1] != 4:
+            raise ValueError(f"anchors must be [N,4], got {tuple(anchors.shape)}")
+        if gt_boxes_xyxy.ndim != 2 or gt_boxes_xyxy.shape[1] != 4:
+            raise ValueError(f"gt_boxes_xyxy must be [N,4], got {tuple(gt_boxes_xyxy.shape)}")
+        if anchors.shape[0] != gt_boxes_xyxy.shape[0]:
+            raise ValueError("anchors and gt_boxes_xyxy must have same N")
 
-        eps = 1e-6
-        dx = (gx - cx) / (w + eps) / variances[0]
-        dy = (gy - cy) / (h + eps) / variances[0]
-        dw = torch.log((gw + eps) / (w + eps)) / variances[1]
-        dh = torch.log((gh + eps) / (h + eps)) / variances[1]
-        return torch.stack([dx, dy, dw, dh], dim=1)
+        v0, v1 = variances
+        cx, cy, aw, ah = anchors.unbind(dim=1)
+
+        x1, y1, x2, y2 = gt_boxes_xyxy.unbind(dim=1)
+        gx = (x1 + x2) * 0.5
+        gy = (y1 + y2) * 0.5
+        gw = (x2 - x1)
+        gh = (y2 - y1)
+
+        aw = aw.clamp_min(eps)
+        ah = ah.clamp_min(eps)
+        gw = gw.clamp_min(eps)
+        gh = gh.clamp_min(eps)
+
+        dx = (gx - cx) / aw / v0
+        dy = (gy - cy) / ah / v0
+        dw = torch.log(gw / aw) / v1
+        dh = torch.log(gh / ah) / v1
+
+        return torch.stack((dx, dy, dw, dh), dim=1)
 
     @staticmethod
-    def match_anchors(anchors, gt_boxes, gt_landmarks, pos_iou, neg_iou, variances):
+    def decode_boxes(
+        anchors: torch.Tensor,
+        deltas: torch.Tensor,
+        variances: Tuple[float, float] = (0.1, 0.2),
+        clip: bool = False,
+    ) -> torch.Tensor:
+        """
+        anchors:  [N,4] (cx,cy,w,h)
+        deltas:   [N,4] (dx,dy,dw,dh)
+        returns:  [N,4] (x1,y1,x2,y2) in same frame as anchors (often normalized)
+        """
+        if anchors.ndim != 2 or anchors.shape[1] != 4:
+            raise ValueError(f"anchors must be [N,4], got {tuple(anchors.shape)}")
+        if deltas.ndim != 2 or deltas.shape[1] != 4:
+            raise ValueError(f"deltas must be [N,4], got {tuple(deltas.shape)}")
+        if anchors.shape[0] != deltas.shape[0]:
+            raise ValueError("anchors and deltas must have same N")
+
+        v0, v1 = variances
+        cx, cy, aw, ah = anchors.unbind(dim=1)
+        dx, dy, dw, dh = deltas.unbind(dim=1)
+
+        gx = cx + dx * v0 * aw
+        gy = cy + dy * v0 * ah
+        gw = aw * torch.exp(dw * v1)
+        gh = ah * torch.exp(dh * v1)
+
+        x1 = gx - 0.5 * gw
+        y1 = gy - 0.5 * gh
+        x2 = gx + 0.5 * gw
+        y2 = gy + 0.5 * gh
+
+        out = torch.stack((x1, y1, x2, y2), dim=1)
+        if clip:
+            out = out.clamp(0.0, 1.0)
+        return out
+
+    @staticmethod
+    def encode_landmarks(
+        anchors: torch.Tensor,
+        gt_landmarks: torch.Tensor,
+        variances: Tuple[float, float] = (0.1, 0.2),
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """
+        anchors:      [N,4]  (cx,cy,w,h)
+        gt_landmarks: [N,10] (x1,y1,...,x5,y5) same frame as anchors
+        returns:      [N,10] (dx1,dy1,...,dx5,dy5)
+        """
+        if anchors.shape[0] != gt_landmarks.shape[0]:
+            raise ValueError("anchors and gt_landmarks must have same N")
+
+        v0, _ = variances
+        cx, cy, aw, ah = anchors.unbind(dim=1)
+
+        aw = aw.clamp_min(eps)
+        ah = ah.clamp_min(eps)
+
+        gt = gt_landmarks.reshape(-1, 5, 2)  # internal only
+        dx = (gt[:, :, 0] - cx[:, None]) / aw[:, None] / v0
+        dy = (gt[:, :, 1] - cy[:, None]) / ah[:, None] / v0
+
+        return torch.stack((dx, dy), dim=2).reshape(-1, 10)
+
+    @staticmethod
+    def decode_landmarks(
+        anchors: torch.Tensor,
+        landm_deltas: torch.Tensor,
+        variances: Tuple[float, float] = (0.1, 0.2),
+    ) -> torch.Tensor:
+        """
+        anchors:      [N,4]  (cx,cy,w,h)
+        landm_deltas: [N,10] (dx1,dy1,...,dx5,dy5)
+        returns:      [N,10] (x1,y1,...,x5,y5) same frame as anchors
+        """
+        if anchors.shape[0] != landm_deltas.shape[0]:
+            raise ValueError("anchors and landm_deltas must have same N")
+
+        v0, _ = variances
+        cx, cy, aw, ah = anchors.unbind(dim=1)
+
+        d = landm_deltas.reshape(-1, 5, 2)  # internal only
+        x = cx[:, None] + d[:, :, 0] * v0 * aw[:, None]
+        y = cy[:, None] + d[:, :, 1] * v0 * ah[:, None]
+
+        return torch.stack((x, y), dim=2).reshape(-1, 10)
+    
+    @staticmethod
+    def match_anchors(anchors:torch.Tensor, gt_boxes:torch.Tensor, gt_landmarks:torch.Tensor,
+                      pos_iou, neg_iou, variances):
         """
         Matches anchors to Ground Truth.
         Returns:
@@ -1028,33 +1144,27 @@ class RetinaFaceTensor(BaseModel):
         matched_gt_boxes = gt_boxes[best_target_idx]
         bbox_targets = RetinaFaceTensor.encode_boxes(anchors, matched_gt_boxes, variances)
         
-        # Landmark encoding (only for positives)
+        # Landmark encoding (only for positives)        
         matched_landmarks = gt_landmarks[best_target_idx]
+        # matched GT landmarks per anchor: [A,5,2]
+        matched_lm = matched_landmarks[best_target_idx]
+
+        # initialize targets with -1 (meaning "no landmark supervision")
         landmark_targets = torch.full((anchors.size(0), 10), -1.0, device=anchors.device)
-        
+
         pos_mask = labels == 1
         if pos_mask.any():
-            # Check validity: [K, 5, 2] -> all coords >= 0
-            valid_lm_mask = (matched_landmarks >= 0).all(dim=1).all(dim=1)
-            
-            # We need to process all positive anchors, but only write valid LMs
-            # We can do this by masking the positive set
-            p_anchors = anchors[pos_mask]
-            p_lm = matched_landmarks[pos_mask]
-            p_valid = valid_lm_mask[pos_mask]
-            
-            if p_valid.any():
-                # Encoding logic: (x - cx)/w, (y - cy)/h
-                # p_lm: [P, 5, 2], p_anchors: [P, 4]
-                enc_lm_x = (p_lm[..., 0] - p_anchors[:, 0].unsqueeze(1)) / (p_anchors[:, 2].unsqueeze(1) * variances[0])
-                enc_lm_y = (p_lm[..., 1] - p_anchors[:, 1].unsqueeze(1)) / (p_anchors[:, 3].unsqueeze(1) * variances[0])
-                enc_lm = torch.stack([enc_lm_x, enc_lm_y], dim=-1).view(-1, 10)
-                
-                # Apply to targets
-                current_targets = landmark_targets[pos_mask]
-                # Only update valid ones
-                current_targets[p_valid] = enc_lm[p_valid]
-                landmark_targets[pos_mask] = current_targets
+            # Valid if all coords >= 0 (your convention)
+            valid_lm_mask = (matched_lm >= 0).all(dim=(1, 2))  # [A]
+
+            valid_mask = pos_mask & valid_lm_mask
+            if valid_mask.any():
+                # encode only valid positives
+                encoded = RetinaFaceTensor.encode_landmarks(anchors[valid_mask],
+                                        matched_lm[valid_mask].reshape(-1, 10),
+                                        variances=variances)  # [V,10]
+
+                landmark_targets[valid_mask] = encoded
 
         return labels, bbox_targets, landmark_targets
     
@@ -1148,66 +1258,11 @@ class RetinaFaceTensor(BaseModel):
         self.img_h, self.img_w = H, W
 
         # --------- prepare bbox/landmarks as numpy ----------
-        def to_np(x):
-            if x is None:
-                return None
-            if hasattr(x, "detach"):
-                return x.detach().cpu().numpy()
-            return np.asarray(x)
+        self_np = self.as_numpy()
 
-        b = to_np(self.bbox)
-        lm = to_np(self.landmark)
-        lmv = to_np(self.landmark_vis)
-
-        # Normalize shapes
-        if b is not None:
-            b = np.asarray(b, dtype=np.float32).reshape(-1, 4)
-        else:
-            b = np.zeros((0, 4), dtype=np.float32)
-
-        if lm is not None:
-            lm = np.asarray(lm, dtype=np.float32)
-            if lm.size == 0:
-                lm = lm.reshape(0, 2)
-            elif lm.ndim == 1:
-                lm = lm.reshape(-1, 2)
-            elif lm.ndim == 3 and lm.shape[-1] == 2:  # (N,5,2)
-                lm = lm.reshape(-1, 2)
-        else:
-            lm = np.zeros((0, 2), dtype=np.float32)
-
-        if lmv is not None:
-            lmv = np.asarray(lmv, dtype=np.float32).reshape(-1)
-        # else: None is ok
-
-        # --------- decide coord space (pixels vs normalized) ----------
-        def looks_normalized(arr: np.ndarray) -> bool:
-            if arr.size == 0:
-                return False
-            finite = arr[np.isfinite(arr)]
-            if finite.size == 0:
-                return False
-            # ignore -1 "missing"
-            finite = finite[finite >= 0]
-            if finite.size == 0:
-                return False
-            return float(finite.max()) <= 1.5  # small cushion
-
-        if assume_normalized is None:
-            # If either bbox or landmark look normalized, treat as normalized
-            assume_normalized = looks_normalized(b) or looks_normalized(lm)
-
-        if assume_normalized:
-            # convert to pixels for display
-            if b.size:
-                b = b * np.array([W, H, W, H], dtype=np.float32)
-            if lm.size:
-                lm_pix = lm.copy()
-                neg_mask = lm_pix < 0
-                lm_pix[:, 0] *= float(W)
-                lm_pix[:, 1] *= float(H)
-                lm_pix[neg_mask] = -1.0
-                lm = lm_pix
+        b = self_np.bbox
+        lm = self_np.landmark
+        lmv = self_np.landmark_vis
 
         # --------- build axes ----------
         created_ax = False
