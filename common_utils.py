@@ -5,10 +5,12 @@ This module contains shared components used across different BitNet model implem
 
 import os
 import re
+import tempfile
 import warnings
+import zipfile
 from PIL import Image
 
-from typing import Optional, Sequence, Tuple, List, Union
+from typing import Dict, Optional, Sequence, Tuple, List, Union
 import torch
 
 from bitlayers.bit import Bit
@@ -850,6 +852,45 @@ def export_onnx(model, dummy_input, path="model.onnx"):
     set_export_mode(model, True)
     exported = torch.onnx.dynamo_export(model, dummy_input)
     exported.save(path)
+
+def load_zip_weights(
+    checkpoint_path: Optional[str] = None,
+    device: str = "cpu"
+) -> Optional[Dict[str, torch.Tensor]]:
+    state_dict = None
+
+    if checkpoint_path.endswith(".zip"):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with zipfile.ZipFile(checkpoint_path, "r") as zf:
+                pt_files = [f for f in zf.namelist() if f.endswith(".pt")]
+                if not pt_files:
+                    raise ValueError(f"No .pt file found in zip: {checkpoint_path}")
+                pt_file = pt_files[0]
+                zf.extract(pt_file, tmpdir)
+                extracted = os.path.join(tmpdir, pt_file)
+                raw = torch.load(extracted, map_location=device, weights_only=False)
+    else:
+        raw = torch.load(extracted, map_location=device, weights_only=False)
+    
+    if checkpoint_path:
+        try:
+            if isinstance(raw, dict):
+                # Prefer EMA if present
+                for key in ("model_ema", "ema", "ema_state_dict"):
+                    if key in raw and isinstance(raw[key], dict):
+                        state_dict = raw[key]
+                # Then standard keys
+                for key in ("model", "state_dict"):
+                    if key in raw and isinstance(raw[key], dict):
+                        state_dict = raw[key]
+            # Might already be a raw state_dict (e.g., OrderedDict)
+            if hasattr(raw, "keys") and hasattr(raw, "items"):
+                state_dict = raw  # type: ignore
+            else:
+                raise ValueError("Unrecognized checkpoint format; no state_dict found.")
+        except Exception as e:
+            print(f"[warn] Could not load local checkpoint '{checkpoint_path}': {e}")
+    return state_dict
 
 # if __name__ == '__main__':
 #     freeze_support()
