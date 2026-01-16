@@ -265,11 +265,11 @@ MNv5_300M_ARCH_DEF = [
     ],
 ]
 
-import argparse
 import re
 from functools import partial
-from typing import List, Optional, Sequence, Union
+from typing import List, Literal, Optional, Sequence, Union
 
+from pydantic import BaseModel, Field
 from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
@@ -282,6 +282,8 @@ from bitlayers.convs import Conv2dModels
 from bitlayers.norms import NormModels
 from bitlayers.uir import UniversalInvertedResidual
 from common_utils import *
+from dataset import DataModuleConfig
+from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig
 
 
 # --- small helper: simplified version of timm's feature_take_indices ----------------
@@ -1042,7 +1044,12 @@ def main_mnv5():
         teacher_pretrained=args.teacher_pretrained
     )
     dm = dm.build()
-    trainer = setup_trainer(args)
+    trainer = AccelTrainer(
+        max_epochs=config.epochs, 
+        mixed_precision="bf16" if config.amp else "no",
+        gradient_accumulation_steps=1,
+        log_every_n_steps=10
+    )
     trainer.fit(lit, datamodule=dm)
 
 
