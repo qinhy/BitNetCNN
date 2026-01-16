@@ -987,25 +987,19 @@ class RetinaFaceTensor(BaseModel):
             raise ValueError("anchors and gt_boxes_xyxy must have same N")
 
         v0, v1 = variances
-        cx, cy, aw, ah = anchors.unbind(dim=1)
 
-        x1, y1, x2, y2 = gt_boxes_xyxy.unbind(dim=1)
-        gx = (x1 + x2) * 0.5
-        gy = (y1 + y2) * 0.5
-        gw = (x2 - x1)
-        gh = (y2 - y1)
+        a_xy = anchors[:, 0:2]               # (cx, cy)
+        a_wh = anchors[:, 2:4].clamp_min(eps)  # (aw, ah) clamped exactly like before
 
-        aw = aw.clamp_min(eps)
-        ah = ah.clamp_min(eps)
-        gw = gw.clamp_min(eps)
-        gh = gh.clamp_min(eps)
+        b1 = gt_boxes_xyxy[:, 0:2]           # (x1, y1)
+        b2 = gt_boxes_xyxy[:, 2:4]           # (x2, y2)
+        g_xy = (b1 + b2) * 0.5               # (gx, gy)
+        g_wh = (b2 - b1).clamp_min(eps)      # (gw, gh) clamped exactly like before
 
-        dx = (gx - cx) / aw / v0
-        dy = (gy - cy) / ah / v0
-        dw = torch.log(gw / aw) / v1
-        dh = torch.log(gh / ah) / v1
+        d_xy = (g_xy - a_xy) / a_wh / v0
+        d_wh = torch.log(g_wh / a_wh) / v1
 
-        return torch.stack((dx, dy, dw, dh), dim=1)
+        return torch.cat((d_xy, d_wh), dim=1)
 
     @staticmethod
     def decode_boxes(
@@ -1027,20 +1021,20 @@ class RetinaFaceTensor(BaseModel):
             raise ValueError("anchors and deltas must have same N")
 
         v0, v1 = variances
-        cx, cy, aw, ah = anchors.unbind(dim=1)
-        dx, dy, dw, dh = deltas.unbind(dim=1)
 
-        gx = cx + dx * v0 * aw
-        gy = cy + dy * v0 * ah
-        gw = aw * torch.exp(dw * v1)
-        gh = ah * torch.exp(dh * v1)
+        a_xy = anchors[:, 0:2]  # (cx, cy)
+        a_wh = anchors[:, 2:4]  # (aw, ah)
 
-        x1 = gx - 0.5 * gw
-        y1 = gy - 0.5 * gh
-        x2 = gx + 0.5 * gw
-        y2 = gy + 0.5 * gh
+        d_xy = deltas[:, 0:2]   # (dx, dy)
+        d_wh = deltas[:, 2:4]   # (dw, dh)
 
-        out = torch.stack((x1, y1, x2, y2), dim=1)
+        g_xy = a_xy + d_xy * v0 * a_wh
+        g_wh = a_wh * torch.exp(d_wh * v1)
+
+        x1y1 = g_xy - 0.5 * g_wh
+        x2y2 = g_xy + 0.5 * g_wh
+
+        out = torch.cat((x1y1, x2y2), dim=1)
         if clip:
             out = out.clamp(0.0, 1.0)
         return out
@@ -1059,14 +1053,14 @@ class RetinaFaceTensor(BaseModel):
         if anchors.shape[0] != gt_landmarks.shape[0]:
             raise ValueError("anchors and gt_landmarks must have same N")
 
-        # Encoding logic: (x - cx)/w, (y - cy)/h
-        # gt_landmarks: [N, 5, 2], anchors: [N, 4]
-        gt_landmarks = gt_landmarks.reshape(-1, 5, 2)
-        enc_lm_x = (gt_landmarks[..., 0] - anchors[:, 0].unsqueeze(1)) / (anchors[:, 2].unsqueeze(1) * variances[0])
-        enc_lm_y = (gt_landmarks[..., 1] - anchors[:, 1].unsqueeze(1)) / (anchors[:, 3].unsqueeze(1) * variances[0])
-        enc_lm = torch.stack([enc_lm_x, enc_lm_y], dim=-1).view(-1, 10)
-        
-        return enc_lm
+        v0 = variances[0]
+
+        lm = gt_landmarks.reshape(-1, 5, 2)   # [N,5,2]
+        a = anchors[:, None, :]               # [N,1,4] for broadcasting
+
+        # dx = (x - cx) / (w * v0), dy = (y - cy) / (h * v0)
+        d = (lm - a[..., 0:2]) / (a[..., 2:4] * v0)  # [N,5,2]
+        return d.reshape(-1, 10)
 
     @staticmethod
     def decode_landmarks(
@@ -1082,15 +1076,14 @@ class RetinaFaceTensor(BaseModel):
         if anchors.shape[0] != landm_deltas.shape[0]:
             raise ValueError("anchors and landm_deltas must have same N")
 
-        v0, _ = variances
-        cx, cy, aw, ah = anchors.unbind(dim=1)
+        v0 = variances[0]
 
-        d = landm_deltas.reshape(-1, 5, 2)  # internal only
-        x = cx[:, None] + d[:, :, 0] * v0 * aw[:, None]
-        y = cy[:, None] + d[:, :, 1] * v0 * ah[:, None]
+        d = landm_deltas.reshape(-1, 5, 2)  # [N,5,2]
+        a = anchors[:, None, :]             # [N,1,4]
 
-        return torch.stack((x, y), dim=2).reshape(-1, 10)
-    
+        xy = a[..., 0:2] + d * v0 * a[..., 2:4]  # [N,5,2]
+        return xy.reshape(-1, 10)
+
     @staticmethod
     def match_anchors(anchors:torch.Tensor, gt_boxes:torch.Tensor, gt_landmarks:torch.Tensor,
                       pos_iou, neg_iou, variances):
