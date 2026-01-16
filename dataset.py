@@ -1050,7 +1050,6 @@ class RetinaFaceTensor(BaseModel):
         anchors: torch.Tensor,
         gt_landmarks: torch.Tensor,
         variances: Tuple[float, float] = (0.1, 0.2),
-        eps: float = 1e-6,
     ) -> torch.Tensor:
         """
         anchors:      [N,4]  (cx,cy,w,h)
@@ -1060,17 +1059,14 @@ class RetinaFaceTensor(BaseModel):
         if anchors.shape[0] != gt_landmarks.shape[0]:
             raise ValueError("anchors and gt_landmarks must have same N")
 
-        v0, _ = variances
-        cx, cy, aw, ah = anchors.unbind(dim=1)
-
-        aw = aw.clamp_min(eps)
-        ah = ah.clamp_min(eps)
-
-        gt = gt_landmarks.reshape(-1, 5, 2)  # internal only
-        dx = (gt[:, :, 0] - cx[:, None]) / aw[:, None] / v0
-        dy = (gt[:, :, 1] - cy[:, None]) / ah[:, None] / v0
-
-        return torch.stack((dx, dy), dim=2).reshape(-1, 10)
+        # Encoding logic: (x - cx)/w, (y - cy)/h
+        # gt_landmarks: [N, 5, 2], anchors: [N, 4]
+        gt_landmarks = gt_landmarks.reshape(-1, 5, 2)
+        enc_lm_x = (gt_landmarks[..., 0] - anchors[:, 0].unsqueeze(1)) / (anchors[:, 2].unsqueeze(1) * variances[0])
+        enc_lm_y = (gt_landmarks[..., 1] - anchors[:, 1].unsqueeze(1)) / (anchors[:, 3].unsqueeze(1) * variances[0])
+        enc_lm = torch.stack([enc_lm_x, enc_lm_y], dim=-1).view(-1, 10)
+        
+        return enc_lm
 
     @staticmethod
     def decode_landmarks(
@@ -1144,27 +1140,29 @@ class RetinaFaceTensor(BaseModel):
         matched_gt_boxes = gt_boxes[best_target_idx]
         bbox_targets = RetinaFaceTensor.encode_boxes(anchors, matched_gt_boxes, variances)
         
-        # Landmark encoding (only for positives)        
+        # Landmark encoding (only for positives)
         matched_landmarks = gt_landmarks[best_target_idx]
-        # matched GT landmarks per anchor: [A,5,2]
-        matched_lm = matched_landmarks[best_target_idx]
-
-        # initialize targets with -1 (meaning "no landmark supervision")
         landmark_targets = torch.full((anchors.size(0), 10), -1.0, device=anchors.device)
-
+        
         pos_mask = labels == 1
         if pos_mask.any():
-            # Valid if all coords >= 0 (your convention)
-            valid_lm_mask = (matched_lm >= 0).all(dim=(1, 2))  # [A]
-
-            valid_mask = pos_mask & valid_lm_mask
-            if valid_mask.any():
-                # encode only valid positives
-                encoded = RetinaFaceTensor.encode_landmarks(anchors[valid_mask],
-                                        matched_lm[valid_mask].reshape(-1, 10),
-                                        variances=variances)  # [V,10]
-
-                landmark_targets[valid_mask] = encoded
+            # Check validity: [K, 5, 2] -> all coords >= 0
+            valid_lm_mask = (matched_landmarks >= 0).all(dim=1).all(dim=1)
+            
+            # We need to process all positive anchors, but only write valid LMs
+            # We can do this by masking the positive set
+            p_anchors = anchors[pos_mask]
+            p_lm = matched_landmarks[pos_mask]
+            p_valid = valid_lm_mask[pos_mask]
+            
+            if p_valid.any():
+                enc_lm = RetinaFaceTensor.encode_landmarks(p_anchors, p_lm, variances)
+                
+                # Apply to targets
+                current_targets = landmark_targets[pos_mask]
+                # Only update valid ones
+                current_targets[p_valid] = enc_lm[p_valid]
+                landmark_targets[pos_mask] = current_targets
 
         return labels, bbox_targets, landmark_targets
     
