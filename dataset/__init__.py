@@ -1,4 +1,3 @@
-from .augmentations import get_val_tf
 from .base import DataSetModule
 from .config import DataModuleConfig
 from .cifar import CIFAR100Dataset, CIFAR100DataModule
