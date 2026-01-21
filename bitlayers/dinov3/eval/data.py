@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import Subset
 from torchvision.datasets.vision import StandardTransform
 
-from dinov3.eval.utils import extract_features
+from bitlayers.dinov3.eval.utils import extract_features
 
 logger = logging.getLogger("dinov3")
 

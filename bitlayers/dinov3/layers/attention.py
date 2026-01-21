@@ -8,7 +8,8 @@ from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
-from dinov3.utils import cat_keep_shapes, uncat_with_shapes
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
+from bitlayers.dinov3.utils import cat_keep_shapes, uncat_with_shapes
 from torch import Tensor, nn
 
 
@@ -27,7 +28,7 @@ def rope_apply(x: Tensor, sin: Tensor, cos: Tensor) -> Tensor:
     return (x * cos) + (rope_rotate_half(x) * sin)
 
 
-class LinearKMaskedBias(nn.Linear):
+class LinearKMaskedBias(BitLinear):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         o = self.out_features
@@ -37,6 +38,9 @@ class LinearKMaskedBias(nn.Linear):
 
     def forward(self, input: Tensor) -> Tensor:
         masked_bias = self.bias * self.bias_mask.to(self.bias.dtype) if self.bias is not None else None
+        if hasattr(self, "_inner") and hasattr(self._inner.linear, "w_q"):
+            wq = self._inner.linear.w_q(self._inner.linear.weight)
+            return F.linear(input, wq, masked_bias)
         return F.linear(input, self.weight, masked_bias)
 
 
@@ -57,10 +61,10 @@ class SelfAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
 
-        linear_class = LinearKMaskedBias if mask_k_bias else nn.Linear
-        self.qkv = linear_class(dim, dim * 3, bias=qkv_bias, device=device)
+        linear_class = LinearKMaskedBias if mask_k_bias else BitLinear
+        self.qkv = linear_class(dim, dim * 3, bias=qkv_bias).to(device=device)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim, bias=proj_bias, device=device)
+        self.proj = BitLinear(dim, dim, bias=proj_bias).to(device=device)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def apply_rope(self, q: Tensor, k: Tensor, rope: Tensor | Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tensor]:
@@ -134,9 +138,9 @@ class CausalSelfAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkv = BitLinear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = attn_drop
-        self.proj = nn.Linear(dim, dim, bias=proj_bias)
+        self.proj = BitLinear(dim, dim, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def init_weights(

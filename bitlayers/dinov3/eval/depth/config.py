@@ -11,13 +11,13 @@ from omegaconf import MISSING
 
 import torch
 
-from dinov3.eval.setup import ModelConfig
+from bitlayers.dinov3.eval.setup import ModelConfig
 
 
-from dinov3.eval.depth.loss import LossType
-from dinov3.eval.depth.models import DecoderConfig
-from dinov3.eval.depth.transforms import make_depth_train_transforms, make_depth_eval_transforms
-from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from bitlayers.dinov3.eval.depth.loss import LossType
+from bitlayers.dinov3.eval.depth.models import DecoderConfig
+from bitlayers.dinov3.eval.depth.transforms import make_depth_train_transforms, make_depth_eval_transforms
+from bitlayers.dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 
 class Dtype(Enum):

@@ -11,8 +11,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from dinov3.eval.text.text_tower import build_text_model
-from dinov3.eval.text.vision_tower import build_vision_model
+from bitlayers.dinov3.eval.text.text_tower import build_text_model
+from bitlayers.dinov3.eval.text.vision_tower import build_vision_model
 
 
 @dataclass
@@ -78,7 +78,7 @@ class DINOTxt(nn.Module):
             model_config.text_model_use_linear_projection,
             backbone=text_backbone,
         )
-        self.logit_scale = nn.Parameter(torch.empty(1, device=device))
+        self.logit_scale = nn.Parameter(torch.empty(1).to(device=device))
         if model_config.freeze_logit_scale:
             self.logit_scale.requires_grad = False
 

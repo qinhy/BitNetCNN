@@ -7,7 +7,7 @@ import os
 from enum import Enum
 
 import torch
-from dinov3.eval.segmentation.models import build_segmentation_decoder
+from bitlayers.dinov3.eval.segmentation.models import build_segmentation_decoder
 
 from .backbones import (
     dinov3_vit7b16,

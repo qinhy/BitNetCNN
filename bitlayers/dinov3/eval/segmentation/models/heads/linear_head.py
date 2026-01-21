@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d
+
 
 class LinearHead(nn.Module):
     """Linear layer ."""
@@ -27,7 +29,7 @@ class LinearHead(nn.Module):
         self.n_output_channels = n_output_channels
         self.use_cls_token = use_cls_token
         self.batchnorm_layer = nn.SyncBatchNorm(self.channels) if use_batchnorm else nn.Identity(self.channels)
-        self.conv = nn.Conv2d(self.channels, self.n_output_channels, kernel_size=1, padding=0, stride=1)
+        self.conv = BitConv2d(self.channels, self.n_output_channels, kernel_size=1, padding=0, stride=1)
         self.dropout = nn.Dropout2d(dropout)
         nn.init.normal_(self.conv.weight, mean=0, std=0.01)
         nn.init.constant_(self.conv.bias, 0)

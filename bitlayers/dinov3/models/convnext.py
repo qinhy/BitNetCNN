@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import torch.nn.init
 from torch import Tensor, nn
 
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear as BitLinear
 
 logger = logging.getLogger("dinov3")
 
@@ -55,11 +56,11 @@ class Block(nn.Module):
 
     def __init__(self, dim, drop_path=0.0, layer_scale_init_value=1e-6):
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        self.dwconv = BitConv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
         self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = BitLinear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.pwconv2 = BitLinear(4 * dim, dim)
         self.layer_scale_init_value = layer_scale_init_value
         self.gamma = (
             nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
@@ -155,14 +156,14 @@ class ConvNeXt(nn.Module):
         # ==== ConvNeXt's original init =====
         self.downsample_layers = nn.ModuleList()  # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
-            nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
+            BitConv2d(in_chans, dims[0], kernel_size=4, stride=4),
             LayerNorm(dims[0], eps=1e-6, data_format="channels_first"),
         )
         self.downsample_layers.append(stem)
         for i in range(3):
             downsample_layer = nn.Sequential(
                 LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                nn.Conv2d(dims[i], dims[i + 1], kernel_size=2, stride=2),
+                BitConv2d(dims[i], dims[i + 1], kernel_size=2, stride=2),
             )
             self.downsample_layers.append(downsample_layer)
 
@@ -209,7 +210,7 @@ class ConvNeXt(nn.Module):
         if isinstance(module, LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
-        if isinstance(module, (nn.Conv2d, nn.Linear)):
+        if isinstance(module, (nn.Conv2d, nn.Linear, BitConv2d, BitLinear)):
             nn.init.trunc_normal_(module.weight, std=0.02)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)

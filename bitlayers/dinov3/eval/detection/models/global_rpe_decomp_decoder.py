@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
+
 from ..util.box_ops import box_xyxy_to_cxcywh, delta2bbox
 from ..util.misc import _get_activation_fn, _get_clones, inverse_sigmoid
 
@@ -43,18 +45,18 @@ class GlobalCrossAttention(nn.Module):
 
         self.cpb_mlp1 = self.build_cpb_mlp(2, rpe_hidden_dim, num_heads)
         self.cpb_mlp2 = self.build_cpb_mlp(2, rpe_hidden_dim, num_heads)
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.k = nn.Linear(dim, dim, bias=qkv_bias)
-        self.v = nn.Linear(dim, dim, bias=qkv_bias)
+        self.q = BitLinear(dim, dim, bias=qkv_bias)
+        self.k = BitLinear(dim, dim, bias=qkv_bias)
+        self.v = BitLinear(dim, dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.proj = BitLinear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.softmax = nn.Softmax(dim=-1)
 
     def build_cpb_mlp(self, in_dim, hidden_dim, out_dim):
         cpb_mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim, bias=True), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim, bias=False)
+            BitLinear(in_dim, hidden_dim, bias=True), nn.ReLU(inplace=True), BitLinear(hidden_dim, out_dim, bias=False)
         )
         return cpb_mlp
 
@@ -165,10 +167,10 @@ class GlobalDecoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
         # ffn
-        self.linear1 = nn.Linear(d_model, d_ffn)
+        self.linear1 = BitLinear(d_model, d_ffn)
         self.activation = _get_activation_fn(activation)
         self.dropout3 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_ffn, d_model)
+        self.linear2 = BitLinear(d_ffn, d_model)
         self.dropout4 = nn.Dropout(dropout)
         self.norm3 = nn.LayerNorm(d_model)
 
@@ -319,9 +321,9 @@ class GlobalDecoder(nn.Module):
     def _reset_parameters(self):
         # stolen from Swin Transformer
         def _init_weights(m):
-            if isinstance(m, nn.Linear):
+            if isinstance(m, (nn.Linear, BitLinear)):
                 nn.init.trunc_normal_(m.weight, std=0.02)
-                if isinstance(m, nn.Linear) and m.bias is not None:
+                if isinstance(m, (nn.Linear, BitLinear)) and m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)

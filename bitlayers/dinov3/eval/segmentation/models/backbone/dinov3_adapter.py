@@ -12,7 +12,8 @@ import torch.utils.checkpoint as cp
 
 from functools import partial
 
-from dinov3.eval.segmentation.models.utils.ms_deform_attn import MSDeformAttn
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear as BitLinear
+from bitlayers.dinov3.eval.segmentation.models.utils.ms_deform_attn import MSDeformAttn
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -41,8 +42,8 @@ def get_reference_points(spatial_shapes, device):
     reference_points_list = []
     for lvl, (H_, W_) in enumerate(spatial_shapes):
         ref_y, ref_x = torch.meshgrid(
-            torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
-            torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device),
+            torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32).to(device=device),
+            torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32).to(device=device),
         )
         ref_y = ref_y.reshape(-1)[None] / H_
         ref_x = ref_x.reshape(-1)[None] / W_
@@ -75,10 +76,10 @@ class ConvFFN(nn.Module):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.fc1 = BitLinear(in_features, hidden_features)
         self.dwconv = DWConv(hidden_features)
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.fc2 = BitLinear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x, H, W):
@@ -94,7 +95,7 @@ class ConvFFN(nn.Module):
 class DWConv(nn.Module):
     def __init__(self, dim=768):
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
+        self.dwconv = BitConv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
 
     def forward(self, x, H, W):
         B, N, C = x.shape
@@ -238,13 +239,13 @@ class SpatialPriorModule(nn.Module):
 
         self.stem = nn.Sequential(
             *[
-                nn.Conv2d(3, inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+                BitConv2d(3, inplanes, kernel_size=3, stride=2, padding=1, bias=False),
                 nn.SyncBatchNorm(inplanes),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
+                BitConv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.SyncBatchNorm(inplanes),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
+                BitConv2d(inplanes, inplanes, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.SyncBatchNorm(inplanes),
                 nn.ReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
@@ -252,29 +253,29 @@ class SpatialPriorModule(nn.Module):
         )
         self.conv2 = nn.Sequential(
             *[
-                nn.Conv2d(inplanes, 2 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+                BitConv2d(inplanes, 2 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
                 nn.SyncBatchNorm(2 * inplanes),
                 nn.ReLU(inplace=True),
             ]
         )
         self.conv3 = nn.Sequential(
             *[
-                nn.Conv2d(2 * inplanes, 4 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+                BitConv2d(2 * inplanes, 4 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
                 nn.SyncBatchNorm(4 * inplanes),
                 nn.ReLU(inplace=True),
             ]
         )
         self.conv4 = nn.Sequential(
             *[
-                nn.Conv2d(4 * inplanes, 4 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
+                BitConv2d(4 * inplanes, 4 * inplanes, kernel_size=3, stride=2, padding=1, bias=False),
                 nn.SyncBatchNorm(4 * inplanes),
                 nn.ReLU(inplace=True),
             ]
         )
-        self.fc1 = nn.Conv2d(inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
-        self.fc2 = nn.Conv2d(2 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
-        self.fc3 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
-        self.fc4 = nn.Conv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc1 = BitConv2d(inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc2 = BitConv2d(2 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc3 = BitConv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc4 = BitConv2d(4 * inplanes, embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
 
     def forward(self, x):
         def _inner_forward(x):
@@ -370,14 +371,14 @@ class DINOv3_Adapter(nn.Module):
         torch.nn.init.normal_(self.level_embed)
 
     def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
+        if isinstance(m, (nn.Linear, BitLinear)):
             torch.nn.init.trunc_normal_(m.weight, std=0.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
+            if isinstance(m, (nn.Linear, BitLinear)) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm) or isinstance(m, nn.BatchNorm2d):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
-        elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        elif isinstance(m, (nn.Conv2d, BitConv2d)) or isinstance(m, nn.ConvTranspose2d):
             fan_out = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
             fan_out //= m.groups
             m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))

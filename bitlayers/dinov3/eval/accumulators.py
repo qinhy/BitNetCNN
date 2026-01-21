@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 import torch
 from torch import Tensor
 
-from dinov3.distributed import gather_all_tensors  # Gathers tensors of different sizes
+from bitlayers.dinov3.distributed import gather_all_tensors  # Gathers tensors of different sizes
 
 logger = logging.getLogger("dinov3")
 

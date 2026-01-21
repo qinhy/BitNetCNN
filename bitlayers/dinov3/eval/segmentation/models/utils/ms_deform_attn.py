@@ -8,6 +8,7 @@ import warnings
 
 import torch
 import torch.nn.functional as F
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch import nn
 from torch.autograd import Function
 from torch.amp import custom_fwd, custom_bwd
@@ -125,10 +126,10 @@ class MSDeformAttn(nn.Module):
         self.n_heads = n_heads
         self.n_points = n_points
         self.ratio = ratio
-        self.sampling_offsets = nn.Linear(d_model, n_heads * n_levels * n_points * 2)
-        self.attention_weights = nn.Linear(d_model, n_heads * n_levels * n_points)
-        self.value_proj = nn.Linear(d_model, int(d_model * ratio))
-        self.output_proj = nn.Linear(int(d_model * ratio), d_model)
+        self.sampling_offsets = BitLinear(d_model, n_heads * n_levels * n_points * 2)
+        self.attention_weights = BitLinear(d_model, n_heads * n_levels * n_points)
+        self.value_proj = BitLinear(d_model, int(d_model * ratio))
+        self.output_proj = BitLinear(int(d_model * ratio), d_model)
 
         self._reset_parameters()
 

@@ -7,8 +7,9 @@ import re
 
 import torch
 
-from dinov3.layers.attention import LinearKMaskedBias
-from dinov3.utils import named_replace
+from bitlayers.dinov3.layers.attention import LinearKMaskedBias
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
+from bitlayers.dinov3.utils import named_replace
 
 # avoid division by zero when calculating scale
 EPS = 1e-12
@@ -81,7 +82,7 @@ class Fp8LinearFn(torch.autograd.Function):
         return grad_a, grad_b, grad_bias
 
 
-class Fp8Linear(torch.nn.Linear):
+class Fp8Linear(BitLinear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         out = Fp8LinearFn.apply(input.flatten(end_dim=-2), self.weight, self.bias)
         out = out.unflatten(0, input.shape[:-1])
@@ -102,9 +103,9 @@ def convert_linears_to_fp8(root_module: torch.nn.Module, *, filter: str) -> torc
 
     def replace(module: torch.nn.Module, name: str) -> torch.nn.Module:
         nonlocal total_count
-        if not isinstance(module, torch.nn.Linear) or not filter_re.search(name):
+        if not isinstance(module, (torch.nn.Linear, BitLinear)) or not filter_re.search(name):
             return module
-        if type(module) == torch.nn.Linear:
+        if type(module) in (torch.nn.Linear, BitLinear):
             new_cls = Fp8Linear
         elif type(module) == LinearKMaskedBias:
             new_cls = Fp8LinearKMaskedBias
@@ -119,12 +120,16 @@ def convert_linears_to_fp8(root_module: torch.nn.Module, *, filter: str) -> torc
             raise RuntimeError(
                 "fp8 requires all dimensions to be multiples of 64 " "(consider using ffn_layer=swiglu64 or higher)"
             )
+        bit = getattr(module, "bit", True)
+        scale_op = getattr(module, "scale_op", "median")
         new_module = new_cls(
             in_features=module.in_features,
             out_features=module.out_features,
             bias=module.bias is not None,
             dtype=module.weight.dtype,
             device=module.weight.device,
+            bit=bit,
+            scale_op=scale_op,
         )
         new_module.weight = module.weight
         new_module.bias = module.bias

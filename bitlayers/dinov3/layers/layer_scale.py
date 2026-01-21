@@ -19,7 +19,7 @@ class LayerScale(nn.Module):
     ) -> None:
         super().__init__()
         self.inplace = inplace
-        self.gamma = nn.Parameter(torch.empty(dim, device=device))
+        self.gamma = nn.Parameter(torch.empty(dim).to(device=device))
         self.init_values = init_values
 
     def reset_parameters(self):

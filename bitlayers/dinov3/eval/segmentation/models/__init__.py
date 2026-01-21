@@ -8,10 +8,10 @@ from functools import partial
 
 import torch
 
-from dinov3.eval.segmentation.models.backbone.dinov3_adapter import DINOv3_Adapter
-from dinov3.eval.segmentation.models.heads.linear_head import LinearHead
-from dinov3.eval.segmentation.models.heads.mask2former_head import Mask2FormerHead
-from dinov3.eval.utils import ModelWithIntermediateLayers
+from bitlayers.dinov3.eval.segmentation.models.backbone.dinov3_adapter import DINOv3_Adapter
+from bitlayers.dinov3.eval.segmentation.models.heads.linear_head import LinearHead
+from bitlayers.dinov3.eval.segmentation.models.heads.mask2former_head import Mask2FormerHead
+from bitlayers.dinov3.eval.utils import ModelWithIntermediateLayers
 
 
 class BackboneLayersSet(Enum):

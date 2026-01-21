@@ -13,16 +13,16 @@ import torch
 from omegaconf import OmegaConf
 
 import dinov3.distributed as distributed
-from dinov3.eval.depth.checkpoint_utils import find_latest_checkpoint
-from dinov3.eval.depth.config import DepthConfig
-from dinov3.eval.depth.eval import evaluate_depther_with_config
-from dinov3.eval.depth.models import make_depther_from_config
-from dinov3.eval.depth.train import train_model_with_backbone
+from bitlayers.dinov3.eval.depth.checkpoint_utils import find_latest_checkpoint
+from bitlayers.dinov3.eval.depth.config import DepthConfig
+from bitlayers.dinov3.eval.depth.eval import evaluate_depther_with_config
+from bitlayers.dinov3.eval.depth.models import make_depther_from_config
+from bitlayers.dinov3.eval.depth.train import train_model_with_backbone
 
-from dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
-from dinov3.eval.setup import load_model_and_context
-from dinov3.run.init import job_context
-from dinov3.hub.depthers import _get_depther_config, dinov3_vit7b16_dd
+from bitlayers.dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
+from bitlayers.dinov3.eval.setup import load_model_and_context
+from bitlayers.dinov3.run.init import job_context
+from bitlayers.dinov3.hub.depthers import _get_depther_config, dinov3_vit7b16_dd
 
 RESULTS_FILENAME = "results-depth.csv"
 MAIN_METRICS = [".*_abs_rel", ".*_a1", ".*_rmse"]

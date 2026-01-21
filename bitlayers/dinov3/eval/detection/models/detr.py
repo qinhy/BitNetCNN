@@ -25,6 +25,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear as BitLinear
+
 from ..util import box_ops
 from ..util.misc import NestedTensor, _get_clones, inverse_sigmoid, nested_tensor_from_tensor_list
 from .backbone import build_backbone
@@ -65,7 +67,7 @@ class PlainDETR(nn.Module):
         self.num_queries = num_queries
         self.transformer = transformer
         hidden_dim = transformer.d_model
-        self.class_embed = nn.Linear(hidden_dim, num_classes)
+        self.class_embed = BitLinear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.num_feature_levels = num_feature_levels
         if not two_stage:
@@ -75,7 +77,7 @@ class PlainDETR(nn.Module):
         self.input_proj = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Conv2d(backbone.num_channels[0], hidden_dim, kernel_size=1),
+                    BitConv2d(backbone.num_channels[0], hidden_dim, kernel_size=1),
                     nn.GroupNorm(32, hidden_dim),
                 )
             ]
@@ -436,7 +438,7 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList(BitLinear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):

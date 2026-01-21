@@ -16,7 +16,7 @@ from torchvision import tv_tensors
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from bitlayers.dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 
 class _FixedCropType(Enum):

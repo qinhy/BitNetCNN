@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Optional, Tuple
 
 import torch
-from dinov3.eval.depth.models import DecoderConfig, make_depther_from_config
+from bitlayers.dinov3.eval.depth.models import DecoderConfig, make_depther_from_config
 
 from .utils import DINOV3_BASE_URL
 from .backbones import (

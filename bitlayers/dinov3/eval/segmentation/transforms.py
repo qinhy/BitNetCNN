@@ -14,8 +14,8 @@ from torchvision.transforms import functional as Fv
 from torchvision.transforms import v2
 from torchvision.tv_tensors import Mask
 
-from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, make_normalize_transform
-from dinov3.eval.segmentation.metrics import preprocess_nonzero_labels
+from bitlayers.dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, make_normalize_transform
+from bitlayers.dinov3.eval.segmentation.metrics import preprocess_nonzero_labels
 
 
 class PhotoMetricDistortion(torch.nn.Module):

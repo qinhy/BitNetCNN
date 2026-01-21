@@ -6,9 +6,10 @@
 from typing import Callable, List, Optional
 
 import torch.nn.functional as F
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch import Tensor, nn
 
-from dinov3.utils import cat_keep_shapes, uncat_with_shapes
+from bitlayers.dinov3.utils import cat_keep_shapes, uncat_with_shapes
 
 
 class ListForwardMixin(object):
@@ -35,9 +36,9 @@ class Mlp(nn.Module, ListForwardMixin):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features, bias=bias, device=device)
+        self.fc1 = BitLinear(in_features, hidden_features, bias=bias).to(device=device)
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias, device=device)
+        self.fc2 = BitLinear(hidden_features, out_features, bias=bias).to(device=device)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -66,9 +67,9 @@ class SwiGLUFFN(nn.Module, ListForwardMixin):
         hidden_features = hidden_features or in_features
         d = int(hidden_features * 2 / 3)
         swiglu_hidden_features = d + (-d % align_to)
-        self.w1 = nn.Linear(in_features, swiglu_hidden_features, bias=bias, device=device)
-        self.w2 = nn.Linear(in_features, swiglu_hidden_features, bias=bias, device=device)
-        self.w3 = nn.Linear(swiglu_hidden_features, out_features, bias=bias, device=device)
+        self.w1 = BitLinear(in_features, swiglu_hidden_features, bias=bias).to(device=device)
+        self.w2 = BitLinear(in_features, swiglu_hidden_features, bias=bias).to(device=device)
+        self.w3 = BitLinear(swiglu_hidden_features, out_features, bias=bias).to(device=device)
 
     def forward(self, x: Tensor) -> Tensor:
         x1 = self.w1(x)

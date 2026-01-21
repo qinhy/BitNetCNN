@@ -27,9 +27,9 @@ def dinov3_vitl16_dinotxt_tet1280d20h24l(
     bpe_path_or_url: str = "https://dl.fbaipublicfiles.com/dinov3/thirdparty/bpe_simple_vocab_16e6.txt.gz",
     check_hash: bool = False,
 ) -> Tuple[nn.Module, Any]:
-    from dinov3.eval.text.dinotxt_model import DINOTxt, DINOTxtConfig
-    from dinov3.eval.text.text_transformer import TextTransformer
-    from dinov3.eval.text.tokenizer import get_tokenizer
+    from bitlayers.dinov3.eval.text.dinotxt_model import DINOTxt, DINOTxtConfig
+    from bitlayers.dinov3.eval.text.text_transformer import TextTransformer
+    from bitlayers.dinov3.eval.text.tokenizer import get_tokenizer
 
     dinotxt_config = DINOTxtConfig(
         embed_dim=2048,

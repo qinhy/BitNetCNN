@@ -8,11 +8,12 @@ from functools import partial
 from typing import Optional, Tuple
 
 import torch
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch import nn
 
-from dinov3.layers import SelfAttentionBlock, SwiGLUFFN
-from dinov3.models.vision_transformer import init_weights_vit
-from dinov3.utils import named_apply
+from bitlayers.dinov3.layers import SelfAttentionBlock, SwiGLUFFN
+from bitlayers.dinov3.models.vision_transformer import init_weights_vit
+from bitlayers.dinov3.utils import named_apply
 
 logger = logging.getLogger("dinov3")
 
@@ -55,7 +56,7 @@ class VisionHead(nn.Module):
             assert embed_dim % multiplier == 0, (
                 f"Expects {embed_dim} to be divisible by {multiplier}"
             )
-            self.linear_projection = nn.Linear(
+            self.linear_projection = BitLinear(
                 input_dim, embed_dim // multiplier, bias=False
             )
 
@@ -65,7 +66,7 @@ class VisionHead(nn.Module):
                 block = self.blocks[i]
                 named_apply(init_weights_vit, block)
             self.ln_final.reset_parameters()
-        if isinstance(self.linear_projection, nn.Linear):
+        if isinstance(self.linear_projection, (nn.Linear, BitLinear)):
             nn.init.normal_(
                 self.linear_projection.weight,
                 std=self.linear_projection.in_features**-0.5,
@@ -185,7 +186,7 @@ def build_vision_model(
         if backbone_model_config is not None:
             from omegaconf import OmegaConf
 
-            from dinov3.models import build_model_from_cfg as build_vision_backbone
+            from bitlayers.dinov3.models import build_model_from_cfg as build_vision_backbone
 
             cfg = OmegaConf.load(backbone_model_config)
             backbone, _ = build_vision_backbone(cfg, only_teacher=True)

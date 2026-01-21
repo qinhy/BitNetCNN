@@ -15,6 +15,7 @@ Copy-paste from torch.nn.Transformer with modifications:
 """
 from typing import Optional
 
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch import Tensor, nn
 
 from ..util.misc import _get_activation_fn, _get_clones
@@ -51,9 +52,9 @@ class TransformerEncoderLayer(nn.Module):
         # Keeping Dropout 0 in self attention as it makes the eval 10% faster without performance change
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=0, batch_first=True)
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear1 = BitLinear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear2 = BitLinear(dim_feedforward, d_model)
 
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)

@@ -11,7 +11,8 @@ import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 
-from dinov3.eval.segmentation.models.utils.position_encoding import PositionEmbeddingSine
+from bitlayers.dinov3.eval.segmentation.models.utils.position_encoding import PositionEmbeddingSine
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear as BitLinear
 
 
 def c2_xavier_fill(module: nn.Module) -> None:
@@ -32,7 +33,7 @@ def c2_xavier_fill(module: nn.Module) -> None:
         nn.init.constant_(module.bias, 0)
 
 
-class Conv2d(torch.nn.Conv2d):
+class Conv2d(BitConv2d):
     """
     A wrapper around :class:`torch.nn.Conv2d` to support empty inputs and more features.
     """
@@ -55,7 +56,7 @@ class Conv2d(torch.nn.Conv2d):
         self.activation = activation
 
     def forward(self, x):
-        x = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        x = super().forward(x)
         if self.norm is not None:
             x = self.norm(x)
         if self.activation is not None:
@@ -205,9 +206,9 @@ class FFNLayer(nn.Module):
     def __init__(self, d_model, dim_feedforward=2048, dropout=0.0, activation="relu", normalize_before=False):
         super().__init__()
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear1 = BitLinear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear2 = BitLinear(dim_feedforward, d_model)
 
         self.norm = nn.LayerNorm(d_model)
 
@@ -260,7 +261,7 @@ class MLP(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList(BitLinear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):
@@ -366,7 +367,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
 
         # output FFNs
         if self.mask_classification:
-            self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
+            self.class_embed = BitLinear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
 
     def forward(self, x, mask_features, mask=None):

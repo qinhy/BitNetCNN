@@ -17,32 +17,33 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from omegaconf import MISSING
 from torch.nn.parallel import DistributedDataParallel
 
 import dinov3.distributed as distributed
-from dinov3.checkpointer import (
+from bitlayers.dinov3.checkpointer import (
     CheckpointRetentionPolicy,
     cleanup_checkpoint,
     find_latest_checkpoint,
     keep_last_n_checkpoints,
 )
-from dinov3.data import SamplerType, make_data_loader, make_dataset
-from dinov3.data.adapters import DatasetWithEnumeratedTargets
-from dinov3.data.transforms import (
+from bitlayers.dinov3.data import SamplerType, make_data_loader, make_dataset
+from bitlayers.dinov3.data.adapters import DatasetWithEnumeratedTargets
+from bitlayers.dinov3.data.transforms import (
     CROP_DEFAULT_SIZE,
     RESIZE_DEFAULT_SIZE,
     make_classification_eval_transform,
     make_classification_train_transform,
 )
-from dinov3.eval.data import create_train_dataset_dict, get_num_classes, pad_multilabel_and_collate
-from dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
-from dinov3.eval.metrics import ClassificationMetricType, build_classification_metric
-from dinov3.eval.setup import ModelConfig, load_model_and_context
-from dinov3.eval.utils import LossType, ModelWithIntermediateLayers, average_metrics, evaluate
-from dinov3.eval.utils import save_results as default_save_results_func
-from dinov3.logging import MetricLogger, SmoothedValue
-from dinov3.run.init import job_context
+from bitlayers.dinov3.eval.data import create_train_dataset_dict, get_num_classes, pad_multilabel_and_collate
+from bitlayers.dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
+from bitlayers.dinov3.eval.metrics import ClassificationMetricType, build_classification_metric
+from bitlayers.dinov3.eval.setup import ModelConfig, load_model_and_context
+from bitlayers.dinov3.eval.utils import LossType, ModelWithIntermediateLayers, average_metrics, evaluate
+from bitlayers.dinov3.eval.utils import save_results as default_save_results_func
+from bitlayers.dinov3.logging import MetricLogger, SmoothedValue
+from bitlayers.dinov3.run.init import job_context
 
 logger = logging.getLogger("dinov3")
 
@@ -169,7 +170,7 @@ class LinearClassifier(nn.Module):
         self.use_n_blocks = use_n_blocks
         self.use_avgpool = use_avgpool
         self.num_classes = num_classes
-        self.linear = nn.Linear(out_dim, num_classes)
+        self.linear = BitLinear(out_dim, num_classes)
         self.linear.weight.data.normal_(mean=0.0, std=0.01)
         self.linear.bias.data.zero_()
 

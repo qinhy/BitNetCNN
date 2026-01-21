@@ -13,10 +13,11 @@ from torch.nn import functional as F
 from torch.nn.init import normal_
 from torch.amp import autocast
 
-from dinov3.eval.segmentation.models.utils.batch_norm import get_norm
-from dinov3.eval.segmentation.models.utils.position_encoding import PositionEmbeddingSine
-from dinov3.eval.segmentation.models.utils.transformer import _get_clones, _get_activation_fn
-from dinov3.eval.segmentation.models.utils.ms_deform_attn import MSDeformAttn
+from bitlayers.dinov3.eval.segmentation.models.utils.batch_norm import get_norm
+from bitlayers.dinov3.eval.segmentation.models.utils.position_encoding import PositionEmbeddingSine
+from bitlayers.dinov3.eval.segmentation.models.utils.transformer import _get_clones, _get_activation_fn
+from bitlayers.dinov3.eval.segmentation.models.utils.ms_deform_attn import MSDeformAttn
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear as BitLinear
 
 
 def c2_xavier_fill(module: nn.Module) -> None:
@@ -37,7 +38,7 @@ def c2_xavier_fill(module: nn.Module) -> None:
         nn.init.constant_(module.bias, 0)
 
 
-class Conv2d(torch.nn.Conv2d):
+class Conv2d(BitConv2d):
     """
     A wrapper around :class:`torch.nn.Conv2d` to support empty inputs and more features.
     """
@@ -77,7 +78,7 @@ class Conv2d(torch.nn.Conv2d):
         #                     self.norm, torch.nn.SyncBatchNorm
         #                 ), "SyncBatchNorm does not support empty inputs!"
 
-        x = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        x = super().forward(x)
         if self.norm is not None:
             x = self.norm(x)
         if self.activation is not None:
@@ -173,10 +174,10 @@ class MSDeformAttnTransformerEncoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
 
         # ffn
-        self.linear1 = nn.Linear(d_model, d_ffn)
+        self.linear1 = BitLinear(d_model, d_ffn)
         self.activation = _get_activation_fn(activation)
         self.dropout2 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_ffn, d_model)
+        self.linear2 = BitLinear(d_ffn, d_model)
         self.dropout3 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
 
@@ -215,8 +216,8 @@ class MSDeformAttnTransformerEncoder(nn.Module):
         reference_points_list = []
         for lvl, (H_, W_) in enumerate(spatial_shapes):
             ref_y, ref_x = torch.meshgrid(
-                torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
-                torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device),
+                torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32).to(device=device),
+                torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32).to(device=device),
             )
             ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
             ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
@@ -287,7 +288,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
             for in_channels in transformer_in_channels[::-1][:-1]:  # TODO remove [:-1]
                 input_proj_list.append(
                     nn.Sequential(
-                        nn.Conv2d(in_channels, conv_dim, kernel_size=1),
+                        BitConv2d(in_channels, conv_dim, kernel_size=1),
                         nn.GroupNorm(32, conv_dim),
                     )
                 )
@@ -296,7 +297,7 @@ class MSDeformAttnPixelDecoder(nn.Module):
             self.input_convs = nn.ModuleList(
                 [
                     nn.Sequential(
-                        nn.Conv2d(transformer_in_channels[-1], conv_dim, kernel_size=1),
+                        BitConv2d(transformer_in_channels[-1], conv_dim, kernel_size=1),
                         nn.GroupNorm(32, conv_dim),
                     )
                 ]

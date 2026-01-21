@@ -15,9 +15,9 @@ from torch import nn
 from torchmetrics import Metric
 
 import dinov3.distributed as distributed
-from dinov3.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader
-from dinov3.eval.accumulators import NoOpAccumulator, ResultsAccumulator
-from dinov3.logging import MetricLogger
+from bitlayers.dinov3.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader
+from bitlayers.dinov3.eval.accumulators import NoOpAccumulator, ResultsAccumulator
+from bitlayers.dinov3.logging import MetricLogger
 
 logger = logging.getLogger("dinov3")
 

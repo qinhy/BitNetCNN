@@ -21,6 +21,8 @@ import math
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch.nn.init import xavier_uniform_, constant_
 
 from ..functions import MSDeformAttnFunction
@@ -59,10 +61,10 @@ class MSDeformAttn(nn.Module):
         self.n_heads = n_heads
         self.n_points = n_points
 
-        self.sampling_offsets = nn.Linear(d_model, n_heads * n_levels * n_points * 2)
-        self.attention_weights = nn.Linear(d_model, n_heads * n_levels * n_points)
-        self.value_proj = nn.Linear(d_model, d_model)
-        self.output_proj = nn.Linear(d_model, d_model)
+        self.sampling_offsets = BitLinear(d_model, n_heads * n_levels * n_points * 2)
+        self.attention_weights = BitLinear(d_model, n_heads * n_levels * n_points)
+        self.value_proj = BitLinear(d_model, d_model)
+        self.output_proj = BitLinear(d_model, d_model)
 
         self._reset_parameters()
 

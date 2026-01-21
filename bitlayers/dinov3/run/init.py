@@ -7,7 +7,7 @@ import contextlib
 from datetime import timedelta
 from typing import Optional
 
-from dinov3.configs import exit_job, setup_job
+from bitlayers.dinov3.configs import exit_job, setup_job
 
 
 @contextlib.contextmanager

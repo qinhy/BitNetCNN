@@ -14,20 +14,20 @@ from typing import Callable
 
 import dinov3.distributed as distributed
 import torch
-from dinov3.checkpointer import (
+from bitlayers.dinov3.checkpointer import (
     find_latest_checkpoint,
     keep_last_n_checkpoints,
     load_checkpoint,
     save_checkpoint,
 )
-from dinov3.configs import setup_job
-from dinov3.data import SamplerType, make_data_loader, make_dataset
-from dinov3.eval.text.build_dinotxt import build_model_and_tokenizer
-from dinov3.eval.text.clip_loss import memory_efficient_clip_loss
-from dinov3.eval.text.dinotxt_model import DINOTxt, DINOTxtConfig
-from dinov3.eval.text.gram_loss import gram_loss_fn
-from dinov3.logging import MetricLogger, setup_logging
-from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
+from bitlayers.dinov3.configs import setup_job
+from bitlayers.dinov3.data import SamplerType, make_data_loader, make_dataset
+from bitlayers.dinov3.eval.text.build_dinotxt import build_model_and_tokenizer
+from bitlayers.dinov3.eval.text.clip_loss import memory_efficient_clip_loss
+from bitlayers.dinov3.eval.text.dinotxt_model import DINOTxt, DINOTxtConfig
+from bitlayers.dinov3.eval.text.gram_loss import gram_loss_fn
+from bitlayers.dinov3.logging import MetricLogger, setup_logging
+from bitlayers.dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
 from omegaconf import OmegaConf
 from torch import optim
 

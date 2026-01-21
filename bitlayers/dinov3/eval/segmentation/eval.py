@@ -9,16 +9,16 @@ import logging
 import torch
 
 import dinov3.distributed as distributed
-from dinov3.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader, make_dataset
-from dinov3.eval.segmentation.inference import make_inference
-from dinov3.eval.segmentation.metrics import (
+from bitlayers.dinov3.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader, make_dataset
+from bitlayers.dinov3.eval.segmentation.inference import make_inference
+from bitlayers.dinov3.eval.segmentation.metrics import (
     calculate_intersect_and_union,
     calculate_segmentation_metrics,
 )
-from dinov3.eval.segmentation.models import build_segmentation_decoder
-from dinov3.eval.segmentation.transforms import make_segmentation_eval_transforms
-from dinov3.hub.segmentors import dinov3_vit7b16_ms
-from dinov3.logging import MetricLogger
+from bitlayers.dinov3.eval.segmentation.models import build_segmentation_decoder
+from bitlayers.dinov3.eval.segmentation.transforms import make_segmentation_eval_transforms
+from bitlayers.dinov3.hub.segmentors import dinov3_vit7b16_ms
+from bitlayers.dinov3.logging import MetricLogger
 
 logger = logging.getLogger("dinov3")
 

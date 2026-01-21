@@ -7,7 +7,7 @@ from functools import partial
 from typing import Any
 
 import torch
-from dinov3.eval.depth.checkpoint_utils import load_checkpoint
+from bitlayers.dinov3.eval.depth.checkpoint_utils import load_checkpoint
 
 from .dpt_head import DPTHead
 from .linear_head import LinearHead

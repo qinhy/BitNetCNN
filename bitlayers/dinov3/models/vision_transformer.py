@@ -11,8 +11,9 @@ import torch
 import torch.nn.init
 from torch import Tensor, nn
 
-from dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
-from dinov3.utils import named_apply
+from bitlayers.dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
+from bitlayers.dinov3.utils import named_apply
 
 logger = logging.getLogger("dinov3")
 
@@ -38,7 +39,7 @@ dtype_dict = {
 
 
 def init_weights_vit(module: nn.Module, name: str = ""):
-    if isinstance(module, nn.Linear):
+    if isinstance(module, (nn.Linear, BitLinear)):
         torch.nn.init.trunc_normal_(module.weight, std=0.02)
         if module.bias is not None:
             nn.init.zeros_(module.bias)
@@ -109,10 +110,10 @@ class DinoVisionTransformer(nn.Module):
             flatten_embedding=False,
         )
 
-        self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim, device=device))
+        self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim).to(device=device))
         self.n_storage_tokens = n_storage_tokens
         if self.n_storage_tokens > 0:
-            self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
+            self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim).to(device=device))
         logger.info(f"using base={pos_embed_rope_base} for rope new")
         logger.info(f"using min_period={pos_embed_rope_min_period} for rope new")
         logger.info(f"using max_period={pos_embed_rope_max_period} for rope new")
@@ -177,7 +178,7 @@ class DinoVisionTransformer(nn.Module):
         else:
             self.local_cls_norm = None
         self.head = nn.Identity()
-        self.mask_token = nn.Parameter(torch.empty(1, embed_dim, device=device))
+        self.mask_token = nn.Parameter(torch.empty(1, embed_dim).to(device=device))
 
     def init_weights(self):
         self.rope_embed._init_weights()

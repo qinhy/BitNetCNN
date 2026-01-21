@@ -9,6 +9,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import register_fsdp_forward_method
@@ -109,7 +110,7 @@ def ac_compile_parallelize_and_init(
     def compile_head(head: nn.Module) -> nn.Module:
         for block_id in range(head.num_blocks):
             head.blocks[block_id] = compile_block(head.blocks[block_id])
-        if do_compile and isinstance(head.linear_projection, nn.Linear):
+        if do_compile and isinstance(head.linear_projection, (nn.Linear, BitLinear)):
             head.linear_projection.compile()
 
     compile_backbone(clip_model.visual_model.backbone)

@@ -18,27 +18,27 @@ from omegaconf import MISSING
 from torch.nn.functional import one_hot, softmax
 
 import dinov3.distributed as distributed
-from dinov3.data import SamplerType, make_data_loader, make_dataset
-from dinov3.data.adapters import DatasetWithEnumeratedTargets
-from dinov3.data.transforms import (
+from bitlayers.dinov3.data import SamplerType, make_data_loader, make_dataset
+from bitlayers.dinov3.data.adapters import DatasetWithEnumeratedTargets
+from bitlayers.dinov3.data.transforms import (
     CROP_DEFAULT_SIZE,
     RESIZE_DEFAULT_SIZE,
     get_target_transform,
     make_classification_eval_transform,
 )
-from dinov3.distributed import gather_all_tensors
-from dinov3.eval.data import (
+from bitlayers.dinov3.distributed import gather_all_tensors
+from bitlayers.dinov3.eval.data import (
     create_train_dataset_dict,
     extract_features_for_dataset_dict,
     get_num_classes,
     pad_multilabel_and_collate,
 )
-from dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
-from dinov3.eval.metrics import ClassificationMetricType, build_classification_metric
-from dinov3.eval.setup import ModelConfig, load_model_and_context
-from dinov3.eval.utils import ModelWithNormalize, average_metrics, evaluate
-from dinov3.eval.utils import save_results as default_save_results_func
-from dinov3.run.init import job_context
+from bitlayers.dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
+from bitlayers.dinov3.eval.metrics import ClassificationMetricType, build_classification_metric
+from bitlayers.dinov3.eval.setup import ModelConfig, load_model_and_context
+from bitlayers.dinov3.eval.utils import ModelWithNormalize, average_metrics, evaluate
+from bitlayers.dinov3.eval.utils import save_results as default_save_results_func
+from bitlayers.dinov3.run.init import job_context
 
 logger = logging.getLogger("dinov3")
 

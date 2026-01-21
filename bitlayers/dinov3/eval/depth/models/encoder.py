@@ -6,7 +6,7 @@
 import logging
 from enum import Enum
 
-from dinov3.eval.depth.models.embed import CenterPadding, StretchToMultiple
+from bitlayers.dinov3.eval.depth.models.embed import CenterPadding, StretchToMultiple
 from torch import Tensor, nn
 
 logger = logging.getLogger("dinov3")

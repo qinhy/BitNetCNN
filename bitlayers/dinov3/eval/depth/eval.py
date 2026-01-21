@@ -11,20 +11,20 @@ import torch.utils
 import torch.utils.data
 
 import dinov3.distributed as distributed
-from dinov3.logging import MetricLogger
+from bitlayers.dinov3.logging import MetricLogger
 
 
-from dinov3.eval.depth.config import (
+from bitlayers.dinov3.eval.depth.config import (
     DepthConfig,
     ResultConfig,
     make_depth_eval_transforms_from_config,
 )
-from dinov3.eval.depth.data import build_dataloader
-from dinov3.eval.depth.datasets.datasets_utils import _EvalCropType, make_valid_mask
-from dinov3.eval.depth.metrics import calculate_depth_metrics, _DepthMetric, DEPTH_METRICS
-from dinov3.eval.depth.transforms import Aug, LeftRightFlipAug
-from dinov3.eval.depth.utils import align_depth_least_square
-from dinov3.eval.depth.visualization_utils import depth_tensor_to_colorized_pil, save_predictions
+from bitlayers.dinov3.eval.depth.data import build_dataloader
+from bitlayers.dinov3.eval.depth.datasets.datasets_utils import _EvalCropType, make_valid_mask
+from bitlayers.dinov3.eval.depth.metrics import calculate_depth_metrics, _DepthMetric, DEPTH_METRICS
+from bitlayers.dinov3.eval.depth.transforms import Aug, LeftRightFlipAug
+from bitlayers.dinov3.eval.depth.utils import align_depth_least_square
+from bitlayers.dinov3.eval.depth.visualization_utils import depth_tensor_to_colorized_pil, save_predictions
 
 
 logger = logging.getLogger("dinov3")
@@ -184,7 +184,7 @@ def evaluate_depther_with_dataloader(
             if value is not None:
                 all_metric_values_dict[metric].append(value)
         all_metric_values_dict["indices"].append(index)
-    all_indices = torch.tensor(all_metric_values_dict["indices"], device=device)
+    all_indices = torch.tensor(all_metric_values_dict["indices"]).to(device=device)
     if n_gpus > 1:
         list_all_indices = distributed.gather_all_tensors(all_indices)
         all_indices = torch.cat(list_all_indices, dim=0).cpu().to(torch.int32)

@@ -9,8 +9,8 @@ from typing import Any, Dict, List
 
 import dinov3.distributed as distributed
 import torch
-from dinov3.checkpointer import load_checkpoint, register_dont_save_hooks
-from dinov3.data import (
+from bitlayers.dinov3.checkpointer import load_checkpoint, register_dont_save_hooks
+from bitlayers.dinov3.data import (
     make_classification_eval_transform,
     make_classification_train_transform,
 )
@@ -18,10 +18,10 @@ from torch.distributed import DeviceMesh
 from torch.distributed._composable.replicate import replicate
 from torch.distributed.device_mesh import init_device_mesh
 
-from dinov3.eval.text.tokenizer import get_tokenizer
+from bitlayers.dinov3.eval.text.tokenizer import get_tokenizer
 
-from dinov3.eval.text.ac_comp_parallelize import ac_compile_parallelize_and_init
-from dinov3.eval.text.dinotxt_model import DINOTxt, DINOTxtConfig
+from bitlayers.dinov3.eval.text.ac_comp_parallelize import ac_compile_parallelize_and_init
+from bitlayers.dinov3.eval.text.dinotxt_model import DINOTxt, DINOTxtConfig
 
 logger = logging.getLogger("dinov3")
 

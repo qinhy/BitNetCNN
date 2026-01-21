@@ -8,8 +8,9 @@ from typing import Optional
 
 import torch
 
-from dinov3.eval.text.text_transformer import TextTransformer
-from dinov3.layers import CausalSelfAttentionBlock
+from bitlayers.dinov3.eval.text.text_transformer import TextTransformer
+from bitlayers.dinov3.layers import CausalSelfAttentionBlock
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch import nn
 
 logger = logging.getLogger("dinov3")
@@ -48,14 +49,14 @@ class TextHead(nn.Module):
             logger.info(
                 f"Text tower : Using a linear projection from {input_dim} to {embed_dim}"
             )
-            self.linear_projection = nn.Linear(input_dim, embed_dim, bias=False)
+            self.linear_projection = BitLinear(input_dim, embed_dim, bias=False)
 
     def init_weights(self):
         if self.num_blocks > 0:
             for i in range(self.num_blocks):
                 self.blocks[i].init_weights()
             self.ln_final.reset_parameters()
-        if isinstance(self.linear_projection, nn.Linear):
+        if isinstance(self.linear_projection, (nn.Linear, BitLinear)):
             nn.init.normal_(
                 self.linear_projection.weight,
                 std=self.linear_projection.in_features**-0.5,

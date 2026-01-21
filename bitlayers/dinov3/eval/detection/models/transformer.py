@@ -17,6 +17,8 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear as BitLinear
 from torch.nn.init import constant_, normal_, xavier_uniform_
 
 from ..util.box_ops import box_xyxy_to_cxcywh, delta2bbox
@@ -68,12 +70,12 @@ class Transformer(nn.Module):
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
 
         if two_stage:
-            self.enc_output = nn.Linear(d_model, d_model)
+            self.enc_output = BitLinear(d_model, d_model)
             self.enc_output_norm = nn.LayerNorm(d_model)
-            self.pos_trans = nn.Linear(d_model * 2, d_model * 2)
+            self.pos_trans = BitLinear(d_model * 2, d_model * 2)
             self.pos_trans_norm = nn.LayerNorm(d_model * 2)
         else:
-            self.reference_points = nn.Linear(d_model, 2)
+            self.reference_points = BitLinear(d_model, 2)
 
         self.mixed_selection = mixed_selection
         self.proposal_feature_levels = proposal_feature_levels
@@ -92,11 +94,11 @@ class Transformer(nn.Module):
                     layers = []
                     for _ in range(scale - 1):
                         layers += [
-                            nn.Conv2d(d_model, d_model, kernel_size=2, stride=2),
+                            BitConv2d(d_model, d_model, kernel_size=2, stride=2),
                             LayerNorm2D(d_model),
                             nn.GELU(),
                         ]
-                    layers.append(nn.Conv2d(d_model, d_model, kernel_size=2, stride=2))
+                    layers.append(BitConv2d(d_model, d_model, kernel_size=2, stride=2))
                     self.enc_output_proj.append(nn.Sequential(*layers))
                 else:
                     scale = int(math.log2(proposal_in_stride / stride))

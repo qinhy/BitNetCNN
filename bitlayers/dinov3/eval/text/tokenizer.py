@@ -6,7 +6,7 @@
 from typing import List, Union
 
 import torch
-from dinov3.thirdparty.CLIP.clip.simple_tokenizer import SimpleTokenizer
+from bitlayers.dinov3.thirdparty.CLIP.clip.simple_tokenizer import SimpleTokenizer
 
 
 class Tokenizer(SimpleTokenizer):

@@ -6,6 +6,7 @@
 import math
 from typing import Callable, Tuple, Union
 
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d
 from torch import Tensor, nn
 
 
@@ -58,7 +59,7 @@ class PatchEmbed(nn.Module):
 
         self.flatten_embedding = flatten_embedding
 
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_HW, stride=patch_HW)
+        self.proj = BitConv2d(in_chans, embed_dim, kernel_size=patch_HW, stride=patch_HW)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:

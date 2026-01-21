@@ -18,7 +18,7 @@ import torch.distributed
 from torch.distributed._tensor import DTensor
 
 import dinov3.distributed as distributed
-from dinov3.checkpointer import (
+from bitlayers.dinov3.checkpointer import (
     find_latest_checkpoint,
     keep_checkpoint_copy,
     keep_last_n_checkpoints,
@@ -26,8 +26,8 @@ from dinov3.checkpointer import (
     register_dont_save_hooks,
     save_checkpoint,
 )
-from dinov3.configs import setup_config, setup_job, setup_multidistillation
-from dinov3.data import (
+from bitlayers.dinov3.configs import setup_config, setup_job, setup_multidistillation
+from bitlayers.dinov3.data import (
     MaskingGenerator,
     SamplerType,
     collate_data_and_cast,
@@ -35,10 +35,10 @@ from dinov3.data import (
     make_dataset,
     CombinedDataLoader,
 )
-from dinov3.logging import MetricLogger, setup_logging
-from dinov3.train.cosine_lr_scheduler import CosineScheduler, linear_warmup_cosine_decay
-from dinov3.train.multidist_meta_arch import MultiDistillationMetaArch
-from dinov3.train.ssl_meta_arch import SSLMetaArch
+from bitlayers.dinov3.logging import MetricLogger, setup_logging
+from bitlayers.dinov3.train.cosine_lr_scheduler import CosineScheduler, linear_warmup_cosine_decay
+from bitlayers.dinov3.train.multidist_meta_arch import MultiDistillationMetaArch
+from bitlayers.dinov3.train.ssl_meta_arch import SSLMetaArch
 
 assert torch.__version__ >= (2, 1)
 torch.backends.cuda.matmul.allow_tf32 = True  # pytorch 1.12 sets this to false by default

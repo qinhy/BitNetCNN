@@ -67,7 +67,7 @@ def align_depth_least_square(
     # restore dimensions
     aligned_pred = aligned_pred.reshape(ori_shape)
     if isinstance(aligned_pred, np.ndarray):
-        aligned_pred = torch.as_tensor(aligned_pred, dtype=dtype, device=device)
+        aligned_pred = torch.as_tensor(aligned_pred, dtype=dtype).to(device=device)
     return aligned_pred, scale, shift
 
 

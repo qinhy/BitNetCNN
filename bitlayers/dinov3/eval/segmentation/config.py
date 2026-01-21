@@ -10,9 +10,9 @@ from typing import Any
 
 import torch
 
-from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from dinov3.eval.segmentation.models import BackboneLayersSet
-from dinov3.eval.setup import ModelConfig
+from bitlayers.dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from bitlayers.dinov3.eval.segmentation.models import BackboneLayersSet
+from bitlayers.dinov3.eval.setup import ModelConfig
 
 
 DEFAULT_MEAN = tuple(mean * 255 for mean in IMAGENET_DEFAULT_MEAN)

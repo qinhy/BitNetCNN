@@ -19,6 +19,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch import Tensor, nn
 
 
@@ -162,9 +163,9 @@ class TransformerEncoderLayer(nn.Module):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear1 = BitLinear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear2 = BitLinear(dim_feedforward, d_model)
 
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
@@ -235,9 +236,9 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear1 = BitLinear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear2 = BitLinear(dim_feedforward, d_model)
 
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)

@@ -10,8 +10,8 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 
-from dinov3.configs import DinoV3SetupArgs, setup_config
-from dinov3.models import build_model_for_eval
+from bitlayers.dinov3.configs import DinoV3SetupArgs, setup_config
+from bitlayers.dinov3.models import build_model_for_eval
 
 
 @dataclass

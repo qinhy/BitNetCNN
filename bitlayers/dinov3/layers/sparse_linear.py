@@ -11,12 +11,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import xformers.ops as xops
 
-from dinov3.utils import named_apply, named_replace
+from bitlayers.dinov3.utils import named_apply, named_replace
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 
 logger = logging.getLogger("dinov3")
 
 
-class LinearW24(torch.nn.Linear):
+class LinearW24(BitLinear):
     ALGO = "largest_abs_values_greedy"
 
     def __init__(self, *args, **kwargs) -> None:
@@ -49,15 +50,19 @@ def replace_linears_with_sparse_linear(root_module: nn.Module, *, filter_fn: Cal
 
     def replace(module: nn.Module, name: str) -> nn.Module:
         nonlocal total_count
-        if not isinstance(module, nn.Linear) or not filter_fn(name):
+        if not isinstance(module, (nn.Linear, BitLinear)) or not filter_fn(name):
             return module
-        assert type(module) == nn.Linear, "Subtypes not supported"
+        assert type(module) in (nn.Linear, BitLinear), "Subtypes not supported"
+        bit = getattr(module, "bit", True)
+        scale_op = getattr(module, "scale_op", "median")
         new_module = LinearW24(
             in_features=module.in_features,
             out_features=module.out_features,
             bias=module.bias is not None,
             dtype=module.weight.dtype,
             device=module.weight.device,
+            bit=bit,
+            scale_op=scale_op,
         )
         new_module.weight = module.weight
         new_module.bias = module.bias

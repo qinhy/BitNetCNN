@@ -11,7 +11,7 @@ import torch
 from omegaconf import OmegaConf
 
 import dinov3.distributed
-from dinov3.eval import results
+from bitlayers.dinov3.eval import results
 
 logger = logging.getLogger("dinov3")
 

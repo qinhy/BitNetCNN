@@ -5,6 +5,7 @@
 
 import torch
 import torch.nn as nn
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from torch.nn.init import trunc_normal_
 
 
@@ -29,13 +30,13 @@ class DINOHead(nn.Module):
             use_bn=use_bn,
             bias=mlp_bias,
         )
-        self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
+        self.last_layer = BitLinear(bottleneck_dim, out_dim, bias=False)
 
     def init_weights(self) -> None:
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
+        if isinstance(m, (nn.Linear, BitLinear)):
             trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
@@ -52,16 +53,16 @@ class DINOHead(nn.Module):
 
 def _build_mlp(nlayers, in_dim, bottleneck_dim, hidden_dim=None, use_bn=False, bias=True):
     if nlayers == 1:
-        return nn.Linear(in_dim, bottleneck_dim, bias=bias)
+        return BitLinear(in_dim, bottleneck_dim, bias=bias)
     else:
-        layers = [nn.Linear(in_dim, hidden_dim, bias=bias)]
+        layers = [BitLinear(in_dim, hidden_dim, bias=bias)]
         if use_bn:
             layers.append(nn.BatchNorm1d(hidden_dim))
         layers.append(nn.GELU())
         for _ in range(nlayers - 2):
-            layers.append(nn.Linear(hidden_dim, hidden_dim, bias=bias))
+            layers.append(BitLinear(hidden_dim, hidden_dim, bias=bias))
             if use_bn:
                 layers.append(nn.BatchNorm1d(hidden_dim))
             layers.append(nn.GELU())
-        layers.append(nn.Linear(hidden_dim, bottleneck_dim, bias=bias))
+        layers.append(BitLinear(hidden_dim, bottleneck_dim, bias=bias))
         return nn.Sequential(*layers)

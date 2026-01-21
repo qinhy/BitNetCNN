@@ -17,6 +17,7 @@ from .backbones import (
 )
 
 from .utils import DINOV3_BASE_URL
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 
 
 class ClassifierWeights(Enum):
@@ -32,7 +33,7 @@ def _make_dinov3_linear_classification_head(
     check_hash: bool = False,
     **kwargs,
 ):
-    linear_head = nn.Linear(embed_dim, 1_000)
+    linear_head = BitLinear(embed_dim, 1_000)
     if pretrained:
         if type(classifier_weights) is ClassifierWeights:
             assert classifier_weights == ClassifierWeights.IMAGENET1K, (

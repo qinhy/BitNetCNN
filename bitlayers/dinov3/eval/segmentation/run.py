@@ -9,12 +9,12 @@ import os
 import sys
 from typing import Any
 
-from dinov3.eval.segmentation.config import SegmentationConfig
-from dinov3.eval.segmentation.eval import test_segmentation
-from dinov3.eval.segmentation.train import train_segmentation
-from dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
-from dinov3.eval.setup import load_model_and_context
-from dinov3.run.init import job_context
+from bitlayers.dinov3.eval.segmentation.config import SegmentationConfig
+from bitlayers.dinov3.eval.segmentation.eval import test_segmentation
+from bitlayers.dinov3.eval.segmentation.train import train_segmentation
+from bitlayers.dinov3.eval.helpers import args_dict_to_dataclass, cli_parser, write_results
+from bitlayers.dinov3.eval.setup import load_model_and_context
+from bitlayers.dinov3.run.init import job_context
 
 
 logger = logging.getLogger("dinov3")

@@ -11,7 +11,7 @@ from typing import Union
 import torch
 import torch.nn as nn
 
-from dinov3.layers.fp8_linear import convert_linears_to_fp8
+from bitlayers.dinov3.layers.fp8_linear import convert_linears_to_fp8
 
 from . import vision_transformer as vits
 from . import convnext
@@ -107,8 +107,8 @@ def build_model_for_eval(
         model.init_weights()
     elif Path(pretrained_weights).is_dir():
         logger.info("PyTorch DCP checkpoint")
-        from dinov3.checkpointer import load_checkpoint
-        from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
+        from bitlayers.dinov3.checkpointer import load_checkpoint
+        from bitlayers.dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 
         moduledict = nn.ModuleDict({"backbone": model})
         # Wrap with FSDP
@@ -120,7 +120,7 @@ def build_model_for_eval(
         shard_unsharded_model = False
     else:
         logger.info("PyTorch consolidated checkpoint")
-        from dinov3.checkpointer import init_model_from_checkpoint_for_evals
+        from bitlayers.dinov3.checkpointer import init_model_from_checkpoint_for_evals
 
         # consolidated checkpoint codepath
         model.to_empty(device="cuda")

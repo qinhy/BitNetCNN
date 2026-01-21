@@ -11,9 +11,9 @@ from typing import Optional
 
 from termcolor import colored
 
-from dinov3.distributed import TorchDistributedEnvironment
+from bitlayers.dinov3.distributed import TorchDistributedEnvironment
 
-from dinov3.logging.helpers import MetricLogger, SmoothedValue
+from bitlayers.dinov3.logging.helpers import MetricLogger, SmoothedValue
 
 _LEVEL_COLORED_KWARGS = {
     logging.DEBUG: {"color": "green", "attrs": ["bold"]},

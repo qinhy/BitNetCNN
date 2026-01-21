@@ -12,15 +12,15 @@ import random
 import torch
 import torch.distributed as dist
 
-from dinov3.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader, make_dataset
+from bitlayers.dinov3.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader, make_dataset
 import dinov3.distributed as distributed
-from dinov3.eval.segmentation.eval import evaluate_segmentation_model
-from dinov3.eval.segmentation.loss import MultiSegmentationLoss
-from dinov3.eval.segmentation.metrics import SEGMENTATION_METRICS
-from dinov3.eval.segmentation.models import build_segmentation_decoder
-from dinov3.eval.segmentation.schedulers import build_scheduler
-from dinov3.eval.segmentation.transforms import make_segmentation_eval_transforms, make_segmentation_train_transforms
-from dinov3.logging import MetricLogger, SmoothedValue
+from bitlayers.dinov3.eval.segmentation.eval import evaluate_segmentation_model
+from bitlayers.dinov3.eval.segmentation.loss import MultiSegmentationLoss
+from bitlayers.dinov3.eval.segmentation.metrics import SEGMENTATION_METRICS
+from bitlayers.dinov3.eval.segmentation.models import build_segmentation_decoder
+from bitlayers.dinov3.eval.segmentation.schedulers import build_scheduler
+from bitlayers.dinov3.eval.segmentation.transforms import make_segmentation_eval_transforms, make_segmentation_train_transforms
+from bitlayers.dinov3.logging import MetricLogger, SmoothedValue
 
 logger = logging.getLogger("dinov3")
 

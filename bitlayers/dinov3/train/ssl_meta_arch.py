@@ -12,16 +12,16 @@ from omegaconf import OmegaConf
 from torch import Tensor, nn
 
 import dinov3.distributed as distributed
-from dinov3.checkpointer import init_fsdp_model_from_checkpoint
-from dinov3.configs import get_default_config
-from dinov3.data import DataAugmentationDINO
-from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
-from dinov3.layers.dino_head import DINOHead
-from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
-from dinov3.models import build_model_from_cfg
-from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
-from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
-from dinov3.utils import count_parameters
+from bitlayers.dinov3.checkpointer import init_fsdp_model_from_checkpoint
+from bitlayers.dinov3.configs import get_default_config
+from bitlayers.dinov3.data import DataAugmentationDINO
+from bitlayers.dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
+from bitlayers.dinov3.layers.dino_head import DINOHead
+from bitlayers.dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
+from bitlayers.dinov3.models import build_model_from_cfg
+from bitlayers.dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
+from bitlayers.dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
+from bitlayers.dinov3.utils import count_parameters
 
 logger = logging.getLogger("dinov3")
 

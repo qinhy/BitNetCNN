@@ -12,9 +12,9 @@ import torch
 import torchvision.transforms as transforms
 from PIL import Image
 
-from dinov3.eval.depth.config import ResultConfig, ResultExtension
+from bitlayers.dinov3.eval.depth.config import ResultConfig, ResultExtension
 
-from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from bitlayers.dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 
 def alpha_blend(img_pil: Image.Image, mask_rgb: np.ndarray, alpha: float = 0.5) -> Image.Image:

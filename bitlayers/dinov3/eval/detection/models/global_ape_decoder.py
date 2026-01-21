@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
 
+from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
+
 from ..util.misc import _get_activation_fn, _get_clones, inverse_sigmoid
 
 
@@ -32,11 +34,11 @@ class GlobalCrossAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
 
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.k = nn.Linear(dim, dim, bias=qkv_bias)
-        self.v = nn.Linear(dim, dim, bias=qkv_bias)
+        self.q = BitLinear(dim, dim, bias=qkv_bias)
+        self.k = BitLinear(dim, dim, bias=qkv_bias)
+        self.v = BitLinear(dim, dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.proj = BitLinear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.softmax = nn.Softmax(dim=-1)
 
@@ -97,10 +99,10 @@ class GlobalDecoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
         # ffn
-        self.linear1 = nn.Linear(d_model, d_ffn)
+        self.linear1 = BitLinear(d_model, d_ffn)
         self.activation = _get_activation_fn(activation)
         self.dropout3 = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(d_ffn, d_model)
+        self.linear2 = BitLinear(d_ffn, d_model)
         self.dropout4 = nn.Dropout(dropout)
         self.norm3 = nn.LayerNorm(d_model)
 
@@ -221,9 +223,9 @@ class GlobalDecoder(nn.Module):
     def _reset_parameters(self):
         # stolen from Swin Transformer
         def _init_weights(m):
-            if isinstance(m, nn.Linear):
+            if isinstance(m, (nn.Linear, BitLinear)):
                 nn.init.trunc_normal_(m.weight, std=0.02)
-                if isinstance(m, nn.Linear) and m.bias is not None:
+                if isinstance(m, (nn.Linear, BitLinear)) and m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)

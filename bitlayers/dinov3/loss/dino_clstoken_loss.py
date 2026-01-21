@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
-from dinov3.distributed import get_process_subgroup, get_subgroup_size
+from bitlayers.dinov3.distributed import get_process_subgroup, get_subgroup_size
 
 
 class DINOLoss(nn.Module):

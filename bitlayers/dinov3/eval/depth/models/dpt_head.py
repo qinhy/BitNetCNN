@@ -4,6 +4,7 @@
 # the terms of the DINOv3 License Agreement.
 
 import torch
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear as BitLinear
 from torch import nn
 
 
@@ -131,7 +132,7 @@ class ConvModule(nn.Module):
         # reset padding to 0 for conv module
         conv_padding = 0 if self.with_explicit_padding else padding
         # build convolution layer
-        self.conv = nn.Conv2d(  # build_conv_layer(#conv_cfg,
+        self.conv = BitConv2d(  # build_conv_layer(#conv_cfg,
             in_channels,
             out_channels,
             kernel_size,
@@ -263,11 +264,11 @@ class UpConvHead(nn.Module):
         super(UpConvHead, self).__init__()
         self.n_output_channels = n_output_channels
         self.head = nn.Sequential(
-            nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1),
+            BitConv2d(features, features // 2, kernel_size=3, stride=1, padding=1),
             Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
-            nn.Conv2d(features // 2, n_hidden_channels, kernel_size=3, stride=1, padding=1),
+            BitConv2d(features // 2, n_hidden_channels, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Conv2d(n_hidden_channels, n_output_channels, kernel_size=1, stride=1, padding=0),
+            BitConv2d(n_hidden_channels, n_output_channels, kernel_size=1, stride=1, padding=0),
         )
 
     def forward(self, x):
@@ -320,7 +321,7 @@ class ReassembleBlocks(nn.Module):
                     in_channels=out_channels[1], out_channels=out_channels[1], kernel_size=2, stride=2, padding=0
                 ),
                 nn.Identity(),
-                nn.Conv2d(
+                BitConv2d(
                     in_channels=out_channels[3], out_channels=out_channels[3], kernel_size=3, stride=2, padding=1
                 ),
             ]
@@ -328,7 +329,7 @@ class ReassembleBlocks(nn.Module):
         if self.readout_type == "project":
             self.readout_projects = nn.ModuleList()
             for i in range(len(self.projects)):
-                self.readout_projects.append(nn.Sequential(nn.Linear(2 * in_channels[i], in_channels[i]), nn.GELU()))
+                self.readout_projects.append(nn.Sequential(BitLinear(2 * in_channels[i], in_channels[i]), nn.GELU()))
 
         self.batchnorm_layers = nn.ModuleList(
             [nn.SyncBatchNorm(channel) if use_batchnorm else nn.Identity(channel) for channel in in_channels]

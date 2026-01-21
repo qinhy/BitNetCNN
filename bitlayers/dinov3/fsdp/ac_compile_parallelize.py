@@ -16,7 +16,7 @@ from torch.distributed.fsdp import register_fsdp_forward_method
 from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState
 from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
-from dinov3.utils import utils
+from bitlayers.dinov3.utils import utils
 
 
 logger = logging.getLogger("dinov3")
@@ -143,8 +143,8 @@ def ac_compile_parallelize(
     if utils.has_batchnorms(trained_model):
         raise NotImplementedError
 
-    from dinov3.models.convnext import ConvNeXt
-    from dinov3.models.vision_transformer import DinoVisionTransformer
+    from bitlayers.dinov3.models.convnext import ConvNeXt
+    from bitlayers.dinov3.models.vision_transformer import DinoVisionTransformer
 
     # FSDP utils for each architecture type
     ARCH_TYPE_MAP = {

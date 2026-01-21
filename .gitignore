@@ -211,5 +211,5 @@ checkpoints_timnet_mbv2/
 /checkpoints_timnet_rn18
 /checkpoints_timnet_rn50
 tmp.sh
-Resnet50_Final.pth
-retinaface.pth
+/*.pth
+/*.zip

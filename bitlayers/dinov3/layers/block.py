@@ -8,7 +8,7 @@ from typing import Callable, List, Optional
 import torch
 from torch import Tensor, nn
 
-from dinov3.utils import cat_keep_shapes, uncat_with_shapes
+from bitlayers.dinov3.utils import cat_keep_shapes, uncat_with_shapes
 
 from .attention import CausalSelfAttention, SelfAttention
 from .ffn_layers import Mlp
@@ -51,7 +51,7 @@ class SelfAttentionBlock(nn.Module):
             mask_k_bias=mask_k_bias,
             device=device,
         )
-        self.ls1 = LayerScale(dim, init_values=init_values, device=device) if init_values else nn.Identity()
+        self.ls1 = LayerScale(dim, init_values=init_values).to(device=device) if init_values else nn.Identity()
 
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * ffn_ratio)
@@ -63,7 +63,7 @@ class SelfAttentionBlock(nn.Module):
             bias=ffn_bias,
             device=device,
         )
-        self.ls2 = LayerScale(dim, init_values=init_values, device=device) if init_values else nn.Identity()
+        self.ls2 = LayerScale(dim, init_values=init_values).to(device=device) if init_values else nn.Identity()
 
         self.sample_drop_ratio = drop_path
 
