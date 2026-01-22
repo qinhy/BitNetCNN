@@ -589,7 +589,7 @@ def main():
         )
     )
     dm = RetinaFaceDataModule(dm_conf,anchors, pos_iou, neg_iou, variances)
-    # trainer.fit(lit, datamodule=dm)
+    trainer.fit(lit, datamodule=dm)
     return lit, dm
 
 if __name__ == "__main__":
@@ -597,6 +597,6 @@ if __name__ == "__main__":
     # dm.setup()
     # convert_to_ternary(lit.student)
     # lit.student.load_state_dict(load_zip_weights("./models/bit_retface_rn50_widerface_ternary.zip")["model"])
-    it = iter(dm.val_dataloader())
-    for images, targets in it:
-        lit.show_predict_examples(images)
+    # it = iter(dm.val_dataloader())
+    # for images, targets in it:
+    #     lit.show_predict_examples(images)
