@@ -38,6 +38,7 @@ BASE_URL = "https://github.com/qinhy/BitNetCNN/raw/refs/heads/main/models/"
 RESNET_FILE_TMPL     = "bit_resnet_{model_size}_{dataset}_{ternary}.{ext}"
 MBNV2_FILE_TMPL      = "bit_mobilenetv2_x{model_size}_{dataset}_{ternary}.{ext}"
 CONVNEXT_FILE_TMPL   = "bit_convnextv2_{model_size}_{dataset}_{ternary}.{ext}"
+RETINAFACE_FILE_TMPL = "bit_retface_rn{model_size}_{dataset}_{ternary}.{ext}"
 
 # Canonical dataset specs
 DATASETS: Dict[str, Dict[str, Any]] = {
@@ -58,6 +59,12 @@ DATASETS: Dict[str, Dict[str, Any]] = {
         "num_classes": 200,
         "url_tag": "timnet",
         "full": "Tiny-ImageNet",
+    },
+    "widerface": {
+        "aliases": {"widerface", "wider-face"},
+        "num_classes": 2,
+        "url_tag": "widerface",
+        "full": "WiderFace",
     },
     # Add more datasets here when supported:
     # "imagenet": {"aliases": {"imagenet", "in1k", "ilsvrc2012"}, "num_classes": 1000, "url_tag": "in1k", "full": "ImageNet-1k"},
@@ -354,6 +361,51 @@ def bitnet_resnet50(
         checkpoint_path=checkpoint_path,
     )
 
+
+def bitnet_retinaface(
+    pretrained: bool = False,
+    model_size="50",
+    dataset: str = "widerface",
+    scale_op: str = "median",
+    ternary: bool = True,
+    checkpoint_path: Optional[str] = None,
+) -> nn.Module:
+    from BitRetinaFace import BitRetinaFace, RetinaFaceAnchors
+
+    # Anchors
+    anchor_gen = RetinaFaceAnchors(
+        min_sizes=[[16, 32], [64, 128], [256, 512]],
+        steps=[8, 16, 32], clip=False
+    )
+    model = BitRetinaFace(
+        backbone_size=model_size, fpn_channels=256,
+        scale_op=scale_op, small_stem=False
+    )
+
+    state_dict: Optional[Dict[str, torch.Tensor]] = None
+    _convert_to_ternary_if_needed(model,ternary,state_dict)
+    if checkpoint_path or pretrained:
+        filenames = [
+            RETINAFACE_FILE_TMPL.format(
+                model_size=model_size,
+                dataset=dataset,
+                ternary=("ternary" if ternary else "best_fp"),
+                ext=ext,
+            )
+            for ext in ("zip", "pt")
+        ]
+        checkpoint_urls = [_urljoin(f) for f in filenames]
+        state_dict = _load_pretrained_weights(
+            model,
+            checkpoint_urls,
+            checkpoint_path,
+            model_name=f"BitRetinaFace {model_size} {_fullname_for(dataset)}{' (ternary)' if ternary else ''}",
+        )
+
+    if state_dict:model.load_state_dict(state_dict, strict=True)
+    
+    model.register_buffer("anchors", anchor_gen((640, 640)))
+    return model
 
 def _format_mbnv2_width_tag(width_mult: float) -> int:
     """

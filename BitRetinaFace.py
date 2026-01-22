@@ -184,6 +184,27 @@ class BitRetinaFace(nn.Module):
         res.load_state_dict(self.state_dict())
         return res
 
+    def show_predict_examples(self, images, score_thr=0.5, nms_iou=0.4, variance=(0.1, 0.2), anchors=None):
+        if anchors is None:
+            anchors = self.anchors
+        model = self
+        model.eval()
+        preds = []
+        with torch.no_grad():
+            mean = (0.485, 0.456, 0.406)
+            std = (0.229, 0.224, 0.225)
+            out_box, out_cls, out_land = model(images)
+            for i in range(images.size(0)):
+                boxes, scores, lands, keep_idx = detect_one_image(
+                    anchors, out_box[i], out_cls[i], out_land[i], 
+                    variance, 
+                    score_thr=score_thr, nms_iou=nms_iou
+                )
+                y = RetinaFaceTensor(img=images[i], bbox=boxes, landmark=lands, score=scores)
+                preds.append(y)
+                y.show(mean,std)
+        return preds
+    
 # =============================================================================
 # 2. LOGIC (Anchors, Matching, Decoding, Loss)
 # =============================================================================
@@ -522,24 +543,8 @@ class LitRetinaFace(LitBit):
         return opt, sched, "epoch"
     
     def show_predict_examples(self, images, score_thr=0.5, nms_iou=0.4):
-        model = self.student
-        # model = self.teacher
-        model.eval()
-        preds = []
-        with torch.no_grad():
-            mean = (0.485, 0.456, 0.406)
-            std = (0.229, 0.224, 0.225)
-            out_box, out_cls, out_land = model(images)
-            for i in range(images.size(0)):
-                boxes, scores, lands, keep_idx = detect_one_image(
-                    self.anchors, out_box[i], out_cls[i], out_land[i], 
-                    self.variances, 
-                    score_thr=score_thr, nms_iou=nms_iou
-                )
-                y = RetinaFaceTensor(img=images[i], bbox=boxes, landmark=lands, score=scores)
-                preds.append(y)
-                y.show(mean,std)
-
+        self.student.show_predict_examples(images, score_thr, nms_iou, self.variances, self.anchors)
+        
 def make_resnet50_teacher(device="cpu"):
     m = torch.hub.load("qinhy/Pytorch_Retinaface", "retinaface_resnet50", pretrained=True)
     return m.eval().to(device)
@@ -584,12 +589,14 @@ def main():
         )
     )
     dm = RetinaFaceDataModule(dm_conf,anchors, pos_iou, neg_iou, variances)
-    trainer.fit(lit, datamodule=dm)
+    # trainer.fit(lit, datamodule=dm)
     return lit, dm
 
 if __name__ == "__main__":
     lit, dm =  main()
-    dm.setup()
+    # dm.setup()
+    # convert_to_ternary(lit.student)
+    # lit.student.load_state_dict(load_zip_weights("./models/bit_retface_rn50_widerface_ternary.zip")["model"])
     it = iter(dm.val_dataloader())
     for images, targets in it:
         lit.show_predict_examples(images)

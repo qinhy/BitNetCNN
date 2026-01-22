@@ -9,7 +9,6 @@ from .retinaface import RetinaFaceDataset, RetinaFaceDataModule, RetinaFaceTenso
 __all__ = [
     "DataModuleConfig",
     "DataSetModule",
-    "get_val_tf",
     "CIFAR100Dataset",
     "CIFAR100DataModule",
     "TinyImageNetDataset",

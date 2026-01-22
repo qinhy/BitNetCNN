@@ -37,7 +37,8 @@ print("=" * 60)
 print("Test 2: Loading BitNetCNN (ternary)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_mnist', source='local', pretrained=True, checkpoint_path='./models/bit_netcnn_small_mnist_ternary.zip', ternary=True)
+    model = torch.hub.load('.', 'bitnet_mnist', source='local', pretrained=True, 
+                        checkpoint_path='./models/bit_netcnn_small_mnist_ternary.zip', ternary=True)
     print(f"[OK] Ternary model loaded successfully")
 
     # Test forward pass
@@ -54,7 +55,8 @@ print("=" * 60)
 print("Test 3: Loading BitResNet18 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_resnet18', source='local', pretrained=True, checkpoint_path='./models/bit_resnet_18_c100_ternary.zip')
+    model = torch.hub.load('.', 'bitnet_resnet18', source='local', pretrained=True, 
+                        checkpoint_path='./models/bit_resnet_18_c100_ternary.zip')
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -74,7 +76,8 @@ print("=" * 60)
 print("Test 4: Loading BitResNet50 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_resnet50', source='local', pretrained=True, checkpoint_path='./models/bit_resnet_50_c100_ternary.zip')
+    model = torch.hub.load('.', 'bitnet_resnet50', source='local', pretrained=True, 
+                        checkpoint_path='./models/bit_resnet_50_c100_ternary.zip')
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -92,7 +95,8 @@ print("=" * 60)
 print("Test 5: Loading BitMobileNetV2 (CIFAR-100)")
 print("=" * 60)
 try:
-    model = torch.hub.load('.', 'bitnet_mobilenetv2', source='local', pretrained=True, width_mult=1.4, checkpoint_path='./models/bit_mobilenetv2_x140_c100_ternary.zip')
+    model = torch.hub.load('.', 'bitnet_mobilenetv2', source='local', pretrained=True, width_mult=1.4, 
+                        checkpoint_path='./models/bit_mobilenetv2_x140_c100_ternary.zip')
     print(f"[OK] Model loaded successfully")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -105,10 +109,28 @@ try:
 except Exception as e:
     print(f"[FAIL] Failed: {e}\n")
 
-exit()
-# Test 6: Load BitConvNeXtv2
+# Test 6: Load BitRetinaFace
 print("=" * 60)
-print("Test 6: Loading BitConvNeXtv2 (CIFAR-100)")
+print("Test 6: Loading BitRetinaFace (WiderFace)")
+print("=" * 60)
+try:
+    model = torch.hub.load('.', 'bitnet_retinaface', source='local', pretrained=True, 
+                        checkpoint_path='./models/bit_retface_rn50_widerface_ternary.zip')
+    print(f"[OK] Model loaded successfully")
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # Test forward pass
+    x = torch.randn(2, 3, 640, 640)
+    box, cls, landmark = model(x)
+    print(f"  Output shape: {box.shape} {cls.shape} {landmark.shape}")
+    print("  [OK] Forward pass successful\n")
+except Exception as e:
+    print(f"[FAIL] Failed: {e}\n")
+
+exit()
+# Test 7: Load BitConvNeXtv2
+print("=" * 60)
+print("Test 7: Loading BitConvNeXtv2 (CIFAR-100)")
 print("=" * 60)
 try:
     model = torch.hub.load('.', 'bitnet_convnextv2', source='local', pretrained=False)
@@ -123,7 +145,7 @@ try:
 except Exception as e:
     print(f"[FAIL] Failed: {e}\n")
 
-exit()
+
 # Test 7: List available models
 print("=" * 60)
 print("Test 7: Listing available models")
