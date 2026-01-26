@@ -435,6 +435,8 @@ class Bit:
     class Linear(nn.Module):
         def __init__(self, in_f: int, out_f: int, bias: bool = True, scale_op: str = "median"):
             super().__init__()
+            self.in_features = in_f
+            self.out_features = out_f
             self.weight = nn.Parameter(torch.empty(out_f, in_f))
             nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
             self.bias = nn.Parameter(torch.zeros(out_f)) if bias else None
@@ -452,13 +454,16 @@ class Bit:
             w_q = torch.round(w / s.view(-1, 1)).clamp(-1, 1).to(w.dtype)
             bias = None if self.bias is None else self.bias.data.clone()
             w_q = w_q.to(dtype=torch.int8) if dtype else w_q
-            return Bit.LinearInfer(weight=w_q, scale=s, bias=bias,
-                    ).to(device=self.weight.device,dtype=self.weight.dtype)
+            return Bit.LinearInfer(in_f=self.in_features, out_f=self.out_features, 
+                                   weight=w_q, scale=s, bias=bias,
+                                ).to(device=self.weight.device,dtype=self.weight.dtype)
 
     class LinearInfer(nn.Module):
         """Frozen ternary linear: y = (x @ Wq^T) * s + b"""
-        def __init__(self, weight: torch.Tensor, scale: torch.Tensor, bias):
+        def __init__(self, in_f: int, out_f: int, weight: torch.Tensor, scale: torch.Tensor, bias):
             super().__init__()
+            self.in_features = in_f
+            self.out_features = out_f
             self.weight = nn.Parameter(weight, requires_grad=False)
             self.scale = nn.Parameter(scale, requires_grad=False)
             self.bias = nn.Parameter(bias, requires_grad=False) if bias is not None else None
