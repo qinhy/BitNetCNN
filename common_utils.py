@@ -11,6 +11,7 @@ import zipfile
 
 from typing import Dict, Optional, Sequence, Tuple, List, Union
 import torch
+import torch.onnx
 
 from bitlayers.bit import Bit
 import torch.nn as nn
@@ -461,7 +462,7 @@ def set_export_mode(m, flag=True):
 def export_onnx(model, dummy_input, path="model.onnx"):
     model = model.eval()
     set_export_mode(model, True)
-    exported = torch.onnx.dynamo_export(model, dummy_input)
+    exported = torch.onnx.export(model, dummy_input, dynamo=True)
     exported.save(path)
 
 def load_zip_weights(

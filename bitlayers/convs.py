@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type, Union, Unpack
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Type, Union
 
 from pydantic import BaseModel, Field, model_validator
 from torch import nn
