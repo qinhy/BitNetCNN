@@ -215,3 +215,4 @@ tmp.sh
 # Data directories
 /data/*
 
+*.onnx
