@@ -430,6 +430,236 @@ class Bit:
             return self.weight.to(dtype=dtype), self.scale
 
     # ------------------------------------------------------------------
+    # Train-time ConvTranspose2d (fake-quant weights)
+    # ------------------------------------------------------------------
+    class ConvTranspose2d(CommonConv2d):
+        """
+        ConvTranspose2d with ternary weights (fake-quant for training).
+        Signature follows nn.ConvTranspose2d, with SAME padding support
+        via CommonConv2d padding utilities.
+        """
+        def __init__(
+            self,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=1,
+            padding=0,
+            output_padding=0,
+            padding_mode: str = "zeros",
+            dilation=1,
+            groups=1,
+            bias: bool = True,
+            scale_op: str = "median",
+        ):
+            super().__init__(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                padding_mode=padding_mode,
+                dilation=dilation,
+                groups=groups,
+                bias=bias,
+                scale_op=scale_op,
+            )
+            self.output_padding = to_2tuple(output_padding)
+            self.init_weights(bias)
+
+        def init_weights(self, bias: bool):
+            kh, kw = self.kernel_size
+            self.weight = nn.Parameter(
+                torch.empty(self.in_channels, self.out_channels // self.groups, kh, kw)
+            )
+            nn.init.kaiming_normal_(self.weight, nonlinearity="relu")
+            self.bias = nn.Parameter(torch.zeros(self.out_channels)) if bias else None
+
+        def _reshape_weight_to_out(self, weight: torch.Tensor) -> torch.Tensor:
+            # Reorder to (out_channels, in_channels_per_group, kh, kw) for per-out quantization
+            g = self.groups
+            in_per = self.in_channels // g
+            out_per = self.out_channels // g
+            kh, kw = self.kernel_size
+            w_view = weight.view(g, in_per, out_per, kh, kw)
+            w_view = w_view.permute(0, 2, 1, 3, 4).contiguous()
+            return w_view.view(self.out_channels, in_per, kh, kw)
+
+        def _reshape_weight_from_out(self, weight: torch.Tensor) -> torch.Tensor:
+            # Inverse of _reshape_weight_to_out
+            g = self.groups
+            in_per = self.in_channels // g
+            out_per = self.out_channels // g
+            kh, kw = self.kernel_size
+            w_view = weight.view(g, out_per, in_per, kh, kw)
+            w_view = w_view.permute(0, 2, 1, 3, 4).contiguous()
+            return w_view.view(self.in_channels, out_per, kh, kw)
+
+        def get_weights(self, dtype: torch.dtype, device: torch.device):
+            w = self._reshape_weight_to_out(self.weight)
+            s = _reduce_abs(w, keep_dim=0, op=self.scale_op)
+            w_bar = (w / s).detach()
+            w_q = torch.round(w_bar).clamp(-1, 1)
+            w_q = w + (w_q * s - w).detach()
+            w_q = self._reshape_weight_from_out(w_q)
+            return w_q.to(dtype=dtype, device=device), None
+
+        def forward(
+            self,
+            x: torch.Tensor,
+            weight: Optional[torch.Tensor] = None,
+            bias: Optional[torch.Tensor] = None,
+        ):
+            scale = None
+            if weight is None:
+                weight, scale = self.get_weights(x.dtype, x.device)
+
+            if self.dynamic_pad:
+                x = self.pad_layer(x)
+                padding_value = 0
+            else:
+                padding_value = self.padding_value
+
+            bias = self.bias if scale is None else None
+
+            y = F.conv_transpose2d(
+                x,
+                weight,
+                bias=bias,
+                stride=self.stride,
+                padding=padding_value,
+                output_padding=self.output_padding,
+                dilation=self.dilation,
+                groups=self.groups,
+            )
+
+            if scale is not None:
+                y = y * scale
+                if self.bias is not None:
+                    y = y + self.bias.view(1, -1, 1, 1)
+
+            return y
+
+        @torch.no_grad()
+        def to_ternary(self, dtype=torch.int8):
+            w = self.weight.data
+            w_view = self._reshape_weight_to_out(w)
+            s_vec = _reduce_abs(w_view, keep_dim=0, op=self.scale_op).squeeze()
+            s = s_vec.view(-1, 1, 1)
+            w_bar = w_view / s_vec.view(-1, 1, 1, 1)
+            w_q = torch.round(w_bar).clamp(-1, 1).to(w.dtype)
+            w_q = self._reshape_weight_from_out(w_q)
+            return Bit.ConvTranspose2dInfer(
+                weight=w_q.to(dtype=torch.int8) if dtype else w_q,
+                scale=s,
+                bias=(None if self.bias is None else self.bias.data.clone()),
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=self.kernel_size,
+                stride=self.stride,
+                padding=self.padding,
+                output_padding=self.output_padding,
+                padding_mode=self.padding_mode,
+                dilation=self.dilation,
+                groups=self.groups,
+                scale_op=self.scale_op,
+            ).to(device=self.weight.device, dtype=self.weight.dtype)
+
+    # ------------------------------------------------------------------
+    # Inference ConvTranspose2d (frozen ternary)
+    # ------------------------------------------------------------------
+    class ConvTranspose2dInfer(CommonConv2d):
+        """
+        Frozen ternary conv transpose:
+            y = ConvTranspose(x, Wq) * s_per_out + b
+        """
+
+        def __init__(
+            self,
+            weight: torch.Tensor,
+            scale: torch.Tensor,
+            bias: torch.Tensor,
+            in_channels: int,
+            out_channels: int,
+            kernel_size,
+            stride=1,
+            padding=0,
+            output_padding=0,
+            padding_mode: str = "zeros",
+            dilation=1,
+            groups=1,
+            scale_op: str = "median",
+        ):
+            super().__init__(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                padding_mode=padding_mode,
+                dilation=dilation,
+                groups=groups,
+                bias=True if bias is not None else False,
+                scale_op=scale_op,
+            )
+            self.output_padding = to_2tuple(output_padding)
+            self.save_dtype = torch.int8
+            self.init_weights(bias, weight, scale)
+
+        # ---- custom save / load hooks ----
+        def _save_to_state_dict(self, destination, prefix, keep_vars):
+            if self.save_dtype == torch.int8 and (
+                (self.weight.data > 127).sum() + (self.weight.data < -128).sum() > 0
+            ):
+                raise ValueError("weight.data is not in (-128, 127)")
+            self.weight.data = self.weight.data.to(self.save_dtype)
+            super()._save_to_state_dict(destination, prefix, keep_vars)
+
+        def init_weights(self, bias, weight: torch.Tensor, scale: torch.Tensor):
+            self.weight = nn.Parameter(weight, requires_grad=False)
+            self.scale = nn.Parameter(scale, requires_grad=False)
+            self.bias = bias if bias is None else nn.Parameter(bias, requires_grad=False)
+
+        def get_weights(self, dtype: torch.dtype, device: torch.device):
+            return self.weight.to(dtype=dtype), self.scale
+
+        def forward(
+            self,
+            x: torch.Tensor,
+            weight: Optional[torch.Tensor] = None,
+            bias: Optional[torch.Tensor] = None,
+        ):
+            scale = None
+            if weight is None:
+                weight, scale = self.get_weights(x.dtype, x.device)
+
+            if self.dynamic_pad:
+                x = self.pad_layer(x)
+                padding_value = 0
+            else:
+                padding_value = self.padding_value
+
+            bias = self.bias if scale is None else None
+
+            y = F.conv_transpose2d(
+                x,
+                weight,
+                bias=bias,
+                stride=self.stride,
+                padding=padding_value,
+                output_padding=self.output_padding,
+                dilation=self.dilation,
+                groups=self.groups,
+            )
+
+            if scale is not None:
+                y = y * scale
+                if self.bias is not None:
+                    y = y + self.bias.view(1, -1, 1, 1)
+
+            return y
+
+    # ------------------------------------------------------------------
     # Train-time Linear & Inference Linear (unchanged from old working code)
     # ------------------------------------------------------------------
     class Linear(nn.Module):

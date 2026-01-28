@@ -100,6 +100,21 @@ class Conv2dModels:
             if not kwargs:return None
             return cls(**kwargs)
 
+    class ConvTranspose2d(BasicModel):
+        in_channels: int
+        out_channels: int = -1 # just a place holder not valid
+        kernel_size: IntOrPair = 3
+        stride: IntOrPair = 1
+        padding: PadArg = 0
+        output_padding: IntOrPair = 0
+        dilation: IntOrPair = 1
+        groups: int = 1
+        bias: bool = True
+        padding_mode: str = 'zeros'
+
+        bit: bool = True
+        scale_op: str = "median"
+
     class Conv2dDepthwise(Conv2d):
         group_size: int = Field(default=1, gt=0, exclude=True)
         # If group_size = 1:
@@ -537,6 +552,46 @@ class Conv2dModules:
             if self.weight_used and self.bit:
                 self.conv = self.conv.to_ternary()                
             return self
+
+    class ConvTranspose2d(Module):
+        def __init__(self, para):
+            super().__init__(para)
+            self.para: Conv2dModels.ConvTranspose2d = self.para
+            self.bit = self.para.bit
+
+            if self.para.bit:
+                self.conv_para = self.para.model_dump(exclude=['bit','norm','act'])
+                self.conv = Bit.ConvTranspose2d(**self.conv_para)
+            else:
+                self.conv_para = self.para.model_dump(exclude=['bit','scale_op','padding_mode','norm','act'])
+                self.conv = nn.ConvTranspose2d(**self.conv_para)
+            self.weight_used = True
+
+        def forward_weight(self, x, weight:Optional[torch.Tensor]=None):
+            self.weight_used = False
+            if weight is None:
+                return self.conv(x)
+            if self.bit:
+                return self.conv(x, weight=weight)
+            conv_para = dict(self.conv_para)
+            conv_para.pop('bias', None)
+            return torch.nn.functional.conv_transpose2d(
+                x,
+                weight=weight,
+                bias=self.conv.bias,
+                **conv_para,
+            )
+
+        def forward(self, x):
+            return self.conv(x)
+
+        @torch.no_grad()
+        def to_ternary(self):
+            if not self.bit:
+                print('to_ternary is off here!')
+            if self.bit:
+                self.conv = self.conv.to_ternary()
+            return self
                 
     class Conv2dDepthwise(Conv2d):pass
     class Conv2dPointwise(Conv2d):pass
@@ -792,8 +847,6 @@ class Conv2dModules:
             self.convert_to_ternary(self,mods)
             return self
         
-
-
 
 
 
