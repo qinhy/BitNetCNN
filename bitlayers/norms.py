@@ -198,9 +198,25 @@ class NormModels:
     #     def build(self) -> nn.Module:
     #         return NormdModules.Norm(self, type(self), nn.LayerNormFp32)
 
-    # class LayerNorm2d(LayerNorm):
-    #     def build(self) -> nn.Module:
-    #         return NormdModules.Norm(self, type(self), nn.LayerNorm2d)
+    class LayerNorm2d(BaseModel):
+        num_features: int
+
+        def build(self) -> nn.Module:
+            return NormModels._LayerNorm2D(**self.model_dump())
+    
+    class _LayerNorm2D(nn.Module):
+        def __init__(self, num_features, norm_layer=nn.LayerNorm):
+            super().__init__()
+            self.ln = norm_layer(num_features) if norm_layer is not None else nn.Identity()
+
+        def forward(self, x: torch.Tensor):
+            """
+            x: N C H W
+            """
+            x = x.permute(0, 2, 3, 1)
+            x = self.ln(x)
+            x = x.permute(0, 3, 1, 2)
+            return x
 
     # class LayerNorm2dFp32(LayerNorm):
     #     def build(self) -> nn.Module:
