@@ -768,7 +768,7 @@ class LitBitConfig(BaseModel):
     model_size: str = Field(default="", description="Optional model size preset (empty = default).")
     model_weights: str = Field(default="", description="Optional path/name for pretrained weights (empty = none).")
 
-    hint_points: List[Union[str, Tuple]] = Field(default_factory=list)
+    hint_points: List[Union[str, Tuple]] = Field(default_factory=list) # [(student, teacher),...]
 
 
 class LitBit(AccelLightningModule):
@@ -813,7 +813,7 @@ class LitBit(AccelLightningModule):
 
         # --- KD / Hint ---
         self.kd = KDLoss(T=float(config.T))
-        self.hint = AdaptiveHintLoss()
+        self.hint = AdaptiveHintLoss(cnn_resize="auto", seq_resize="pool")
 
         if not (self.alpha_kd > 0 and self.has_teacher):
             self.kd = None
@@ -883,10 +883,11 @@ class LitBit(AccelLightningModule):
             trainer.print(f"{str10('Student')} : {class_name(self.student)} | params {s_total/1e6:.2f}M (train {s_train/1e6:.2f}M)")
             if self.has_teacher:
                 trainer.print(f"{str10('Teacher')} : {class_name(self.teacher)} | params {t_total/1e6:.2f}M ({'frozen' if t_train==0 else t_train})")
-            if self.ce_hard is not None:
-                trainer.print(f"{str10('CE_hard')} : enable")
-            if self.ce_soft is not None:
-                trainer.print(f"{str10('CE_soft')} : enable")
+            if self.alpha_kd<1.0:
+                if self.ce_hard is not None:
+                    trainer.print(f"{str10('CE_hard')} : enable")
+                if self.ce_soft is not None:
+                    trainer.print(f"{str10('CE_soft')} : enable")
             if self.kd is not None:
                 trainer.print(f"{str10('KD')} : alpha_kd={self.alpha_kd}")
             if self.hint is not None:
@@ -915,8 +916,11 @@ class LitBit(AccelLightningModule):
         t_mods = dict(self.teacher.named_modules())
 
         for n in self.hint_points:
-            if isinstance(n, tuple):
+            mode = 'cnn'
+            if isinstance(n, tuple) and len(n) == 2:
                 sn, tn = n
+            elif isinstance(n, tuple) and len(n) == 3:
+                sn, tn, mode = n
             else:
                 sn, tn = n, n
 
@@ -937,24 +941,34 @@ class LitBit(AccelLightningModule):
                     f"Student module: {type(s_m)}, teacher module: {type(t_m)}"
                 )
 
-            self.hint.register_pair(sn, c_s, c_t)
+            self.hint.register_pair(sn, c_s, c_t, mode)
 
     def get_loss_hint(self) -> torch.Tensor:
         loss_hint = 0.0
         for hint_name in self.hint_points:
             sn = tn = hint_name
-            if isinstance(hint_name, tuple):
+            if isinstance(hint_name, tuple) and len(hint_name) == 2:
                 sn, tn = hint_name
+            elif isinstance(hint_name, tuple) and len(hint_name) == 3:
+                sn, tn, mode = hint_name
 
             if sn not in self._s_feats:
                 raise ValueError(f"Hint point {sn} not found in student features keys: {list(self._s_feats.keys())}")
             if tn not in self._t_feats:
                 raise ValueError(f"Hint point {tn} not found in teacher features keys: {list(self._t_feats.keys())}")
 
+            sf = self._s_feats[sn]
+            tf = self._t_feats[tn]
+
+            if type(sf) is list and len(sf)==1:
+                sf = sf[0]
+            if type(tf) is list and len(tf)==1:
+                tf = tf[0]
+
             loss_hint = loss_hint + self.hint(
                 sn,
-                self._s_feats[sn].float(),
-                self._t_feats[tn].float().detach(),
+                sf.float(),
+                tf.float().detach(),
             )
         return loss_hint
 
@@ -981,8 +995,12 @@ class LitBit(AccelLightningModule):
     def _ce_training_step(self, x: torch.Tensor, y: torch.Tensor):
         logits = self.student(x)
         ce = self.ce_hard if self.ce_hard is not None else self.ce_soft
-        loss_ce = (1.0 - self.alpha_kd) * ce(logits, y)
-        return loss_ce, {"train/ce": loss_ce.detach()}, logits
+        if (1.0 - self.alpha_kd)>0:
+            loss_ce = (1.0 - self.alpha_kd) * ce(logits, y)
+            return loss_ce, {"train/ce": loss_ce.detach()}, logits
+        else:
+            loss_ce = 0.0
+            return loss_ce, {"train/ce": loss_ce}, logits
 
     def _ce_kd_training_step(self, x: torch.Tensor, y: torch.Tensor):
         z_t = self.teacher_forward(x)
@@ -1143,24 +1161,129 @@ class KDLoss(nn.Module):
 
 
 class AdaptiveHintLoss(nn.Module):
-    """Learnable 1x1 per hint; auto matches spatial size then SmoothL1."""
-    def __init__(self):
+    """
+    Hint loss for CNN (B,C,H,W) and Transformer (B,N,D).
+    - Per-hint learnable projection:
+        CNN: 1x1 Conv2d (C_s -> C_t)
+        TX : Linear (D_s -> D_t)
+    - Auto matches spatial/token length, then SmoothL1.
+    """
+    def __init__(
+        self,
+        beta: float = 1.0,
+        reduction: str = "mean",
+        cnn_resize: str = "auto",   # "auto" | "pool" | "interp"
+        seq_resize: str = "pool",   # "pool" | "interp"
+        batch_first: bool = True,   # for transformer features: (B,N,D) if True else (N,B,D)
+    ):
         super().__init__()
         self.proj = nn.ModuleDict()
+        self.modes = {}  # name -> "cnn" or "seq" (info/debug)
+        self.beta = beta
+        self.reduction = reduction
+        self.cnn_resize = cnn_resize
+        self.seq_resize = seq_resize
+        self.batch_first = batch_first
 
     @staticmethod
     def _k(name: str) -> str:
         return name.replace(".", "\u2027")
 
-    def register_pair(self, name: str, c_s: int, c_t: int):
-        k = self._k(name)
-        self.proj[k] = nn.Identity() if c_s==c_t else nn.Conv2d(c_s, c_t, kernel_size=1, bias=True)
+    def register_pair(self, name: str, in_dim: int, out_dim: int, mode: Literal["cnn", "seq"] = "cnn"):
+        """
+        mode:
+          - "cnn": in_dim=C_s, out_dim=C_t, uses Conv2d 1x1
+          - "seq": in_dim=D_s, out_dim=D_t, uses Linear
+        """
+        if mode not in ("cnn", "seq"):
+            raise ValueError(f"mode must be 'cnn' or 'seq', got {mode}")
 
-    def forward(self, name: str, f_s: torch.Tensor, f_t: torch.Tensor) -> torch.Tensor:
-        f_s = F.adaptive_avg_pool2d(f_s, f_t.shape[-2:])
         k = self._k(name)
-        f_s = self.proj[k](f_s)
-        return F.smooth_l1_loss(f_s, f_t)
+        self.modes[k] = mode
+
+        if in_dim == out_dim:
+            self.proj[k] = nn.Identity()
+        else:
+            if mode == "cnn":
+                self.proj[k] = nn.Conv2d(in_dim, out_dim, kernel_size=1, bias=True)
+            else:  # "seq"
+                self.proj[k] = nn.Linear(in_dim, out_dim, bias=True)
+
+    # ---------- resizing helpers ----------
+    def _resize_cnn(self, x: torch.Tensor, target_hw):
+        if x.shape[-2:] == target_hw:
+            return x
+        if self.cnn_resize == "pool":
+            return F.adaptive_avg_pool2d(x, target_hw)
+        if self.cnn_resize == "interp":
+            return F.interpolate(x, size=target_hw, mode="bilinear", align_corners=False)
+
+        # auto: pool for downsample, interpolate for upsample
+        hs, ws = x.shape[-2:]
+        ht, wt = target_hw
+        if ht <= hs and wt <= ws:
+            return F.adaptive_avg_pool2d(x, target_hw)
+        return F.interpolate(x, size=target_hw, mode="bilinear", align_corners=False)
+
+    def _resize_seq(self, x: torch.Tensor, target_n: int):
+        # x: (B,N,D)
+        if x.shape[1] == target_n:
+            return x
+
+        # resize along N using (B,D,N) format
+        x = x.transpose(1, 2)  # (B,D,N)
+        if self.seq_resize == "pool":
+            x = F.adaptive_avg_pool1d(x, target_n)
+        else:  # "interp"
+            x = F.interpolate(x, size=target_n, mode="linear", align_corners=False)
+        return x.transpose(1, 2)  # (B,N,D)
+
+    # ---------- forward ----------
+    def forward(self, name: str, f_s: torch.Tensor, f_t: torch.Tensor) -> torch.Tensor:
+        k = self._k(name)
+        if k not in self.proj:
+            raise KeyError(f"Hint '{name}' not registered. Call register_pair(name, in_dim, out_dim, mode) first.")
+
+        mode = self.modes.get(k, None)
+        if mode is None:
+            # fallback inference if you forgot to store mode
+            if f_s.ndim == 4 and f_t.ndim == 4:
+                mode = "cnn"
+            elif f_s.ndim in (2, 3) and f_t.ndim in (2, 3):
+                mode = "seq"
+            else:
+                raise ValueError(f"Can't infer mode from shapes f_s={tuple(f_s.shape)}, f_t={tuple(f_t.shape)}")
+
+        # match dtype for stability (AMP, etc.)
+        f_s = f_s.to(dtype=f_t.dtype)
+
+        if mode == "cnn":
+            if f_s.ndim != 4 or f_t.ndim != 4:
+                raise ValueError(f"CNN mode expects (B,C,H,W). Got f_s={tuple(f_s.shape)}, f_t={tuple(f_t.shape)}")
+
+            f_s = self._resize_cnn(f_s, f_t.shape[-2:])
+            f_s = self.proj[k](f_s)  # Conv2d or Identity
+            return F.smooth_l1_loss(f_s, f_t, beta=self.beta, reduction=self.reduction)
+
+        # seq / transformer
+        # accept (B,D) by treating as one token
+        if f_s.ndim == 2:
+            f_s = f_s.unsqueeze(1)  # (B,1,D)
+        if f_t.ndim == 2:
+            f_t = f_t.unsqueeze(1)
+
+        if not self.batch_first:
+            # (N,B,D) -> (B,N,D)
+            f_s = f_s.transpose(0, 1)
+            f_t = f_t.transpose(0, 1)
+
+        if f_s.ndim != 3 or f_t.ndim != 3:
+            raise ValueError(f"SEQ mode expects (B,N,D). Got f_s={tuple(f_s.shape)}, f_t={tuple(f_t.shape)}")
+
+        # match token length first, then project D
+        f_s = self._resize_seq(f_s, f_t.shape[1])
+        f_s = self.proj[k](f_s)  # Linear works on last dim: (B,N,Ds)->(B,N,Dt)
+        return F.smooth_l1_loss(f_s, f_t, beta=self.beta, reduction=self.reduction)
 
 
 class SaveOutputHook:
