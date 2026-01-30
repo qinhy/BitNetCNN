@@ -1,11 +1,15 @@
 import argparse
+from typing import Literal
+from pydantic import Field
 from pydanticV2_argparse import ArgumentParser
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from bitlayers.drop import DropPath
 from bitlayers.weight_init import trunc_normal_
-from common_utils import *  # provides Bit, LitBit, add_common_args, setup_trainer, *DataModule classes if available
+from common_utils import *
+from dataset.config import DataModuleConfig
+from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig  # provides Bit, LitBit, add_common_args, setup_trainer, *DataModule classes if available
 
 EPS = 1e-12
 
@@ -201,70 +205,10 @@ def make_teacher_for_dataset(size: str, dataset: str, num_classes: int, device: 
     return t.eval().to(device)
 
 # ----------------------------
-# LightningModule: KD + hints
-# ----------------------------
-class LitConvNeXtV2KD(LitBit):
-    def __init__(
-        self,
-        lr, wd, epochs,
-        dataset_name='c100',
-        model_size="pico",
-        label_smoothing=0.1, alpha_kd=0.0, alpha_hint=0.0, T=4.0,
-        amp=True, export_dir="./ckpt_convnextv2",
-        drop_path_rate=0.1, scale_op="median",
-        teacher_pretrained=True
-    ):
-        # dataset -> classes
-        dataset_name = dataset_name.lower()
-        if dataset_name in ['c10', 'cifar10']:
-            num_classes = 10
-        elif dataset_name in ['c100', 'cifar100']:
-            num_classes = 100
-        elif dataset_name in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-            num_classes = 200
-        elif dataset_name in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-            num_classes = 1000
-        else:
-            raise ValueError(f"Unsupported dataset: {dataset_name}")
-
-        student = ConvNeXtV2.convnextv2(model_size, num_classes=num_classes, drop_path_rate=drop_path_rate, scale_op=scale_op)
-        teacher = make_teacher_for_dataset(
-            size=model_size,
-            dataset=dataset_name,
-            num_classes=num_classes,
-            device="cpu",
-            pretrained=teacher_pretrained
-        )
-
-        super().__init__(
-            lr, wd, epochs, label_smoothing,
-            alpha_kd, alpha_hint, T,
-            amp,
-            export_dir,
-            dataset_name=dataset_name,
-            model_name='convnextv2',
-            model_size=model_size,
-            hint_points=["stages.0", "stages.1", "stages.2", "stages.3"],
-            student=student,
-            teacher=teacher,
-            num_classes=num_classes
-        )
-
-# ----------------------------
 # CLI / main
 # ----------------------------
 class Config(CommonTrainConfig):
-    dataset: Literal[
-        "c10", "cifar10",
-        "c100", "cifar100",
-        "timnet", "tiny",
-        "tinyimagenet", "tiny-imagenet",
-        "imnet", "imagenet", "in1k", "imagenet1k",
-    ] = Field(
-        default="timnet",
-        description="Target dataset (affects datamodule, num_classes, transforms).",
-    )
-
+    dataset_name: str = "timnet"
     model_size: Literal[
         "atto", "femto", "pico", "nano",
         "tiny", "base", "large", "huge",
@@ -273,7 +217,7 @@ class Config(CommonTrainConfig):
         description="Model size preset.",
     )
 
-    drop_path: float = Field(
+    drop_path_rate: float = Field(
         default=0.1,
         description="Stochastic depth drop-path rate.",
     )
@@ -285,83 +229,50 @@ class Config(CommonTrainConfig):
             "(head is replaced)."
         ),
     )
+
     out: Optional[str] =None
     batch_size: int =512
+    num_workers: int = 0
+
     lr: float =0.2
     alpha_kd: float =0.0
     alpha_hint: float =0.1
 
-def parse_args():
+def main() -> None:
     parser = ArgumentParser(model=Config)
     args = parser.parse_typed_args()
+    dm = DataModuleConfig.model_validate(args.model_dump())
+    config = LitBitConfig.model_validate(args.model_dump())
+    config.dataset = dm.model_copy()
+    dataset_name = config.dataset.dataset_name
+    num_classes = config.dataset.num_classes
+    config.export_dir = args.export_dir = f"./ckpt_{config.dataset.dataset_name}_conxt_{config.model_size}"
+
+    config.model_size = model_size = str(config.model_size)
+
+    config.student = ConvNeXtV2.convnextv2(model_size, num_classes=num_classes,
+                                           drop_path_rate=args.drop_path_rate)
+    config.teacher = make_teacher_for_dataset(
+            size=model_size,
+            dataset=dataset_name,
+            num_classes=num_classes,
+            device="cpu",
+            pretrained=True
+    )
+    config.model_name="convnxtv2"
+    config.hint_points=['stages.0','stages.1','stages.2','stages.3']
     
-    if args.out is None:
-        args.out = f"./ckpt_{args.dataset}_convnextv2_{args.model_size}"
-
-    return args
-
-def _pick_datamodule(dataset_name: str, dmargs: dict):
-    ds = dataset_name.lower()
-    # Prefer datamodules provided by your common_utils; fallback if missing
-    if ds in ['c100', 'cifar100']:
-        if 'CIFAR100DataModule' in globals():
-            return CIFAR100DataModule(**dmargs)
-        else:
-            raise RuntimeError("CIFAR100DataModule not found in common_utils.")
-    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-        if 'TinyImageNetDataModule' in globals():
-            return TinyImageNetDataModule(**dmargs)
-        else:
-            raise RuntimeError("TinyImageNetDataModule not found in common_utils.")
-    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-        if 'ImageNetDataModule' in globals():
-            return ImageNetDataModule(**dmargs)
-        else:
-            raise RuntimeError("ImageNetDataModule not found in common_utils.")
-    else:
-        raise ValueError(f"Unsupported dataset: {dataset_name}")
-
-def main():
-    args = parse_args()
-
-    # Derive num_classes to bake into export dir for clarity
-    ds = args.dataset.lower()
-    if ds in ['c10', 'cifar10']:
-        ncls = 10
-    elif ds in ['c100', 'cifar100']:
-        ncls = 100
-    elif ds in ['timnet', 'tiny', 'tinyimagenet', 'tiny-imagenet']:
-        ncls = 200
-    elif ds in ['imnet', 'imagenet', 'in1k', 'imagenet1k']:
-        ncls = 1000
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
-
-    out_dir = f"{args.out}_{ds}_{args.model_size}_{ncls}c"
-
-    lit = LitConvNeXtV2KD(
-        lr=args.lr, wd=args.wd, epochs=args.epochs,
-        dataset_name=args.dataset,
-        model_size=args.model_size,
-        label_smoothing=args.label_smoothing,
-        alpha_kd=args.alpha_kd, alpha_hint=args.alpha_hint, T=args.T,
-        amp=args.amp, export_dir=out_dir, drop_path_rate=args.drop_path,
-        teacher_pretrained=args.teacher_pretrained
+    lit = LitBit(config)
+    dm = dm.build()
+    
+    trainer = AccelTrainer(
+        max_epochs=args.epochs,
+        mixed_precision="bf16" if args.amp else "no",
+        gradient_accumulation_steps=1,
+        log_every_n_steps=10,
     )
-
-    dmargs = dict(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=1,
-        mixup=args.mixup,
-        cutmix=args.cutmix,
-        mix_alpha=args.mix_alpha
-    )
-    dm = _pick_datamodule(args.dataset, dmargs)
-
-    trainer = setup_trainer(args)
     trainer.fit(lit, datamodule=dm)
-
 
 if __name__ == "__main__":
     main()
+    

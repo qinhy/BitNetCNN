@@ -983,7 +983,7 @@ class LitMobileNetV5KD(LitBit):
         teacher_pretrained=True
     ):
         # dataset -> classes
-        ds = config.dataset_name.lower()
+        ds = config.dataset.dataset_name.lower()
 
         def get_mnv5_arch_def(model_size: str) -> list[list[str]]:
             size = model_size.lower()
@@ -1002,31 +1002,31 @@ class LitMobileNetV5KD(LitBit):
 
         # student & teacher
         config.student = MobileNetV5Classifier(arch_def=get_mnv5_arch_def(config.model_size),
-                                        num_classes=config.num_classes,
+                                        num_classes=config.dataset.num_classes,
                                         drop_rate=drop_path_rate)
 
         config.teacher = make_mobilenetv5_teacher(
             size="300m",
             dataset=ds,
-            num_classes=config.num_classes,
+            num_classes=config.dataset.num_classes,
             device="cpu",
             pretrained=teacher_pretrained
         )
 
-        # summ(student)
-        # summ(teacher)
+        # summ(config.student)
+        # summ(config.teacher)
         # x = torch.randn(1, 3, 64, 64)
         # print(student(x).shape)
         # print(teacher(x).shape)
 
         # pick robust hint tap points via timm feature_info
-        config.hint_points = [("blocks.0","blocks.0"), ("blocks.1","blocks.1"),
-                       ("blocks.2","blocks.2"), ("blocks.3","blocks.3"),
-                       ("msfa","msfa")]
-        config.dataset_name=ds
+        config.hint_points = [("backbone.blocks.0","blocks.0"), ("backbone.blocks.1","blocks.1"),
+                       ("backbone.blocks.2","blocks.2"), ("backbone.blocks.3","blocks.3"),
+                       ("backbone.msfa","msfa")]
+        config.dataset.dataset_name=ds
         config.model_name='mobilenetv5'
         config.model_size=config.model_size
-        config.num_classes=config.num_classes
+        config.dataset.num_classes=config.dataset.num_classes
         super().__init__(config)
 
 # ----------------------------
@@ -1038,7 +1038,7 @@ def main_mnv5():
     args.export_dir = f"./ckpt_{args.dataset_name}_mnv5_{args.model_size}"
     dm = DataModuleConfig.model_validate(args.model_dump())
     config = LitBitConfig.model_validate(args.model_dump())
-    config.num_classes = dm.num_classes
+    config.dataset = dm.model_copy()
     lit = LitMobileNetV5KD(config,
         drop_path_rate=args.drop_path,
         teacher_pretrained=args.teacher_pretrained
