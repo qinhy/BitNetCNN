@@ -95,6 +95,34 @@ class DinoVisionTransformer(nn.Module):
             logger.warning(f"Ignored kwargs: {ignored_kwargs}")
         del ignored_kwargs
 
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.in_chans = in_chans
+        self.pos_embed_rope_base = pos_embed_rope_base
+        self.pos_embed_rope_min_period = pos_embed_rope_min_period
+        self.pos_embed_rope_max_period = pos_embed_rope_max_period
+        self.pos_embed_rope_normalize_coords = pos_embed_rope_normalize_coords
+        self.pos_embed_rope_shift_coords = pos_embed_rope_shift_coords
+        self.pos_embed_rope_jitter_coords = pos_embed_rope_jitter_coords
+        self.pos_embed_rope_rescale_coords = pos_embed_rope_rescale_coords
+        self.pos_embed_rope_dtype = pos_embed_rope_dtype
+        self.embed_dim = embed_dim
+        self.depth = depth
+        self.num_heads = num_heads
+        self.ffn_ratio = ffn_ratio
+        self.qkv_bias = qkv_bias
+        self.drop_path_rate = drop_path_rate
+        self.layerscale_init = layerscale_init
+        self.norm_layer = norm_layer
+        self.ffn_layer = ffn_layer
+        self.ffn_bias = ffn_bias
+        self.proj_bias = proj_bias
+        self.n_storage_tokens = n_storage_tokens
+        self.mask_k_bias = mask_k_bias
+        self.untie_cls_and_patch_norms = untie_cls_and_patch_norms
+        self.untie_global_and_local_cls_norm = untie_global_and_local_cls_norm
+        self.device = device
+        
         norm_layer_cls = norm_layer_dict[norm_layer]
 
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -180,6 +208,37 @@ class DinoVisionTransformer(nn.Module):
         self.head = nn.Identity()
         self.mask_token = nn.Parameter(torch.empty(1, embed_dim).to(device=device))
 
+    def clone(self):
+        return  DinoVisionTransformer(
+            img_size=self.img_size,
+            patch_size=self.patch_size,
+            in_chans=self.in_chans,
+            pos_embed_rope_base=self.pos_embed_rope_base,
+            pos_embed_rope_min_period=self.pos_embed_rope_min_period,
+            pos_embed_rope_max_period=self.pos_embed_rope_max_period,
+            pos_embed_rope_normalize_coords=self.pos_embed_rope_normalize_coords,
+            pos_embed_rope_shift_coords=self.pos_embed_rope_shift_coords,
+            pos_embed_rope_jitter_coords=self.pos_embed_rope_jitter_coords,
+            pos_embed_rope_rescale_coords=self.pos_embed_rope_rescale_coords,
+            pos_embed_rope_dtype=self.pos_embed_rope_dtype,
+            embed_dim=self.embed_dim,
+            depth=self.depth,
+            num_heads=self.num_heads,
+            ffn_ratio=self.ffn_ratio,
+            qkv_bias=self.qkv_bias,
+            drop_path_rate=self.drop_path_rate,
+            layerscale_init=self.layerscale_init,
+            norm_layer=self.norm_layer,
+            ffn_layer=self.ffn_layer,
+            ffn_bias=self.ffn_bias,
+            proj_bias=self.proj_bias,
+            n_storage_tokens=self.n_storage_tokens,
+            mask_k_bias=self.mask_k_bias,
+            untie_cls_and_patch_norms=self.untie_cls_and_patch_norms,
+            untie_global_and_local_cls_norm=self.untie_global_and_local_cls_norm,
+            device=self.device,
+        )
+    
     def init_weights(self):
         self.rope_embed._init_weights()
         nn.init.normal_(self.cls_token, std=0.02)
