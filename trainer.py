@@ -1000,7 +1000,7 @@ class LitBit(AccelLightningModule):
             return loss_ce, {"train/ce": loss_ce.detach()}, logits
         else:
             loss_ce = 0.0
-            return loss_ce, {"train/ce": loss_ce}, logits
+            return loss_ce, {}, logits
 
     def _ce_kd_training_step(self, x: torch.Tensor, y: torch.Tensor):
         z_t = self.teacher_forward(x)

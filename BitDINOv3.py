@@ -1,6 +1,6 @@
 
 import os
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from pydantic import BaseModel, Field
 from pydanticV2_argparse import ArgumentParser
 
-from bitlayers.dinov3.models.vision_transformer import vit_small, vit_large
+from bitlayers.dinov3.models.vision_transformer import DinoVisionTransformer, vit_small, vit_large
 from common_utils import summ
 from dataset import DataModuleConfig, RetinaFaceDataModule
 from trainer import AccelTrainer, AccelLightningModule, CommonTrainConfig, LitBit, LitBitConfig, Metrics, MetricsManager
@@ -31,11 +31,13 @@ class DinoV3Distill(LitBit):
                             ('blocks.9','blocks.18', 'seq'),
                             ('blocks.10','blocks.20', 'seq'),]
         super().__init__(config)
-        summ(self.student)
-        summ(self.teacher)
-        self.student.init_weights()
+        student:DinoVisionTransformer = self.student
+        teacher:DinoVisionTransformer = self.teacher
+        # summ(self.student)
+        # summ(self.teacher)
+        student.init_weights()
 
-        self.proj = nn.Linear(self.teacher.embed_dim, self.student.embed_dim, bias=True)
+        self.proj = nn.Linear(teacher.embed_dim, student.embed_dim, bias=True)
         self.alpha_kd = float(config.alpha_kd)
         self.lr = float(config.lr)
         self.wd = float(config.wd)
@@ -88,7 +90,6 @@ class DinoV3Distill(LitBit):
 # -----------------------------------------------------------------------------
 class DinoV3DistillConfig(CommonTrainConfig):
     data_dir: str = "./data"
-    export_dir: str = "./ckpt_retinaface_dino_kd"
     dataset_name: str = "retinaface"
 
     epochs: int = Field(50, ge=1)
@@ -98,11 +99,14 @@ class DinoV3DistillConfig(CommonTrainConfig):
     lr: float = Field(1e-4, gt=0)
     wd: float = Field(5e-2, ge=0)
     amp: bool = True
-    alpha_kd: float = Field(1.0, ge=0.0)
+    alpha_kd: float = 1.0
+    alpha_hint: float = 0.001
 
     image_size: int = 640
     patch_size: int = 16
 
+    model_name: str = "dinov3"
+    model_size: Literal["vitl16", "vitb16", "vits16"] = "vits16"
     student_weights: str = ""
     teacher_weights: str = ""
 
@@ -114,11 +118,13 @@ def main() -> None:
     dm_conf = DataModuleConfig.model_validate(cfg.model_dump())
     config = LitBitConfig.model_validate(cfg.model_dump())
     config.dataset = dm_conf.model_copy()
+    config.export_dir = f"./ckpt_{config.dataset.dataset_name}_dinov3_{config.model_size}"
     dm = RetinaFaceDataModule(dm_conf, anchors=None, pos_iou=None, neg_iou=None, variances=None)
 
 
     config.student = vit_small(patch_size=cfg.patch_size, img_size=cfg.image_size)
-    config.teacher = torch.hub.load('../dinov3', 'dinov3_vitl16', source='local', weights='./data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth')
+    config.teacher = torch.hub.load('../dinov3', 'dinov3_vitl16', source='local',
+                                    weights='./data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth')
     model = DinoV3Distill(config)
 
     trainer = AccelTrainer(
