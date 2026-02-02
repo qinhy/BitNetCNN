@@ -379,11 +379,13 @@ class MobileNetV4(nn.Module):
         self.spec = MobileNetV4.MODEL_SPECS[self.model_name]()
        
         self.conv0 = self.spec['conv0']
-        self.layer1 = self.spec['layer1']
-        self.layer2 = self.spec['layer2']
-        self.layer3 = self.spec['layer3']
-        self.layer4 = self.spec['layer4']
-        self.layer5 = self.spec['layer5']
+        self.blocks = nn.Sequential(
+            self.spec['layer1'],
+            self.spec['layer2'],
+            self.spec['layer3'],
+            self.spec['layer4'],
+            self.spec['layer5'],
+        )
 
         # print("Check output shape ...")
         x = torch.rand(2, 3, 224, 224)
@@ -391,14 +393,12 @@ class MobileNetV4(nn.Module):
         self.head = MobileNetV4Head(y.shape[1],num_classes=num_classes)
                
     def feature(self, x):
-        x0 = self.conv0(x)
-        x1 = self.layer1(x0)
-        x2 = self.layer2(x1)
-        x3 = self.layer3(x2)
-        x4 = self.layer4(x3)
-        x5 = self.layer5(x4)
-        return [x1, x2, x3, x4, x5]
-        # return [x0, x1, x2, x3, x5]
+        x = self.conv0(x)
+        feats = []
+        for blk in self.blocks:
+            x = blk(x)
+            feats.append(x)
+        return feats  # [x1, x2, x3, x4, x5]
 
     def forward(self, x):
         return self.head(self.feature(x)[-1])
@@ -561,9 +561,9 @@ def _infer_mnv4_hint_points(teacher: nn.Module) -> list[tuple[str, str]]:
     teacher_backbone, prefix = _maybe_backbone_and_prefix(teacher)
     tmods = set(dict(teacher_backbone.named_modules()).keys())
 
-    hardcoded = ["blocks.0", "blocks.1", "blocks.2", "blocks.3"]
-    if all(m in tmods for m in hardcoded):
-        return [(f"layer{i}", f"{prefix}{m}") for i, m in enumerate(hardcoded, start=1)]
+    teacher_layers = ["blocks.0", "blocks.1", "blocks.2", "blocks.3"]
+    if all(m in tmods for m in teacher_layers):
+        return [(f"blocks.{i}", f"{prefix}{m}") for i, m in enumerate(teacher_layers)]
 
     feature_info = getattr(teacher_backbone, "feature_info", None)
     if feature_info is None or not hasattr(feature_info, "get_dicts"):
@@ -581,7 +581,7 @@ def _infer_mnv4_hint_points(teacher: nn.Module) -> list[tuple[str, str]]:
 
     # Prefer the last 4 feature taps (deepest, lowest-res).
     names = names[-4:]
-    student_layers = ["layer1", "layer2", "layer3", "layer4"][-len(names):]
+    student_layers = ["blocks.0", "blocks.1", "blocks.2", "blocks.3"][-len(names):]
     return list(zip(student_layers, [f"{prefix}{n}" for n in names]))
 
 
@@ -645,6 +645,7 @@ class LitMobileNetV4KD(LitBit):
 # ----------------------------
 class Config(CommonTrainConfig):
     data: Optional[str] = Field(default=None, description="Alias for --data_dir (back-compat).")
+    dataset_name: str = "c100"
     # For MobileNetV4 we accept conv + hybrid tags in one flag
     model_size: Literal[
         "small",
