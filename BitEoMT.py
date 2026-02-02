@@ -264,7 +264,8 @@ class DinoEoMT(nn.Module):
     # -----------------------
     # forward (author style)
     # -----------------------
-    def forward(self, x: torch.Tensor, per_layer=False) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    def forward(self, x: torch.Tensor, per_layer=False
+        ) -> Tuple[Union[torch.Tensor,List[torch.Tensor]], Union[torch.Tensor,List[torch.Tensor]]]:
         # input normalize (author wrapper)
         # if self.pixel_mean is not None and self.pixel_std is not None:
         #     x = (x - self.pixel_mean) / self.pixel_std
@@ -324,7 +325,7 @@ encoder.init_weights()
 model = DinoEoMT(encoder=encoder, num_queries=200, num_classes=1000)
 convert_to_ternary(model)
 summ(model)
-mask_logits, class_logits = model(torch.randn(1, 3, 640, 640))
+mask_logits, class_logits = model.forward(torch.randn(1, 3, 640, 640))
 print(mask_logits.shape)
 print(class_logits.shape)
 
