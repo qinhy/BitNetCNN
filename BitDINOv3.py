@@ -16,7 +16,7 @@ from trainer import AccelTrainer, AccelLightningModule, CommonTrainConfig, LitBi
 
 
 # -----------------------------------------------------------------------------
-# Distillation model: vit_large -> vit_small
+# Distillation model: vit_small <- vit_large
 # -----------------------------------------------------------------------------
 class DinoV3Distill(LitBit):
     def __init__(self, config: "LitBitConfig"):        
