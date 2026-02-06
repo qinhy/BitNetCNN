@@ -85,6 +85,22 @@ class DinoV3Distill(LitBit):
 
         return F.kl_div(log_p_s, p_t, reduction="batchmean") * (T * T)
     
+    def training_step_old(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
+        x, y = batch
+
+        if self.kd is not None and self.hint is not None:
+            loss, logd, logits = self._ce_kd_hint_training_step(x, y)
+
+        elif self.kd is not None and self.hint is None:
+            loss, logd, logits = self._ce_kd_training_step(x, y)
+
+        elif self.kd is None and self.hint is not None:
+            loss, logd, logits = self._ce_hint_training_step(x, y)
+        else:
+            loss, logd, logits = self._ce_training_step(x, y)
+
+        return Metrics(loss=loss, metrics=logd)
+    
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
         x, y = batch
         logd = {}
