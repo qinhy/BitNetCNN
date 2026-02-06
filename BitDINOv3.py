@@ -18,6 +18,11 @@ from trainer import AccelTrainer, AccelLightningModule, CommonTrainConfig, LitBi
 # -----------------------------------------------------------------------------
 # Distillation model: vit_small <- vit_large
 # -----------------------------------------------------------------------------
+def cosine_sim_matrix(z: torch.Tensor) -> torch.Tensor:
+    # z: (B, N, D)
+    z = F.normalize(z, dim=-1)
+    return z @ z.transpose(-1, -2)  # (B, N, N)
+
 class DinoV3Distill(LitBit):
     def __init__(self, config: "LitBitConfig"):        
         config.hint_points =[('blocks.1','blocks.2', 'seq'),
@@ -50,21 +55,46 @@ class DinoV3Distill(LitBit):
         z_t = self.teacher(x)
         return self.proj(z_t)
     
+    def relational_kd_kl(self,
+        z_s: torch.Tensor,        # (B,N,D) student tokens
+        z_t: torch.Tensor = None, # (B,N,D) teacher tokens (optional if you already have K_t)
+        K_t: torch.Tensor = None, # (B,N,N) teacher sim matrix
+        T: float = 0.1,
+        drop_cls: bool = True,
+        mask_diag: bool = True,
+    ) -> torch.Tensor:
+        if K_t is None:
+            assert z_t is not None
+            K_t = cosine_sim_matrix(z_t)
+
+        if drop_cls:
+            z_s = z_s[:, 1:, :]
+            K_t = K_t[:, 1:, 1:]
+
+        K_s = cosine_sim_matrix(z_s)
+
+        if mask_diag:
+            N = K_s.size(-1)
+            diag = torch.eye(N, device=K_s.device, dtype=torch.bool)[None]  # (1,N,N)
+            K_s = K_s.masked_fill(diag, -1e9)
+            K_t = K_t.masked_fill(diag, -1e9)
+
+        # teacher probs, student log-probs
+        p_t = F.softmax(K_t.detach() / T, dim=-1)
+        log_p_s = F.log_softmax(K_s / T, dim=-1)
+
+        return F.kl_div(log_p_s, p_t, reduction="batchmean") * (T * T)
+    
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
         x, y = batch
+        logd = {}
+        # loss_hint, logd, logits = self._ce_hint_training_step(x, y)
+        z_s = self.student.forward_features(x)["x_norm_patchtokens"]
+        z_t = self.teacher.forward_features(x)["x_norm_patchtokens"]
+        loss_kd_kl = self.relational_kd_kl(z_s, z_t)
+        logd = {**logd,**{"train/kd_kl": loss_kd_kl.detach()}}
 
-        if self.kd is not None and self.hint is not None:
-            loss, logd, logits = self._ce_kd_hint_training_step(x, y)
-
-        elif self.kd is not None and self.hint is None:
-            loss, logd, logits = self._ce_kd_training_step(x, y)
-
-        elif self.kd is None and self.hint is not None:
-            loss, logd, logits = self._ce_hint_training_step(x, y)
-        else:
-            loss, logd, logits = self._ce_training_step(x, y)
-
-        return Metrics(loss=loss, metrics=logd)
+        return Metrics(loss=loss_kd_kl, metrics=logd)
     
     @torch.no_grad()
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
