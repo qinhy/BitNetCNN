@@ -3,11 +3,13 @@
 # This software may be used and distributed in accordance with
 # the terms of the DINOv3 License Agreement.
 
-from typing import Callable, List, Optional
+import contextlib
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 from torch import Tensor, nn
 
+from bitlayers.dinov3.layers.bitlayers import Linear
 from bitlayers.dinov3.utils import cat_keep_shapes, uncat_with_shapes
 
 from .attention import CausalSelfAttention, SelfAttention
@@ -40,6 +42,7 @@ class SelfAttentionBlock(nn.Module):
     ) -> None:
         super().__init__()
         # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
+        self.dim = dim
         self.norm1 = norm_layer(dim)
         self.attn = attn_class(
             dim,
@@ -211,7 +214,209 @@ class SelfAttentionBlock(nn.Module):
         else:
             raise AssertionError
 
+class SelfAttentionTRMStage(nn.Module):
+    """
+    Transformer block stack + optional iterative refinement (AnytimeTRM-like).
 
+    Core (no refinement):
+      forward(x, rope) == apply the SelfAttentionBlock stack to x (passing rope through).
+
+    Refinement (if used via forward_with_refinement):
+      latent <- core( combine(x, solution, latent) + role_latent ) repeated num_latent_steps
+      solution <- core( combine(solution, latent) + role_solution ) once
+
+    Notes:
+      - SelfAttentionBlock only accepts (x_or_x_list, rope_or_rope_list=None).
+        Therefore, this stage does NOT support passing attn_mask/key_padding_mask
+        unless your SelfAttention implementation encodes masking via rope or internal state.
+    """
+
+    def __init__(
+        self,
+        depth: int = 0,
+        dim: int = 0,
+        num_heads: int = 0,
+        ffn_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        proj_bias: bool = True,
+        ffn_bias: bool = True,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        init_values=None,
+        drop_path: float = 0.0,
+        act_layer: Callable[..., nn.Module] = nn.GELU,
+        norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
+        attn_class: Optional[Callable[..., nn.Module]] = None,
+        ffn_layer: Optional[Callable[..., nn.Module]] = None,
+        mask_k_bias: bool = False,
+        init_std: float = 0.02,
+        device=None,
+        blocks_list=None,
+    ):
+        super().__init__()
+        if blocks_list is None:
+            blocks_list = [
+                SelfAttentionBlock(
+                    dim=dim,
+                    num_heads=num_heads,
+                    ffn_ratio=ffn_ratio,
+                    qkv_bias=qkv_bias,
+                    proj_bias=proj_bias,
+                    ffn_bias=ffn_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    init_values=init_values,
+                    drop_path=drop_path,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                    attn_class=attn_class,
+                    ffn_layer=ffn_layer,
+                    mask_k_bias=mask_k_bias,
+                    device=device,
+                )
+                for _ in range(depth)
+            ]
+        else:
+            dim = blocks_list[0].dim
+
+        self.blocks = nn.ModuleList(blocks_list)
+
+
+        # Default to the same classes SelfAttentionBlock expects by default
+        if attn_class is None:
+            attn_class = SelfAttention
+        if ffn_layer is None:
+            ffn_layer = Mlp
+
+        self.d_model = dim
+
+        # Combine projections (kept as in your original)
+        self.combine_x_solution_latent = Linear(3 * dim, dim)
+        self.combine_solution_latent = Linear(2 * dim, dim)
+
+        # role embeddings: [2,1,1,D] => 0: update latent, 1: update solution
+        self.role_embeddings = nn.Parameter(torch.empty(2, 1, 1, dim))
+        nn.init.normal_(self.role_embeddings, std=init_std)
+
+        # learned initial states (broadcast over seq_len): [1,1,D]
+        self.init_solution_state = nn.Parameter(torch.empty(1, 1, dim))
+        self.init_latent_state = nn.Parameter(torch.empty(1, 1, dim))
+        nn.init.normal_(self.init_solution_state, std=init_std)
+        nn.init.normal_(self.init_latent_state, std=init_std)
+
+    # -------- refinement helpers --------
+    def init_refinement_states(
+        self,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+        dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        solution = self.init_solution_state.expand(batch_size, seq_len, -1)
+        latent = self.init_latent_state.expand(batch_size, seq_len, -1)
+
+        if dtype is None:
+            dtype = solution.dtype
+
+        solution = solution.to(device=device, dtype=dtype)
+        latent = latent.to(device=device, dtype=dtype)
+        return solution, latent
+
+    # -------- core forward (no refinement) --------
+    def forward(
+        self,
+        x_or_x_list: Union[torch.Tensor, List[torch.Tensor]],
+        rope_or_rope_list=None,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        x = x_or_x_list        
+        for i,block in enumerate(self.blocks):
+            block:SelfAttentionBlock = block
+            rope = None
+            if rope_or_rope_list:
+                rope = rope_or_rope_list[i]
+            x = block(x, rope)
+        return x
+
+    def _refine_latent(
+        self,
+        x: torch.Tensor,
+        solution: torch.Tensor,
+        latent: torch.Tensor,
+        rope=None,
+    ) -> torch.Tensor:
+        if type(x) is list and len(x)==1:x = x[0]
+        fused = self.combine_x_solution_latent(torch.cat([x, solution, latent], dim=-1))
+        fused = fused + self.role_embeddings[0]  # broadcasts [1,1,D] to [B,L,D]
+        return self.forward([fused], rope)
+
+    def _refine_solution(
+        self,
+        solution: torch.Tensor,
+        latent: torch.Tensor,
+        rope=None,
+    ) -> torch.Tensor:
+        fused = self.combine_solution_latent(torch.cat([solution, latent], dim=-1))
+        fused = fused + self.role_embeddings[1]
+        return self.forward([fused], rope)
+
+    def refine_states(
+        self,
+        x: torch.Tensor,
+        solution: torch.Tensor,
+        latent: torch.Tensor,
+        num_latent_steps: int,
+        damping: float,
+        rope=None,
+        track_latent_grads: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ctx = contextlib.nullcontext() if track_latent_grads else torch.no_grad()
+        with ctx:
+            for _ in range(num_latent_steps):
+                latent_next = self._refine_latent(x, solution, latent, rope=rope)
+                if type(latent_next) is list and len(latent_next)==1:latent_next = latent_next[0]
+                latent = latent + damping * (latent_next - latent)
+
+        solution_next = self._refine_solution(solution, latent, rope=rope)
+        if type(solution_next) is list and len(solution_next)==1:solution_next = solution_next[0]
+        solution = solution + damping * (solution_next - solution)
+        return solution, latent
+
+    def forward_with_refinement(
+        self,
+        x: torch.Tensor,
+        rope=None,
+        num_latent_steps: int = 4,
+        damping: float = 0.5,
+        solution: Optional[torch.Tensor] = None,
+        latent: Optional[torch.Tensor] = None,
+        *,
+        return_latent: bool = False,
+        track_latent_grads: bool = False,
+    ):
+        if type(x) is list:
+            bsz, seq_len, dim = x[0].shape
+            device = x[0].device
+            dtype = x[0].dtype
+        else:
+            bsz, seq_len, dim = x.shape
+            device = x.device
+            dtype = x.dtype
+
+        if solution is None or latent is None:
+            solution, latent = self.init_refinement_states(bsz, seq_len, device, dtype=dtype)
+
+        solution, latent = self.refine_states(
+            x,
+            solution,
+            latent,
+            num_latent_steps=num_latent_steps,
+            damping=damping,
+            rope=rope,
+            track_latent_grads=track_latent_grads,
+        )
+        if type(x) is list and len(x)==1:solution = [solution]
+        return (solution, latent) if return_latent else solution
+    
 class CausalSelfAttentionBlock(nn.Module):
     def __init__(
         self,
@@ -267,3 +472,12 @@ class CausalSelfAttentionBlock(nn.Module):
         x_attn = x + self.ls1(self.attention(self.attention_norm(x), self.is_causal))
         x_ffn = x_attn + self.ls2(self.feed_forward(self.ffn_norm(x_attn)))
         return x_ffn
+
+
+
+
+
+
+
+
+

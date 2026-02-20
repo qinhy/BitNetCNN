@@ -13,6 +13,7 @@ from torch import Tensor, nn
 
 from bitlayers.dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
 from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
+from bitlayers.dinov3.layers.block import SelfAttentionTRMStage
 from bitlayers.dinov3.utils import named_apply
 
 logger = logging.getLogger("dinov3")
@@ -388,9 +389,80 @@ class DinoVisionTransformer(nn.Module):
         else:
             return self.head(ret["x_norm_clstoken"])
 
+class DinoVisionTransformerTRM(DinoVisionTransformer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.init_trm()
 
-def vit_small(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
+    def init_trm(self):
+        lst = list(range(self.depth))
+        k,n = 4,len(lst)
+        stages = [SelfAttentionTRMStage(blocks_list=self.blocks[i*n//k : (i+1)*n//k]) for i in range(k)]
+        self.blocks = nn.ModuleList(stages)
+
+    def forward_one_stages(self, x,rope, n=4, T=3):
+        for stage in self.blocks:
+            stage:SelfAttentionTRMStage = stage
+            rope_sincos = []
+            for _ in stage.blocks:
+                if self.rope_embed is not None:
+                    rope_sincos.append([self.rope_embed(H=H, W=W) for H, W in rope])
+                else:
+                    rope_sincos.append([None for r in rope])
+
+            with torch.no_grad():
+                for _ in range(T-1):
+                    x = stage.forward_with_refinement(x, rope=rope_sincos, num_latent_steps=n)
+            x = stage.forward_with_refinement(x, rope=rope_sincos, num_latent_steps=n)
+
+        return x
+    
+    def forward_features(self, x: Tensor | List[Tensor], masks: Optional[Tensor] = None, n=4, T=3) -> List[Dict[str, Tensor]]:
+        if isinstance(x, torch.Tensor):
+            return self.forward_features_list([x], [masks], n, T)[0]
+        else:
+            return self.forward_features_list(x, masks, n, T)
+        
+    def forward_features_list(self, x_list: List[Tensor], masks_list: List[Tensor], n=4, T=3) -> List[Dict[str, Tensor]]:
+        x = []
+        rope = []
+        for t_x, t_masks in zip(x_list, masks_list):
+            t2_x, hw_tuple = self.prepare_tokens_with_masks(t_x, t_masks)
+            x.append(t2_x)
+            rope.append(hw_tuple)
+        
+        x = self.forward_one_stages(x, rope, n, T)
+            
+        all_x = x
+        output = []
+        for idx, (x, masks) in enumerate(zip(all_x, masks_list)):
+            if self.untie_cls_and_patch_norms or self.untie_global_and_local_cls_norm:
+                if self.untie_global_and_local_cls_norm and self.training and idx == 1:
+                    # Assume second entry of list corresponds to local crops.
+                    # We only ever apply this during training.
+                    x_norm_cls_reg = self.local_cls_norm(x[:, : self.n_storage_tokens + 1])
+                elif self.untie_cls_and_patch_norms:
+                    x_norm_cls_reg = self.cls_norm(x[:, : self.n_storage_tokens + 1])
+                else:
+                    x_norm_cls_reg = self.norm(x[:, : self.n_storage_tokens + 1])
+                x_norm_patch = self.norm(x[:, self.n_storage_tokens + 1 :])
+            else:
+                x_norm = self.norm(x)
+                x_norm_cls_reg = x_norm[:, : self.n_storage_tokens + 1]
+                x_norm_patch = x_norm[:, self.n_storage_tokens + 1 :]
+            output.append(
+                {
+                    "x_norm_clstoken": x_norm_cls_reg[:, 0],
+                    "x_storage_tokens": x_norm_cls_reg[:, 1:],
+                    "x_norm_patchtokens": x_norm_patch,
+                    "x_prenorm": x,
+                    "masks": masks,
+                }
+            )
+        return output
+
+def vit_small(patch_size=16,  cls=DinoVisionTransformer, **kwargs):
+    model = cls(
         patch_size=patch_size,
         embed_dim=384,
         depth=12,
@@ -401,8 +473,8 @@ def vit_small(patch_size=16, **kwargs):
     return model
 
 
-def vit_base(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
+def vit_base(patch_size=16,  cls=DinoVisionTransformer, **kwargs):
+    model = cls(
         patch_size=patch_size,
         embed_dim=768,
         depth=12,
@@ -413,8 +485,8 @@ def vit_base(patch_size=16, **kwargs):
     return model
 
 
-def vit_large(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
+def vit_large(patch_size=16,  cls=DinoVisionTransformer, **kwargs):
+    model = cls(
         patch_size=patch_size,
         embed_dim=1024,
         depth=24,
@@ -425,8 +497,8 @@ def vit_large(patch_size=16, **kwargs):
     return model
 
 
-def vit_so400m(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
+def vit_so400m(patch_size=16,  cls=DinoVisionTransformer, **kwargs):
+    model = cls(
         patch_size=patch_size,
         embed_dim=1152,
         depth=27,
@@ -437,8 +509,8 @@ def vit_so400m(patch_size=16, **kwargs):
     return model
 
 
-def vit_huge2(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
+def vit_huge2(patch_size=16,  cls=DinoVisionTransformer, **kwargs):
+    model = cls(
         patch_size=patch_size,
         embed_dim=1280,
         depth=32,
@@ -449,11 +521,11 @@ def vit_huge2(patch_size=16, **kwargs):
     return model
 
 
-def vit_giant2(patch_size=16, **kwargs):
+def vit_giant2(patch_size=16,  cls=DinoVisionTransformer, **kwargs):
     """
     Close to ViT-giant, with embed-dim 1536 and 24 heads => embed-dim per head 64
     """
-    model = DinoVisionTransformer(
+    model = cls(
         patch_size=patch_size,
         embed_dim=1536,
         depth=40,
@@ -464,8 +536,8 @@ def vit_giant2(patch_size=16, **kwargs):
     return model
 
 
-def vit_7b(patch_size=16, **kwargs):
-    model = DinoVisionTransformer(
+def vit_7b(patch_size=16,  cls=DinoVisionTransformer, **kwargs):
+    model = cls(
         patch_size=patch_size,
         embed_dim=4096,
         depth=40,

@@ -1,5 +1,6 @@
 
 import os
+import random
 from typing import Literal, Tuple
 
 import torch
@@ -9,7 +10,7 @@ import torch.nn.functional as F
 from pydantic import BaseModel, Field
 from pydanticV2_argparse import ArgumentParser
 
-from bitlayers.dinov3.models.vision_transformer import DinoVisionTransformer, vit_small, vit_large
+from bitlayers.dinov3.models.vision_transformer import DinoVisionTransformer, DinoVisionTransformerTRM, vit_small, vit_large
 from common_utils import summ
 from dataset import DataModuleConfig, RetinaFaceDataModule
 from trainer import AccelTrainer, AccelLightningModule, CommonTrainConfig, LitBit, LitBitConfig, Metrics, MetricsManager
@@ -105,11 +106,17 @@ class DinoV3Distill(LitBit):
         x, y = batch
         logd = {}
         # loss_hint, logd, logits = self._ce_hint_training_step(x, y)
-        z_s = self.student.forward_features(x)["x_norm_patchtokens"]
+        N_supervision_max = 16
+        N_supervision = random.randint(1, N_supervision_max)
+        loss_kd_kl = 0.0
         z_t = self.teacher.forward_features(x)["x_norm_patchtokens"]
-        loss_kd_kl = self.relational_kd_kl(z_s, z_t)
+        for step in range(N_supervision):            
+            T_i = random.randint(1, 12)
+            n_latent = random.randint(1, 6)
+            z_s = self.student.forward_features(x, n=n_latent, T=T_i)["x_norm_patchtokens"]
+            loss_kd_kl += self.relational_kd_kl(z_s, z_t)
+        loss_kd_kl /= N_supervision
         logd = {**logd,**{"train/kd_kl": loss_kd_kl.detach()}}
-
         return Metrics(loss=loss_kd_kl, metrics=logd)
     
     @torch.no_grad()
@@ -146,7 +153,7 @@ class DinoV3DistillConfig(CommonTrainConfig):
     wd: float = Field(5e-2, ge=0)
     amp: bool = True
     alpha_kd: float = 1.0
-    alpha_hint: float = 0.001
+    alpha_hint: float = 0.0
 
     image_size: int = 640
     patch_size: int = 16
@@ -168,7 +175,7 @@ def main() -> None:
     dm = RetinaFaceDataModule(dm_conf, anchors=None, pos_iou=None, neg_iou=None, variances=None)
 
 
-    config.student = vit_small(patch_size=cfg.patch_size, img_size=cfg.image_size)
+    config.student = vit_small(patch_size=cfg.patch_size, img_size=cfg.image_size, cls=DinoVisionTransformerTRM)
     config.teacher = torch.hub.load('../dinov3', 'dinov3_vitl16', source='local',
                                     weights='./data/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth')
     model = DinoV3Distill(config)
