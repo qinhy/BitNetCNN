@@ -479,7 +479,7 @@ class AccelTrainer:
 
         # hooks on unwrapped model are fine
         self.accelerator.unwrap_model(model).on_fit_start(self)
-        self.ema = EMA(self.accelerator.unwrap_model(model)) if self.enable_ema else None
+        self.ema = EMA(self.accelerator.unwrap_model(model).student) if self.enable_ema else None
 
         for epoch in range(self.max_epochs):
             # Run validation first if requested, otherwise train first
@@ -494,8 +494,8 @@ class AccelTrainer:
             if self.scheduler is not None and self.scheduler_interval == "epoch":
                 self.scheduler.step()
 
-            if self.ema:
-                self.ema.update(self.accelerator.unwrap_model(model))
+            if self.enable_ema:
+                self.ema.update(self.accelerator.unwrap_model(model).student)
 
         return self.metrics_manager.to_list() if self.metrics_manager is not None else []
 

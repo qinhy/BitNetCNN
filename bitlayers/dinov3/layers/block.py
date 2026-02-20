@@ -214,21 +214,25 @@ class SelfAttentionBlock(nn.Module):
         else:
             raise AssertionError
 
+
 class SelfAttentionTRMStage(nn.Module):
     """
-    Transformer block stack + optional iterative refinement (AnytimeTRM-like).
+    Transformer block stack + optional iterative refinement (TRM-style).
 
     Core (no refinement):
-      forward(x, rope) == apply the SelfAttentionBlock stack to x (passing rope through).
+      forward(x, rope) = apply the SelfAttentionBlock stack to x (passing rope through).
 
-    Refinement (if used via forward_with_refinement):
-      latent <- core( combine(x, solution, latent) + role_latent ) repeated num_latent_steps
-      solution <- core( combine(solution, latent) + role_solution ) once
+    Refinement:
+      latent <- core(combine(x, solution, latent) + role_latent) repeated num_latent_steps
+      solution <- core(combine(solution, latent) + role_solution) once
 
     Notes:
-      - SelfAttentionBlock only accepts (x_or_x_list, rope_or_rope_list=None).
-        Therefore, this stage does NOT support passing attn_mask/key_padding_mask
-        unless your SelfAttention implementation encodes masking via rope or internal state.
+      - Core forward supports Tensor or List[Tensor] because SelfAttentionBlock does.
+      - Refinement path supports Tensor or singleton List[Tensor] only.
+      - rope_or_rope_list can be:
+          * None
+          * a single rope object (shared across all blocks)
+          * a per-block list of rope objects (len == depth)
     """
 
     def __init__(
@@ -254,6 +258,13 @@ class SelfAttentionTRMStage(nn.Module):
         blocks_list=None,
     ):
         super().__init__()
+
+        # Resolve defaults BEFORE building blocks (fixes None-call bug)
+        if attn_class is None:
+            attn_class = SelfAttention
+        if ffn_layer is None:
+            ffn_layer = Mlp
+
         if blocks_list is None:
             blocks_list = [
                 SelfAttentionBlock(
@@ -277,34 +288,97 @@ class SelfAttentionTRMStage(nn.Module):
                 for _ in range(depth)
             ]
         else:
+            if len(blocks_list) == 0:
+                raise ValueError("blocks_list must not be empty")
             dim = blocks_list[0].dim
+            depth = len(blocks_list)
 
         self.blocks = nn.ModuleList(blocks_list)
-
-
-        # Default to the same classes SelfAttentionBlock expects by default
-        if attn_class is None:
-            attn_class = SelfAttention
-        if ffn_layer is None:
-            ffn_layer = Mlp
-
         self.d_model = dim
+        self.depth = depth
 
-        # Combine projections (kept as in your original)
+        # Combine projections
         self.combine_x_solution_latent = Linear(3 * dim, dim)
         self.combine_solution_latent = Linear(2 * dim, dim)
 
-        # role embeddings: [2,1,1,D] => 0: update latent, 1: update solution
-        self.role_embeddings = nn.Parameter(torch.empty(2, 1, 1, dim))
+        # Role embeddings: [2,1,1,D] => 0: update latent, 1: update solution
+        self.role_embeddings = nn.Parameter(torch.empty(2, 1, 1, dim, device=device))
         nn.init.normal_(self.role_embeddings, std=init_std)
 
-        # learned initial states (broadcast over seq_len): [1,1,D]
-        self.init_solution_state = nn.Parameter(torch.empty(1, 1, dim))
-        self.init_latent_state = nn.Parameter(torch.empty(1, 1, dim))
+        # Learned initial states: [1,1,D]
+        self.init_solution_state = nn.Parameter(torch.empty(1, 1, dim, device=device))
+        self.init_latent_state = nn.Parameter(torch.empty(1, 1, dim, device=device))
         nn.init.normal_(self.init_solution_state, std=init_std)
         nn.init.normal_(self.init_latent_state, std=init_std)
 
-    # -------- refinement helpers --------
+    # -----------------------------
+    # Helpers
+    # -----------------------------
+    def _normalize_rope_for_block(
+        self,
+        x: Union[Tensor, List[Tensor]],
+        rope_or_rope_list,
+        block_idx: int,
+    ):
+        """
+        Returns rope in the format expected by SelfAttentionBlock for THIS block:
+          - Tensor input  -> rope or None
+          - List input    -> list[rope] or list[None]
+        """
+        if rope_or_rope_list is None:
+            if isinstance(x, list):
+                return [None for _ in x]
+            return None
+
+        # Interpret list len == depth as "per-block rope list"
+        if isinstance(rope_or_rope_list, list) and len(rope_or_rope_list) == len(self.blocks):
+            rope_for_block = rope_or_rope_list[block_idx]
+        else:
+            rope_for_block = rope_or_rope_list
+
+        if isinstance(x, list):
+            # SelfAttentionBlock(list_input, rope_list=...) expects a rope list per item
+            if rope_for_block is None:
+                return [None for _ in x]
+            if isinstance(rope_for_block, list):
+                if len(rope_for_block) != len(x):
+                    raise ValueError(
+                        f"rope list length mismatch for list input: got {len(rope_for_block)}, expected {len(x)}"
+                    )
+                return rope_for_block
+            return [rope_for_block for _ in x]
+
+        return rope_for_block
+
+    def _unwrap_singleton_for_refinement(self, x, rope):
+        """
+        Refinement uses tensor states [B,L,D], so only Tensor or singleton List[Tensor] is supported.
+        Returns:
+            x_tensor, rope_for_tensor_path, wrap_solution_back_as_list
+        """
+        if isinstance(x, list):
+            if len(x) != 1:
+                raise ValueError(
+                    "Refinement currently supports only Tensor or singleton List[Tensor]. "
+                    "Got a list with length > 1."
+                )
+            x_tensor = x[0]
+            wrap_back = True
+
+            # If caller passed singleton rope list (common with list API), unwrap it.
+            # If they passed per-block ropes, len == depth and we keep it as-is.
+            if isinstance(rope, list) and len(rope) == 1 and len(self.blocks) != 1:
+                rope = rope[0]
+            elif isinstance(rope, list) and len(rope) == 1 and len(self.blocks) == 1:
+                # Either interpretation works for depth=1; tensor path prefers unwrapped
+                rope = rope[0]
+            return x_tensor, rope, wrap_back
+
+        return x, rope, False
+
+    # -----------------------------
+    # Init refinement states
+    # -----------------------------
     def init_refinement_states(
         self,
         batch_size: int,
@@ -322,21 +396,23 @@ class SelfAttentionTRMStage(nn.Module):
         latent = latent.to(device=device, dtype=dtype)
         return solution, latent
 
-    # -------- core forward (no refinement) --------
+    # -----------------------------
+    # Core forward (no refinement)
+    # -----------------------------
     def forward(
         self,
         x_or_x_list: Union[torch.Tensor, List[torch.Tensor]],
         rope_or_rope_list=None,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        x = x_or_x_list        
-        for i,block in enumerate(self.blocks):
-            block:SelfAttentionBlock = block
-            rope = None
-            if rope_or_rope_list:
-                rope = rope_or_rope_list[i]
-            x = block(x, rope)
+        x = x_or_x_list
+        for i, block in enumerate(self.blocks):
+            block_rope = self._normalize_rope_for_block(x, rope_or_rope_list, i)
+            x = block(x, block_rope)
         return x
 
+    # -----------------------------
+    # Refinement internals
+    # -----------------------------
     def _refine_latent(
         self,
         x: torch.Tensor,
@@ -344,10 +420,15 @@ class SelfAttentionTRMStage(nn.Module):
         latent: torch.Tensor,
         rope=None,
     ) -> torch.Tensor:
-        if type(x) is list and len(x)==1:x = x[0]
         fused = self.combine_x_solution_latent(torch.cat([x, solution, latent], dim=-1))
-        fused = fused + self.role_embeddings[0]  # broadcasts [1,1,D] to [B,L,D]
-        return self.forward([fused], rope)
+        fused = fused + self.role_embeddings[0]  # [1,1,D] broadcast to [B,L,D]
+
+        out = self.forward(fused, rope)
+        if isinstance(out, list):
+            if len(out) != 1:
+                raise RuntimeError("Internal error: expected tensor output in _refine_latent")
+            out = out[0]
+        return out
 
     def _refine_solution(
         self,
@@ -357,7 +438,13 @@ class SelfAttentionTRMStage(nn.Module):
     ) -> torch.Tensor:
         fused = self.combine_solution_latent(torch.cat([solution, latent], dim=-1))
         fused = fused + self.role_embeddings[1]
-        return self.forward([fused], rope)
+
+        out = self.forward(fused, rope)
+        if isinstance(out, list):
+            if len(out) != 1:
+                raise RuntimeError("Internal error: expected tensor output in _refine_solution")
+            out = out[0]
+        return out
 
     def refine_states(
         self,
@@ -366,26 +453,35 @@ class SelfAttentionTRMStage(nn.Module):
         latent: torch.Tensor,
         num_latent_steps: int,
         damping: float,
-        rope=None,
+        rope_list=None,
         track_latent_grads: bool = False,
+        track_solution_grads: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        ctx = contextlib.nullcontext() if track_latent_grads else torch.no_grad()
-        with ctx:
+        if num_latent_steps < 0:
+            raise ValueError(f"num_latent_steps must be >= 0, got {num_latent_steps}")
+
+        latent_ctx = contextlib.nullcontext() if track_latent_grads else torch.no_grad()
+        with latent_ctx:
             for _ in range(num_latent_steps):
-                latent_next = self._refine_latent(x, solution, latent, rope=rope)
-                if type(latent_next) is list and len(latent_next)==1:latent_next = latent_next[0]
+                latent_next = self._refine_latent(x, solution, latent, rope=rope_list)
                 latent = latent + damping * (latent_next - latent)
 
-        solution_next = self._refine_solution(solution, latent, rope=rope)
-        if type(solution_next) is list and len(solution_next)==1:solution_next = solution_next[0]
-        solution = solution + damping * (solution_next - solution)
+        solution_ctx = contextlib.nullcontext() if track_solution_grads else torch.no_grad()
+        with solution_ctx:
+            solution_next = self._refine_solution(solution, latent, rope=rope_list)
+            solution = solution + damping * (solution_next - solution)
+
         return solution, latent
 
+    # -----------------------------
+    # Full TRM-style forward
+    # -----------------------------
     def forward_with_refinement(
         self,
-        x: torch.Tensor,
-        rope=None,
+        x: Union[torch.Tensor, List[torch.Tensor]],
+        rope_list=None,
         num_latent_steps: int = 4,
+        T: int = 1,
         damping: float = 0.5,
         solution: Optional[torch.Tensor] = None,
         latent: Optional[torch.Tensor] = None,
@@ -393,30 +489,59 @@ class SelfAttentionTRMStage(nn.Module):
         return_latent: bool = False,
         track_latent_grads: bool = False,
     ):
-        if type(x) is list:
-            bsz, seq_len, dim = x[0].shape
-            device = x[0].device
-            dtype = x[0].dtype
-        else:
-            bsz, seq_len, dim = x.shape
-            device = x.device
-            dtype = x.dtype
+        """
+        TRM-style recursion:
+          - First T-1 refinement passes are no-grad (latent + solution)
+          - Final pass tracks gradients on solution, and optionally on latent updates
+            via track_latent_grads
+        """
+        if T < 1:
+            raise ValueError(f"T must be >= 1, got {T}")
+
+        x_tensor, rope_tensorish, wrap_solution_back = self._unwrap_singleton_for_refinement(x, rope_list)
+
+        bsz, seq_len, dim = x_tensor.shape
+        if dim != self.d_model:
+            raise ValueError(f"Input dim {dim} does not match stage dim {self.d_model}")
+
+        device = x_tensor.device
+        dtype = x_tensor.dtype
 
         if solution is None or latent is None:
             solution, latent = self.init_refinement_states(bsz, seq_len, device, dtype=dtype)
 
+        # T-1 no-grad passes (latent + solution)
+        for _ in range(T - 1):
+            solution, latent = self.refine_states(
+                x_tensor,
+                solution,
+                latent,
+                num_latent_steps=num_latent_steps,
+                damping=damping,
+                rope_list=rope_tensorish,
+                track_latent_grads=False,
+                track_solution_grads=False,
+            )
+
+        # Final pass (solution grads on; latent grads optional)
         solution, latent = self.refine_states(
-            x,
+            x_tensor,
             solution,
             latent,
             num_latent_steps=num_latent_steps,
             damping=damping,
-            rope=rope,
+            rope_list=rope_tensorish,
             track_latent_grads=track_latent_grads,
+            track_solution_grads=True,
         )
-        if type(x) is list and len(x)==1:solution = [solution]
-        return (solution, latent) if return_latent else solution
-    
+
+        if wrap_solution_back:
+            solution_out: Union[torch.Tensor, List[torch.Tensor]] = [solution]
+        else:
+            solution_out = solution
+
+        return (solution_out, latent) if return_latent else solution_out
+      
 class CausalSelfAttentionBlock(nn.Module):
     def __init__(
         self,

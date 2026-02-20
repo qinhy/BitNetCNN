@@ -106,14 +106,22 @@ class DinoV3Distill(LitBit):
         x, y = batch
         logd = {}
         # loss_hint, logd, logits = self._ce_hint_training_step(x, y)
-        N_supervision_max = 16
+        N_supervision_max = 2
         N_supervision = random.randint(1, N_supervision_max)
         loss_kd_kl = 0.0
         z_t = self.teacher.forward_features(x)["x_norm_patchtokens"]
+        solution, latent = None, None
         for step in range(N_supervision):            
-            T_i = random.randint(1, 12)
-            n_latent = random.randint(1, 6)
-            z_s = self.student.forward_features(x, n=n_latent, T=T_i)["x_norm_patchtokens"]
+            T = random.randint(1, 2)
+            n = random.randint(1, 2)    
+            out = self.student.forward_features(
+                    x, solution=solution, latent=latent, n=n, T=T,
+                    # track_latent_grads=True,  # if your patched TRM class supports it
+                )
+            solution = out["x_prenorm"]   # solution state
+            latent   = out["z_latent"]    # latent state
+            z_s = out["x_norm_patchtokens"]
+
             loss_kd_kl += self.relational_kd_kl(z_s, z_t)
         loss_kd_kl /= N_supervision
         logd = {**logd,**{"train/kd_kl": loss_kd_kl.detach()}}
@@ -146,7 +154,7 @@ class DinoV3DistillConfig(CommonTrainConfig):
     dataset_name: str = "retinaface"
 
     epochs: int = Field(50, ge=1)
-    batch_size: int = Field(8, ge=1)
+    batch_size: int = Field(2, ge=1)
     num_workers: int = Field(0, ge=0)
 
     lr: float = Field(1e-4, gt=0)

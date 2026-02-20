@@ -110,7 +110,7 @@ class NetCNN(nn.Module):
 # LightningModule wrapper using LitBit
 # ----------------------------
 class LitNetCNN(LitBit):        
-    def configure_optimizers(self):
+    def configure_optimizers(self,trainer=None):
         # Use AdamW for MNIST instead of SGD
         opt = torch.optim.AdamW(
             self.configure_optimizer_params(),
