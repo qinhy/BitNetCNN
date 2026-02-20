@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator, DistributedType
 from accelerate.utils import gather_object, broadcast_object_list
 from tqdm.auto import tqdm
+from bitlayers.ema import EMA
 from dataset import DataModuleConfig, DataSetModule
 
 # ----------------------------
@@ -386,8 +387,10 @@ class AccelTrainer:
         fp8_kwargs: Optional[dict] = None,
         # Advanced: pass custom Accelerate kwargs_handlers directly
         kwargs_handlers: Optional[list] = None,
+        enable_ema: bool = False,
     ):
         self.max_epochs = int(max_epochs)
+        self.enable_ema = enable_ema
 
         # ---- optional FP8 recipe handler ----
         handlers = list(kwargs_handlers) if kwargs_handlers is not None else []
@@ -476,6 +479,7 @@ class AccelTrainer:
 
         # hooks on unwrapped model are fine
         self.accelerator.unwrap_model(model).on_fit_start(self)
+        self.ema = EMA(self.accelerator.unwrap_model(model)) if self.enable_ema else None
 
         for epoch in range(self.max_epochs):
             # Run validation first if requested, otherwise train first
@@ -489,6 +493,9 @@ class AccelTrainer:
 
             if self.scheduler is not None and self.scheduler_interval == "epoch":
                 self.scheduler.step()
+
+            if self.ema:
+                self.ema.update(self.accelerator.unwrap_model(model))
 
         return self.metrics_manager.to_list() if self.metrics_manager is not None else []
 
