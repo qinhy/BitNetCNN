@@ -391,6 +391,11 @@ class AccelTrainer:
     ):
         self.max_epochs = int(max_epochs)
         self.enable_ema = enable_ema
+        self.ema_decay = EMA.decay
+
+        if type(self.enable_ema) is float:
+            self.enable_ema = True
+            self.ema_decay = enable_ema
 
         # ---- optional FP8 recipe handler ----
         handlers = list(kwargs_handlers) if kwargs_handlers is not None else []
@@ -478,8 +483,9 @@ class AccelTrainer:
         self.scheduler = scheduler
 
         # hooks on unwrapped model are fine
-        self.accelerator.unwrap_model(model).on_fit_start(self)
-        self.ema = EMA(self.accelerator.unwrap_model(model).student) if self.enable_ema else None
+        raw_model = self.accelerator.unwrap_model(model)
+        raw_model.on_fit_start(self)
+        self.ema = EMA(raw_model.student, decay=self.ema_decay) if self.enable_ema else None
 
         for epoch in range(self.max_epochs):
             # Run validation first if requested, otherwise train first
@@ -493,9 +499,6 @@ class AccelTrainer:
 
             if self.scheduler is not None and self.scheduler_interval == "epoch":
                 self.scheduler.step()
-
-            if self.enable_ema:
-                self.ema.update(self.accelerator.unwrap_model(model).student)
 
         return self.metrics_manager.to_list() if self.metrics_manager is not None else []
 
@@ -609,18 +612,23 @@ class AccelTrainer:
         if stage == "train":
             assert self.optimizer is not None
 
-        model = self.model                       # ✅ prepared/wrapped model
-        raw_model = self.accelerator.unwrap_model(model)  # ✅ only for hooks/export
+        model = self.model
+        raw_model = self.accelerator.unwrap_model(model)
         optimizer = self.optimizer
         accelerator = self.accelerator
 
+        ema_applied = False
+
         # hooks + mode
         if stage == "train":
-            raw_model.on_train_epoch_start(epoch)
             model.train()
+            raw_model.on_train_epoch_start(epoch)
         else:
-            raw_model.on_validation_epoch_start(epoch)
             model.eval()
+            if self.enable_ema:
+                self.ema.apply_to(raw_model.student)   # apply ONCE before ternary snapshot clone
+                ema_applied = True
+            raw_model.on_validation_epoch_start(epoch)
 
         self._maybe_set_dataloader_epoch(loader, epoch)
         pbar = self._pbar(loader, stage, epoch)
@@ -631,91 +639,93 @@ class AccelTrainer:
         opt_step = -1
         last_micro_step = -1
 
-        for micro_step, batch in enumerate(pbar):
-            last_micro_step = micro_step
-            bs = self._infer_batch_size(batch)
+        try:
+            for micro_step, batch in enumerate(pbar):
+                last_micro_step = micro_step
+                bs = self._infer_batch_size(batch)
+
+                if stage == "train":
+                    with accelerator.accumulate(model):
+                        with accelerator.autocast():
+                            m = raw_model.training_step(batch, micro_step).model_copy(
+                                update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
+                            )
+
+                        if optimizer is not None:
+                            try:
+                                m.metrics["lr"] = float(optimizer.param_groups[0]["lr"])
+                            except Exception:
+                                pass
+
+                        epoch_accum.update(m, batch_size=bs, stage=stage)
+                        step_accum.update(m, batch_size=bs, stage=stage)
+
+                        if m.loss is None:
+                            raise ValueError("training_step must return Metrics with loss (got loss=None)")
+
+                        accelerator.backward(m.loss)
+
+                        if accelerator.sync_gradients:
+                            if self.max_grad_norm is not None:
+                                accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+
+                            optimizer.step()
+                            optimizer.zero_grad(set_to_none=True)
+
+                            if self.enable_ema and getattr(self, "ema", None) is not None and not accelerator.optimizer_step_was_skipped:
+                                self.ema.update(raw_model.student)
+
+                            if self.scheduler is not None and self.scheduler_interval == "step":
+                                if not accelerator.optimizer_step_was_skipped:
+                                    self.scheduler.step()
+
+                            opt_step += 1
+                            step_means, step_count = step_accum.compute_global_means_count_and_reset()
+
+                            loss_key = f"{stage}/loss"
+                            step_loss = step_means.pop(loss_key, None)
+
+                            step_row = Metrics(
+                                stage=stage,
+                                epoch=epoch,
+                                step=opt_step,
+                                batch_size=step_count,
+                                loss=step_loss,
+                                metrics=step_means,
+                            )
+                            self._log(step_row, trainer_model=model, pbar=pbar)
+
+                else:  # val
+                    with torch.no_grad():
+                        with accelerator.autocast():
+                            m = raw_model.validation_step(batch, micro_step).model_copy(
+                                update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
+                            )
+                    epoch_accum.update(m, batch_size=bs, stage=stage)
+
+            epoch_means, epoch_count = epoch_accum.compute_global_means_count_and_reset()
+            summary_metrics = {self._mean_key(k): v for k, v in epoch_means.items()}
+
+            summary = Metrics(
+                stage=stage,
+                epoch=epoch,
+                step=max(last_micro_step, 0),
+                batch_size=epoch_count,
+                loss=None,
+                metrics=summary_metrics,
+            )
+            self._log(summary, trainer_model=model, pbar=pbar, force_print=True)
 
             if stage == "train":
-                with accelerator.accumulate(model):
-                    # ✅ This is the key for fp16/bf16/fp8:
-                    with accelerator.autocast():
-                        m = self.accelerator.unwrap_model(model
-                            ).training_step(batch, micro_step).model_copy(
-                                update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
-                        )
-
-                    if optimizer is not None:
-                        try:
-                            m.metrics["lr"] = float(optimizer.param_groups[0]["lr"])
-                        except Exception:
-                            pass
-
-                    epoch_accum.update(m, batch_size=bs, stage=stage)
-                    step_accum.update(m, batch_size=bs, stage=stage)
-
-                    if m.loss is None:
-                        raise ValueError("training_step must return Metrics with loss (got loss=None)")
-
-                    accelerator.backward(m.loss)
-
-                    if accelerator.sync_gradients:
-                        if self.max_grad_norm is not None:
-                            accelerator.clip_grad_norm_(model.parameters(), self.max_grad_norm)
-
-                        optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-
-                        # ✅ If fp16 overflow caused step to be skipped, don’t advance LR
-                        if self.scheduler is not None and self.scheduler_interval == "step":
-                            if not accelerator.optimizer_step_was_skipped:
-                                self.scheduler.step()
-
-                        # log ONE global mean row per optimizer step
-                        opt_step += 1
-                        step_means, step_count = step_accum.compute_global_means_count_and_reset()
-
-                        loss_key = f"{stage}/loss"
-                        step_loss = step_means.pop(loss_key, None)
-
-                        step_row = Metrics(
-                            stage=stage,
-                            epoch=epoch,
-                            step=opt_step,
-                            batch_size=step_count,
-                            loss=step_loss,
-                            metrics=step_means,
-                        )
-                        self._log(step_row, trainer_model=model, pbar=pbar)
-
+                raw_model.on_train_epoch_end(epoch)
             else:
-                with torch.no_grad():
-                    with accelerator.autocast():
-                        m =self.accelerator.unwrap_model(model
-                            ).validation_step(batch, micro_step).model_copy(
-                            update=dict(stage=stage, epoch=epoch, step=micro_step, batch_size=bs)
-                        )
-                epoch_accum.update(m, batch_size=bs, stage=stage)
+                raw_model.on_validation_epoch_end(epoch)
 
-        epoch_means, epoch_count = epoch_accum.compute_global_means_count_and_reset()
-        summary_metrics = {self._mean_key(k): v for k, v in epoch_means.items()}
+            return summary
 
-        summary = Metrics(
-            stage=stage,
-            epoch=epoch,
-            step=max(last_micro_step, 0),
-            batch_size=epoch_count,
-            loss=None,
-            metrics=summary_metrics,
-        )
-        self._log(summary, trainer_model=model, pbar=pbar, force_print=True)
-
-        # end hooks
-        if stage == "train":
-            raw_model.on_train_epoch_end(epoch)
-        else:
-            raw_model.on_validation_epoch_end(epoch)
-
-        return summary
+        finally:
+            if ema_applied:
+                self.ema.restore(raw_model.student)
 
 # ----------------------------
 # KD + hints + ternary eval/export
@@ -901,9 +911,12 @@ class LitBit(AccelLightningModule):
                 trainer.print(f"{str10('Hint')} : alpha_hint={self.alpha_hint} | points={self.hint_points}")
                 
             opt,sch,inv = self.configure_optimizers()
-            trainer.print(f"{str10('Optim('+class_name(opt)+')')} : lr={self.lr} wd={self.wd} epochs={self.epochs}")
+            trainer.print(f"{str10('Opt('+class_name(opt)+')')} : lr={self.lr} wd={self.wd} epochs={self.epochs}")
             if sch:
                 trainer.print(f"{str10('Scheduler')} : enable ({class_name(sch)})")
+                
+            if trainer.enable_ema:
+                trainer.print(f"{str10('EMA')} : enable decay={trainer.ema.decay}")
                
             trainer.print(
                 f"{str10('Accelerate')} : device={trainer.accelerator.device} "
@@ -994,6 +1007,7 @@ class LitBit(AccelLightningModule):
         else:
             clone = copy.deepcopy(self.student)
         clone = convert_to_ternary(clone)
+        clone.eval()
 
         dev = next(self.student.parameters()).device
         return clone.to(dev)

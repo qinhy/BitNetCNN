@@ -131,14 +131,14 @@ class LitNetViT(LitBit):
         metrics = {"val/acc_fp": acc_fp, "val/acc_tern": acc_tern}
         return Metrics(loss=vloss, metrics=metrics)
     
-    # def configure_optimizers(self,trainer=None):
-    #     # Use AdamW for MNIST instead of SGD
-    #     opt = torch.optim.AdamW(
-    #         self.configure_optimizer_params(),
-    #         lr=self.lr, weight_decay=self.wd
-    #     )
-    #     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs, eta_min=self.lr*0.01)
-    #     return opt, sched, "epoch"
+    def configure_optimizers(self,trainer=None):
+        # Use AdamW for MNIST instead of SGD
+        opt = torch.optim.AdamW(
+            self.configure_optimizer_params(),
+            lr=self.lr, weight_decay=self.wd
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs, eta_min=self.lr*0.01)
+        return opt, sched, "epoch"
 
 # ----------------------------
 # CLI / main
@@ -148,11 +148,12 @@ class Config(CommonTrainConfig):
     dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_tViT_mnist"
     epochs:int=50
-    batch_size:int=1024
-    # lr: float = 3e-4
-    # wd:float=1e-4
+    batch_size:int=4096
+    num_workers:int=32
+    lr:float=3e-4
+    wd:float=1e-4
     label_smoothing:float=0.0
-    amp: bool = True
+    amp:bool=True
 
 def main():
     parser = ArgumentParser(model=Config)
@@ -171,7 +172,7 @@ def main():
         mixed_precision="bf16" if args.amp else "no",
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
-        enable_ema=True
+        enable_ema=0.99**(args.batch_size//128)
     )
     trainer.fit(lit, datamodule=dm.build())
 

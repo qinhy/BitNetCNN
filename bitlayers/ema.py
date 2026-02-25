@@ -5,6 +5,7 @@ import torch.nn as nn
 # EMA (optional but helps stability)
 # -------------------------
 class EMA:
+    decay = 0.999
     def __init__(self, model: nn.Module, decay: float = 0.999):
         self.decay = decay
         self.shadow = {}
