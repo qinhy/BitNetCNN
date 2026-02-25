@@ -297,13 +297,13 @@ class SelfAttentionTRMStage(nn.Module):
         self.d_model = dim
         self.depth = depth
 
-        # Combine projections
-        self.combine_x_solution_latent = Linear(3 * dim, dim)
-        self.combine_solution_latent = Linear(2 * dim, dim)
+        # # Combine projections
+        # self.combine_x_solution_latent = Linear(3 * dim, dim)
+        # self.combine_solution_latent = Linear(2 * dim, dim)
 
-        # Role embeddings: [2,1,1,D] => 0: update latent, 1: update solution
-        self.role_embeddings = nn.Parameter(torch.empty(2, 1, 1, dim, device=device))
-        nn.init.normal_(self.role_embeddings, std=init_std)
+        # # Role embeddings: [2,1,1,D] => 0: update latent, 1: update solution
+        # self.role_embeddings = nn.Parameter(torch.empty(2, 1, 1, dim, device=device))
+        # nn.init.normal_(self.role_embeddings, std=init_std)
 
         # Learned initial states: [1,1,D]
         self.init_solution_state = nn.Parameter(torch.empty(1, 1, dim, device=device))
@@ -413,38 +413,38 @@ class SelfAttentionTRMStage(nn.Module):
     # -----------------------------
     # Refinement internals
     # -----------------------------
-    def _refine_latent(
-        self,
-        x: torch.Tensor,
-        solution: torch.Tensor,
-        latent: torch.Tensor,
-        rope=None,
-    ) -> torch.Tensor:
-        fused = self.combine_x_solution_latent(torch.cat([x, solution, latent], dim=-1))
-        fused = fused + self.role_embeddings[0]  # [1,1,D] broadcast to [B,L,D]
+    # def _refine_latent(
+    #     self,
+    #     x: torch.Tensor,
+    #     solution: torch.Tensor,
+    #     latent: torch.Tensor,
+    #     rope=None,
+    # ) -> torch.Tensor:
+    #     fused = x+solution+latent # self.combine_x_solution_latent(torch.cat([x, solution, latent], dim=-1))
+    #     # fused = fused + self.role_embeddings[0]  # [1,1,D] broadcast to [B,L,D]
 
-        out = self.forward(fused, rope)
-        if isinstance(out, list):
-            if len(out) != 1:
-                raise RuntimeError("Internal error: expected tensor output in _refine_latent")
-            out = out[0]
-        return out
+    #     out = self.forward(fused, rope)
+    #     if isinstance(out, list):
+    #         if len(out) != 1:
+    #             raise RuntimeError("Internal error: expected tensor output in _refine_latent")
+    #         out = out[0]
+    #     return out
 
-    def _refine_solution(
-        self,
-        solution: torch.Tensor,
-        latent: torch.Tensor,
-        rope=None,
-    ) -> torch.Tensor:
-        fused = self.combine_solution_latent(torch.cat([solution, latent], dim=-1))
-        fused = fused + self.role_embeddings[1]
+    # def _refine_solution(
+    #     self,
+    #     solution: torch.Tensor,
+    #     latent: torch.Tensor,
+    #     rope=None,
+    # ) -> torch.Tensor:
+    #     fused = solution+latent # self.combine_solution_latent(torch.cat([solution, latent], dim=-1))
+    #     # fused = fused + self.role_embeddings[1]
 
-        out = self.forward(fused, rope)
-        if isinstance(out, list):
-            if len(out) != 1:
-                raise RuntimeError("Internal error: expected tensor output in _refine_solution")
-            out = out[0]
-        return out
+    #     out = self.forward(fused, rope)
+    #     if isinstance(out, list):
+    #         if len(out) != 1:
+    #             raise RuntimeError("Internal error: expected tensor output in _refine_solution")
+    #         out = out[0]
+    #     return out
 
     def refine_states(
         self,
@@ -463,13 +463,13 @@ class SelfAttentionTRMStage(nn.Module):
         latent_ctx = contextlib.nullcontext() if track_latent_grads else torch.no_grad()
         with latent_ctx:
             for _ in range(num_latent_steps):
-                latent_next = self._refine_latent(x, solution, latent, rope=rope_list)
-                latent = latent + damping * (latent_next - latent)
+                latent = self.forward(x+solution+latent, rope_list)#self._refine_latent(x, solution, latent, rope=rope_list)
+                # latent = latent + damping * (latent_next - latent)
 
         solution_ctx = contextlib.nullcontext() if track_solution_grads else torch.no_grad()
         with solution_ctx:
-            solution_next = self._refine_solution(solution, latent, rope=rope_list)
-            solution = solution + damping * (solution_next - solution)
+            solution =  self.forward(solution+latent, rope_list)#self._refine_solution(solution, latent, rope=rope_list)
+            # solution = solution + damping * (solution_next - solution)
 
         return solution, latent
 

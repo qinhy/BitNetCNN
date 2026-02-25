@@ -28,9 +28,9 @@ class TinyViT(nn.Module):
             patch_size=7,
             in_chans=1,
             drop_path_rate=0.0,
-            embed_dim=60,
+            embed_dim=64,
             depth=4,
-            num_heads=3,
+            num_heads=4,
             ffn_ratio=2,
         )
         self.back.init_weights()
@@ -101,10 +101,10 @@ class LitNetViT(LitBit):
         student: TinyViT = self.student
 
         # Start simple but actually use TRM
-        N_supervision = random.randint(4,8)   # try 1 first, then 4
+        N_supervision = 1#random.randint(4,8)   # try 1 first, then 4
         for s in range(N_supervision):
-            T = random.randint(1,4)               # outer recursion passes
-            n = random.randint(1,2)               # latent refinement steps
+            T = 1#random.randint(1,4)               # outer recursion passes
+            n = 0#random.randint(1,2)               # latent refinement steps
             solution, latent, logits, q_logits = student(
                 x,
                 solution=solution,
@@ -181,7 +181,7 @@ class Config(CommonTrainConfig):
     dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_tViT_mnist"
     epochs:int=1024
-    batch_size:int=1024*4
+    batch_size:int=1024
     num_workers:int=8
     lr:float=3e-4
     wd:float=1e-4
