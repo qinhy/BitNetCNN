@@ -515,7 +515,31 @@ class DinoVisionTransformerTRM(DinoVisionTransformer):
             "get_intermediate_layers is not implemented for TRM-wrapped blocks. "
             "Use the base DinoVisionTransformer or add a TRM-aware version."
         )
-    
+
+def vit_femto(patch_size=16, cls=DinoVisionTransformer, **kwargs):
+    # ultra tiny, minimal capacity
+    model = cls(
+        patch_size=patch_size,
+        embed_dim=64,
+        depth=3,
+        num_heads=1,     # 64 % 1 == 0
+        ffn_ratio=2,
+        **kwargs,
+    )
+    return model
+
+def vit_pico(patch_size=16, cls=DinoVisionTransformer, **kwargs):
+    # smaller than micro, good for very fast experiments
+    model = cls(
+        patch_size=patch_size,
+        embed_dim=96,
+        depth=4,
+        num_heads=3,     # 96 % 3 == 0
+        ffn_ratio=2,
+        **kwargs,
+    )
+    return model
+
 def vit_micro(patch_size=8, cls=DinoVisionTransformer, **kwargs):
     # very small + very fast
     model = cls(

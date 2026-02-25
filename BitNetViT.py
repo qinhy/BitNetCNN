@@ -2,7 +2,7 @@ import random
 from pydanticV2_argparse import ArgumentParser
 import torch
 
-from bitlayers.dinov3.models.vision_transformer import DinoVisionTransformer, DinoVisionTransformerTRM, vit_micro
+from bitlayers.dinov3.models.vision_transformer import DinoVisionTransformer, DinoVisionTransformerTRM, vit_femto, vit_micro, vit_tiny
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 import torch.nn as nn
 
@@ -14,14 +14,20 @@ from dataset import DataModuleConfig
 # Simple BitNet block & model
 # ----------------------------
 class TinyViT(nn.Module):
-    def __init__(self, num_classes=10, drop_p=0.1, bias=True, scale_op="median"):
+    def __init__(self, model_size=vit_femto, num_classes=10, drop_p=0.1, bias=True, scale_op="median"):
         super().__init__()
-        self.back = vit_micro(
+        self.model_size = model_size
+        self.back = DinoVisionTransformerTRM(
             img_size=28,      # <-- important for MNIST
             patch_size=7,
             in_chans=1,
-            cls=DinoVisionTransformerTRM,
+            # cls=DinoVisionTransformerTRM,
             drop_path_rate=0.0,  # <-- good to force off for MNIST
+            
+            embed_dim=60,
+            depth=4,
+            num_heads=3,
+            ffn_ratio=2,
         )
         self.back.init_weights()   # <-- VERY important unless vit_micro already does this
 
@@ -38,16 +44,21 @@ class TinyViT(nn.Module):
         self.bias = bias
 
     def forward(self, x, solution=None, latent=None, n=1, T=1, full_output=False):
-        out = self.back.forward_features(
-            x,
-            solution=solution,
-            latent=latent,
-            n=n,
-            T=T,
-            # track_latent_grads=True,  # if your patched TRM class supports it
-        )
-        y = out["x_prenorm"]   # solution state
-        z = out["z_latent"]    # latent state
+        if type(self.back) is DinoVisionTransformer:
+            out = self.back.forward_features(x)
+            y = None
+            z = None
+        else:
+            out = self.back.forward_features(
+                x,
+                solution=solution,
+                latent=latent,
+                n=n,
+                T=T,
+                # track_latent_grads=True,  # if your patched TRM class supports it
+            )
+            y = out["x_prenorm"]   # solution state
+            z = out["z_latent"]    # latent state
         logits = self.head(out["x_norm_clstoken"])
         if full_output:
             return logits, y, z
@@ -55,7 +66,7 @@ class TinyViT(nn.Module):
             return logits
 
     def clone(self):
-        return self.__class__(self.num_classes, self.drop_p, self.bias)
+        return self.__class__(self.model_size, self.num_classes, self.drop_p, self.bias)
 
 
 # ----------------------------
@@ -63,9 +74,8 @@ class TinyViT(nn.Module):
 # ----------------------------
 class LitNetViT(LitBit):
     def training_step(self, batch, batch_idx):
-        if type(self.student) is DinoVisionTransformer:
+        if type(self.student.back) is DinoVisionTransformer:
             return super().training_step(batch, batch_idx)
-
         x, y_answer = batch
         logd = {}
 
@@ -75,9 +85,9 @@ class LitNetViT(LitBit):
         student: TinyViT = self.student
 
         # Start simple but actually use TRM
-        N_supervision = random.randint(1,4)   # try 1 first, then 4
+        N_supervision = random.randint(4,8)   # try 1 first, then 4
         for s in range(N_supervision):
-            T = random.randint(1,2)               # outer recursion passes
+            T = random.randint(1,4)               # outer recursion passes
             n = random.randint(1,2)               # latent refinement steps
             logits, solution, latent = student(
                 x,
@@ -105,14 +115,15 @@ class LitNetViT(LitBit):
     
     @torch.no_grad()
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
-        if type(self.student) is DinoVisionTransformer:
+        if type(self.student.back) is DinoVisionTransformer:
             return super().validation_step(batch, batch_idx)
         
         x, y = batch
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y 
 
         z_fp = self.student(x)
-        z_tern = self._ternary_snapshot(x)
+        # z_tern = self._ternary_snapshot(x)
+        z_tern = self._ternary_snapshot(x,n=1,T=2)
 
         vloss = F.cross_entropy(z_fp, y_idx.long())
         acc_fp = (z_fp.argmax(dim=1) == y_idx).float().mean()
@@ -120,14 +131,14 @@ class LitNetViT(LitBit):
         metrics = {"val/acc_fp": acc_fp, "val/acc_tern": acc_tern}
         return Metrics(loss=vloss, metrics=metrics)
     
-    def configure_optimizers(self,trainer=None):
-        # Use AdamW for MNIST instead of SGD
-        opt = torch.optim.AdamW(
-            self.configure_optimizer_params(),
-            lr=self.lr, weight_decay=self.wd
-        )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs, eta_min=self.lr*0.01)
-        return opt, sched, "epoch"
+    # def configure_optimizers(self,trainer=None):
+    #     # Use AdamW for MNIST instead of SGD
+    #     opt = torch.optim.AdamW(
+    #         self.configure_optimizer_params(),
+    #         lr=self.lr, weight_decay=self.wd
+    #     )
+    #     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs, eta_min=self.lr*0.01)
+    #     return opt, sched, "epoch"
 
 # ----------------------------
 # CLI / main
@@ -138,8 +149,8 @@ class Config(CommonTrainConfig):
     export_dir:Optional[str]="./ckpt_tViT_mnist"
     epochs:int=50
     batch_size:int=1024
-    lr: float = 3e-4
-    wd:float=1e-4
+    # lr: float = 3e-4
+    # wd:float=1e-4
     label_smoothing:float=0.0
     amp: bool = True
 
@@ -150,9 +161,9 @@ def main():
     dm = DataModuleConfig.model_validate(args.model_dump())
     config = LitBitConfig.model_validate(args.model_dump())
     config.dataset = dm.model_copy()    
-    config.student = TinyViT(num_classes=dm.num_classes,scale_op=config.scale_op)    
+    config.student = TinyViT(model_size=vit_femto, num_classes=dm.num_classes,scale_op=config.scale_op)    
     config.model_name='vit'
-    config.model_size='tiny'
+    config.model_size='femto'
     lit = LitNetViT(config)
 
     trainer = AccelTrainer(
