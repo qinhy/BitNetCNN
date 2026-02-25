@@ -481,10 +481,10 @@ class AccelTrainer:
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
-        self.ema = EMA(raw_model.student, decay=self.ema_decay) if self.enable_ema else None
 
         # hooks on unwrapped model are fine
         raw_model = self.accelerator.unwrap_model(model)
+        self.ema = EMA(raw_model.student, decay=self.ema_decay) if self.enable_ema else None
         raw_model.on_fit_start(self)
 
         for epoch in range(self.max_epochs):
