@@ -481,11 +481,11 @@ class AccelTrainer:
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
+        self.ema = EMA(raw_model.student, decay=self.ema_decay) if self.enable_ema else None
 
         # hooks on unwrapped model are fine
         raw_model = self.accelerator.unwrap_model(model)
         raw_model.on_fit_start(self)
-        self.ema = EMA(raw_model.student, decay=self.ema_decay) if self.enable_ema else None
 
         for epoch in range(self.max_epochs):
             # Run validation first if requested, otherwise train first
@@ -914,7 +914,7 @@ class LitBit(AccelLightningModule):
             trainer.print(f"{str10('Opt('+class_name(opt)+')')} : lr={self.lr} wd={self.wd} epochs={self.epochs}")
             if sch:
                 trainer.print(f"{str10('Scheduler')} : enable ({class_name(sch)})")
-                
+
             if trainer.enable_ema:
                 trainer.print(f"{str10('EMA')} : enable decay={trainer.ema.decay}")
                
