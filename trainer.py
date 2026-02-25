@@ -876,7 +876,7 @@ class LitBit(AccelLightningModule):
     @torch.no_grad()
     def on_fit_start(self, trainer: 'AccelTrainer'):
         self._accel = accel = trainer.accelerator
-        self._trainer = trainer.accelerator
+        self._trainer = trainer
 
         if self.has_teacher and self.teacher is not None:
             self.teacher.eval()

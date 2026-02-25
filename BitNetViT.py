@@ -14,35 +14,46 @@ from dataset import DataModuleConfig
 # Simple BitNet block & model
 # ----------------------------
 class TinyViT(nn.Module):
-    def __init__(self, model_size=vit_femto, num_classes=10, drop_p=0.1, bias=True, scale_op="median"):
+    def __init__(
+        self, model_size=vit_femto, num_classes=10, drop_p=0.1, bias=True, scale_op="median"):
         super().__init__()
         self.model_size = model_size
+        self.num_classes = num_classes
+        self.drop_p = drop_p
+        self.bias = bias
+        self.scale_op = scale_op
+
         self.back = DinoVisionTransformerTRM(
-            img_size=28,      # <-- important for MNIST
+            img_size=28,      # MNIST
             patch_size=7,
             in_chans=1,
-            # cls=DinoVisionTransformerTRM,
-            drop_path_rate=0.0,  # <-- good to force off for MNIST
-            
+            drop_path_rate=0.0,
             embed_dim=60,
             depth=4,
             num_heads=3,
             ffn_ratio=2,
         )
-        self.back.init_weights()   # <-- VERY important unless vit_micro already does this
+        self.back.init_weights()
 
+        # Classification head (output_head in your pseudocode)
         self.head = nn.Sequential(
             nn.Dropout(drop_p),
-            nn.Linear(self.back.embed_dim, num_classes, bias=bias)
+            nn.Linear(self.back.embed_dim, num_classes, bias=bias),
         )
         nn.init.normal_(self.head[1].weight, std=0.02)
         if bias:
             nn.init.zeros_(self.head[1].bias)
 
-        self.num_classes = num_classes
-        self.drop_p = drop_p
-        self.bias = bias
-
+        # Confidence / correctness head (Q_head in your pseudocode)
+        # Produces logits for BCEWithLogitsLoss; shape [B, 1]
+        self.q_head = nn.Sequential(
+            nn.Dropout(drop_p),
+            nn.Linear(self.back.embed_dim, 1, bias=bias),
+        )
+        nn.init.normal_(self.q_head[1].weight, std=0.02)
+        if bias:
+            nn.init.zeros_(self.q_head[1].bias)
+            
     def forward(self, x, solution=None, latent=None, n=1, T=1, full_output=False):
         if type(self.back) is DinoVisionTransformer:
             out = self.back.forward_features(x)
@@ -59,11 +70,15 @@ class TinyViT(nn.Module):
             )
             y = out["x_prenorm"]   # solution state
             z = out["z_latent"]    # latent state
-        logits = self.head(out["x_norm_clstoken"])
+
+        # Heads use cls token representation
+        cls = out["x_norm_clstoken"]  # shape [B, D]
+        y_logits = self.head(cls)     # [B, num_classes]
+        q_logits = self.q_head(cls)   # [B, 1] (logits)
         if full_output:
-            return logits, y, z
+            return y, z, y_logits, q_logits
         else:
-            return logits
+            return y_logits
 
     def clone(self):
         return self.__class__(self.model_size, self.num_classes, self.drop_p, self.bias)
@@ -79,7 +94,8 @@ class LitNetViT(LitBit):
         x, y_answer = batch
         logd = {}
 
-        loss_ce = 0.0
+        loss = 0.0
+        q_threshold = 0.5
         solution, latent = None, None
 
         student: TinyViT = self.student
@@ -89,7 +105,7 @@ class LitNetViT(LitBit):
         for s in range(N_supervision):
             T = random.randint(1,4)               # outer recursion passes
             n = random.randint(1,2)               # latent refinement steps
-            logits, solution, latent = student(
+            solution, latent, logits, q_logits = student(
                 x,
                 solution=solution,
                 latent=latent,
@@ -97,21 +113,39 @@ class LitNetViT(LitBit):
                 T=T,
                 full_output=True
             )
-            loss_ce = loss_ce + self.ce_hard(logits, y_answer)
+            loss_ce = self.ce_hard(logits, y_answer)
+
+            # q-target = whether prediction is correct
+            pred = logits.argmax(dim=-1)                     # [B]
+            q_target = (pred == y_answer).float().unsqueeze(-1)  # [B,1]
+
+            # Confidence / correctness loss (q_hat are logits)
+            loss = loss_ce + F.binary_cross_entropy_with_logits(q_logits, q_target)
+
+            # Optional early stop if model is confident enough
+            q_prob = torch.sigmoid(q_logits).mean().item()
+            if q_prob > q_threshold:
+                N_supervision = s + 1
+                break
 
             # Important if doing deep supervision (>1 step):
             if s < N_supervision - 1:
                 solution = solution.detach()
                 latent = latent.detach()
 
-        loss_ce = loss_ce / N_supervision
-        logd["train/loss_ce"] = loss_ce.detach()
+                self._trainer.accelerator.backward(loss)
+                self._trainer.optimizer.step()
+                self._trainer.optimizer.zero_grad(set_to_none=True)
+                loss = loss.detach()
+
+        # loss = loss / N_supervision
+        logd["train/loss"] = loss.detach()
 
         y_idx = y_answer.argmax(dim=1) if y_answer.ndim == 2 else y_answer
         acc = (logits.argmax(dim=1) == y_idx).float().mean()
         logd["train/acc"] = acc.detach()
 
-        return Metrics(loss=loss_ce, metrics=logd)
+        return Metrics(loss=loss, metrics=logd)
     
     @torch.no_grad()
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
@@ -121,8 +155,7 @@ class LitNetViT(LitBit):
         x, y = batch
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y 
 
-        z_fp = self.student(x)
-        # z_tern = self._ternary_snapshot(x)
+        z_fp = self.student(x,n=1,T=2)
         z_tern = self._ternary_snapshot(x,n=1,T=2)
 
         vloss = F.cross_entropy(z_fp, y_idx.long())
@@ -147,9 +180,9 @@ class Config(CommonTrainConfig):
     data:str="./data"
     dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_tViT_mnist"
-    epochs:int=50
-    batch_size:int=4096
-    num_workers:int=32
+    epochs:int=1024
+    batch_size:int=1024*4
+    num_workers:int=8
     lr:float=3e-4
     wd:float=1e-4
     label_smoothing:float=0.0
