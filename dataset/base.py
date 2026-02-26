@@ -7,9 +7,68 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from torch.utils.data import DataLoader
 from torch.utils.data import default_collate
+from torch.utils.data import RandomSampler, SequentialSampler, BatchSampler
 
 from bitlayers.aug import MixupCutmix
 
+class RepeatBatchSampler:
+    """Repeat a (finite) BatchSampler forever."""
+    def __init__(self, batch_sampler):
+        self.batch_sampler = batch_sampler
+
+    def __iter__(self):
+        while True:
+            yield from iter(self.batch_sampler)
+
+    def __len__(self):
+        return len(self.batch_sampler)
+
+class EpochIterator:
+    """
+    Wrap an *infinite* DataLoader so each epoch yields exactly `steps_per_epoch` batches,
+    while reusing the same underlying iterator across epochs (no ramp-up).
+    """
+    def __init__(self, infinite_loader, steps_per_epoch: int):
+        self.loader = infinite_loader
+        self.steps_per_epoch = int(steps_per_epoch)
+        self._it = iter(self.loader)  # created ONCE
+
+    def __len__(self):
+        return self.steps_per_epoch
+
+    def __iter__(self):
+        for _ in range(self.steps_per_epoch):
+            yield next(self._it)
+
+    def __getattr__(self, name):
+        # forward attributes like .dataset, .batch_size, etc.
+        return getattr(self.loader, name)
+
+    @property
+    def sampler(self):
+        # expose inner sampler so your trainer's set_epoch logic can still work
+        bs = self.loader.batch_sampler  # RepeatBatchSampler
+        inner_bs = getattr(bs, "batch_sampler", None)  # BatchSampler
+        return getattr(inner_bs, "sampler", None)
+
+def make_epoch_persistent_loader(
+    dataset,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    drop_last: bool,
+    **dl_kwargs,
+):
+    sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
+    inner_batch_sampler = BatchSampler(sampler, batch_size=batch_size, drop_last=drop_last)
+    repeat_bs = RepeatBatchSampler(inner_batch_sampler)
+
+    infinite_loader = DataLoader(
+        dataset,
+        batch_sampler=repeat_bs,   # <-- set at init (no error)
+        **dl_kwargs,
+    )
+    return EpochIterator(infinite_loader, steps_per_epoch=len(inner_batch_sampler))
 
 class DataSetModule:
     def __init__(self, config: "DataModuleConfig"):
@@ -71,29 +130,32 @@ class DataSetModule:
             x, y = self._collate_transform(x, y)
         return x, y
 
-    def train_dataloader(self) -> DataLoader:
+    def train_dataloader(self):
         collate_fn = self.collate_fn if self._collate_transform is not None else None
         return DataLoader(
             self.train_ds,
             batch_size=self.batch_size,
             shuffle=True,
+            drop_last=True,
             num_workers=self.num_workers,
             pin_memory=True,
-            drop_last=True,
             persistent_workers=(self.num_workers > 0),
             collate_fn=collate_fn,
+            prefetch_factor=4,
         )
 
-    def val_dataloader(self) -> DataLoader:
+    def val_dataloader(self):
         collate_fn = self.collate_fn if self._collate_transform is not None else None
         return DataLoader(
             self.val_ds,
             batch_size=self.batch_size,
             shuffle=False,
+            drop_last=False,
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=(self.num_workers > 0),
             collate_fn=collate_fn,
+            prefetch_factor=4,
         )
 
     @staticmethod

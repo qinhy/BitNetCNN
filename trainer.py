@@ -925,6 +925,7 @@ class LitBit(AccelLightningModule):
                 f"mixed_precision={trainer.accelerator.mixed_precision}"
             )
 
+            self.device = trainer.accelerator.device
             trainer.print("=" * 80)
 
     def on_validation_epoch_start(self, epoch: int):
@@ -1048,6 +1049,7 @@ class LitBit(AccelLightningModule):
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
         x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
 
         if self.kd is not None and self.hint is not None:
             loss, logd, logits = self._ce_kd_hint_training_step(x, y)
@@ -1078,6 +1080,7 @@ class LitBit(AccelLightningModule):
     @torch.no_grad()
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> Metrics:
         x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y
 
         z_fp = self.student(x)
