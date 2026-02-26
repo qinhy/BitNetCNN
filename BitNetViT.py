@@ -25,13 +25,13 @@ class TinyViT(nn.Module):
 
         self.back = DinoVisionTransformerTRM(
             img_size=28,      # MNIST
-            patch_size=7,
+            patch_size=2,
             in_chans=1,
-            drop_path_rate=0.0,
-            embed_dim=64,
-            depth=4,
-            num_heads=4,
-            ffn_ratio=2,
+            drop_path_rate=0.0, # no drop for recursion
+            embed_dim=72,
+            depth=3,
+            num_heads=3,
+            ffn_ratio=2.5,
         )
         self.back.init_weights()
 
@@ -61,11 +61,9 @@ class TinyViT(nn.Module):
             z = None
         else:
             out = self.back.forward_features(
-                x,
+                x,n=n,T=T,
                 solution=solution,
                 latent=latent,
-                n=n,
-                T=T,
                 # track_latent_grads=True,  # if your patched TRM class supports it
             )
             y = out["x_prenorm"]   # solution state
@@ -91,7 +89,8 @@ class LitNetViT(LitBit):
     def training_step(self, batch, batch_idx):
         if type(self.student.back) is DinoVisionTransformer:
             return super().training_step(batch, batch_idx)
-        x, y_answer = batch
+        x, y_answer = batch        
+        x, y_answer = x.to(self.device), y_answer.to(self.device)
         logd = {}
 
         loss = 0.0
@@ -101,10 +100,10 @@ class LitNetViT(LitBit):
         student: TinyViT = self.student
 
         # Start simple but actually use TRM
-        N_supervision = 1#random.randint(4,8)   # try 1 first, then 4
+        N_supervision = random.randint(4,8)   # try 1 first, then 4
         for s in range(N_supervision):
-            T = 1#random.randint(1,4)               # outer recursion passes
-            n = 0#random.randint(1,2)               # latent refinement steps
+            T = random.randint(1,3)               # outer recursion passes
+            n = random.randint(0,2)               # latent refinement steps
             solution, latent, logits, q_logits = student(
                 x,
                 solution=solution,
@@ -153,6 +152,7 @@ class LitNetViT(LitBit):
             return super().validation_step(batch, batch_idx)
         
         x, y = batch
+        x, y = x.to(self.device), y.to(self.device)
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y 
 
         z_fp = self.student(x,n=1,T=2)
@@ -180,8 +180,8 @@ class Config(CommonTrainConfig):
     data:str="./data"
     dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_tViT_mnist"
-    epochs:int=1024
-    batch_size:int=1024
+    epochs:int=1023
+    batch_size:int=512
     num_workers:int=8
     lr:float=3e-4
     wd:float=1e-4
@@ -202,10 +202,10 @@ def main():
 
     trainer = AccelTrainer(
         max_epochs=args.epochs,
-        mixed_precision="bf16" if args.amp else "no",
+        # mixed_precision="bf16" if args.amp else "no",
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
-        enable_ema=0.99**(args.batch_size//128)
+        # enable_ema=0.99**(args.batch_size//128)
     )
     trainer.fit(lit, datamodule=dm.build())
 
