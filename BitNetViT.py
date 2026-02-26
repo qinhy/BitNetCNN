@@ -50,6 +50,7 @@ class TinyViT(nn.Module):
         self.q_head = build_head(1)
         nn.init.normal_(self.q_head[1].weight, std=0.02)
         nn.init.zeros_(self.q_head[1].bias)
+        self.combo = {}
             
     def forward(self, x, solution=None, latent=None, n=1, T=1, full_output=False):
         if type(self.back) is DinoVisionTransformer:
@@ -74,6 +75,17 @@ class TinyViT(nn.Module):
             return y, z, y_logits, q_logits
         else:
             return y_logits
+
+    def record_combo(self, n,T,supervision,correct_cnt,total_cnt):
+        cnt,t_cnt = self.combo.get((n,T,supervision),(0,0))
+        self.combo[(n,T,supervision)] = (cnt + correct_cnt, t_cnt + total_cnt)
+
+    def get_best_combo(self):
+        def acc(item):
+            (correct, total) = item[1]
+            return (correct / total) if total > 0 else -1.0
+        best_key, (best_correct, best_total) = max(self.combo.items(), key=acc)
+        return best_key
         
     def thinking(self,x,n=1,T=2,max_supervision=16,q_threshold=0.99):
         logits_parts = []
@@ -139,9 +151,9 @@ class LitNetViT(LitBit):
         student: TinyViT = self.student
 
         # Start simple but actually use TRM
-        N_supervision = 16   # try 1 first, then 4
-        T = 2            # outer recursion passes
-        n = 1            # latent refinement steps
+        N_supervision = random.randint(1,16)   # try 1 first, then 4
+        T = random.randint(1,8)               # outer recursion passes
+        n = random.randint(0,4)               # latent refinement steps
         for s in range(N_supervision):
             solution, latent, logits, q_logits = student(
                 x,n=n,T=T,
@@ -166,6 +178,7 @@ class LitNetViT(LitBit):
                 solution = solution.detach()
                 latent = latent.detach()
 
+            student.record_combo(n,T,s+1,acc.sum().item(),len(acc))
             # Optional early stop if model is confident enough
             q_prob = torch.sigmoid(q_logits)
             keep_idx = (q_prob < q_threshold).flatten()
@@ -196,10 +209,9 @@ class LitNetViT(LitBit):
         x, y = x.to(self.device), y.to(self.device)
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y 
 
-        # z_fp = self.student.thinking(x,n=1,T=2)
-        # z_tern = self._ternary_snapshot.thinking(x,n=1,T=2)
-        z_fp = self.student(x,n=0,T=1)
-        z_tern = self._ternary_snapshot(x,n=0,T=1)
+        n,T,S = self.student.get_best_combo()
+        z_fp = self.student.thinking(x,n,T,S)
+        z_tern = self._ternary_snapshot.thinking(x,n,T,S)
 
         vloss = F.cross_entropy(z_fp, y_idx.long())
         acc_fp = (z_fp.argmax(dim=1) == y_idx).float().mean()
@@ -224,7 +236,7 @@ class Config(CommonTrainConfig):
     dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_tViT_mnist"
     epochs:int=1023
-    batch_size:int=1024*4
+    batch_size:int=128
     num_workers:int=8
     lr:float=3e-4
     wd:float=1e-4
