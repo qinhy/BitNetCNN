@@ -25,7 +25,7 @@ class TinyViT(nn.Module):
 
         self.back = DinoVisionTransformerTRM(
             img_size=28,      # MNIST
-            patch_size=2,
+            patch_size=4,
             in_chans=1,
             drop_path_rate=0.0, # no drop for recursion
             embed_dim=72,
@@ -35,24 +35,21 @@ class TinyViT(nn.Module):
         )
         self.back.init_weights()
 
-        # Classification head (output_head in your pseudocode)
-        self.head = nn.Sequential(
+        build_head = lambda num_out:nn.Sequential(
             nn.Dropout(drop_p),
-            nn.Linear(self.back.embed_dim, num_classes, bias=bias),
+            nn.Linear(self.back.embed_dim, num_out, bias=True),
         )
+
+        # Classification head (output_head in your pseudocode)
+        self.head = build_head(num_classes)
         nn.init.normal_(self.head[1].weight, std=0.02)
-        if bias:
-            nn.init.zeros_(self.head[1].bias)
+        nn.init.zeros_(self.head[1].bias)
 
         # Confidence / correctness head (Q_head in your pseudocode)
         # Produces logits for BCEWithLogitsLoss; shape [B, 1]
-        self.q_head = nn.Sequential(
-            nn.Dropout(drop_p),
-            nn.Linear(self.back.embed_dim, 1, bias=bias),
-        )
+        self.q_head = build_head(1)
         nn.init.normal_(self.q_head[1].weight, std=0.02)
-        if bias:
-            nn.init.zeros_(self.q_head[1].bias)
+        nn.init.zeros_(self.q_head[1].bias)
             
     def forward(self, x, solution=None, latent=None, n=1, T=1, full_output=False):
         if type(self.back) is DinoVisionTransformer:
@@ -77,6 +74,46 @@ class TinyViT(nn.Module):
             return y, z, y_logits, q_logits
         else:
             return y_logits
+        
+    def thinking(self,x,n=1,T=2,max_supervision=16,q_threshold=0.99):
+        logits_parts = []
+        idx_parts = []
+
+        idx = torch.arange(x.size(0), device=x.device)  # original positions
+        solution, latent = None, None
+
+        for step in range(max_supervision):
+            solution, latent, logits, q_logits = self.forward(
+                x, n=n, T=T,
+                solution=solution, latent=latent,
+                full_output=True
+            )
+
+            q_prob = torch.sigmoid(q_logits).view(-1)
+            keep = (q_prob < q_threshold)   # keep running these
+            done = ~keep                   # finalize these
+
+            # store finished samples
+            if done.any():
+                logits_parts.append(logits[done])
+                idx_parts.append(idx[done])
+
+            # if all finished, stop
+            if not keep.any():
+                break
+
+            # otherwise keep only unfinished and continue
+            x, solution, latent, idx = x[keep], solution[keep], latent[keep], idx[keep]
+
+        else:
+            # hit max_supervision: keep whatever is left from the last step
+            logits_parts.append(logits)
+            idx_parts.append(idx)
+
+        # restore original order
+        logits_all = torch.cat(logits_parts, dim=0)
+        idx_all = torch.cat(idx_parts, dim=0)
+        return logits_all[idx_all.argsort()]
 
     def clone(self):
         return self.__class__(self.model_size, self.num_classes, self.drop_p, self.bias)
@@ -94,56 +131,60 @@ class LitNetViT(LitBit):
         logd = {}
 
         loss = 0.0
-        q_threshold = 0.5
+        acc_list = []
+        loss_list = []
+        q_threshold = 0.99
         solution, latent = None, None
 
         student: TinyViT = self.student
 
         # Start simple but actually use TRM
-        N_supervision = random.randint(4,8)   # try 1 first, then 4
+        N_supervision = 16   # try 1 first, then 4
+        T = 2            # outer recursion passes
+        n = 1            # latent refinement steps
         for s in range(N_supervision):
-            T = random.randint(1,3)               # outer recursion passes
-            n = random.randint(0,2)               # latent refinement steps
             solution, latent, logits, q_logits = student(
-                x,
-                solution=solution,
-                latent=latent,
-                n=n,
-                T=T,
+                x,n=n,T=T,
+                solution=solution,latent=latent,
                 full_output=True
             )
-            loss_ce = self.ce_hard(logits, y_answer)
-
             # q-target = whether prediction is correct
-            pred = logits.argmax(dim=-1)                     # [B]
-            q_target = (pred == y_answer).float().unsqueeze(-1)  # [B,1]
+            pred = logits.argmax(dim=-1)  # [B]
+            acc = (pred == y_answer).float()
+            q_target = acc.unsqueeze(-1)  # [B,1]
 
             # Confidence / correctness loss (q_hat are logits)
-            loss = loss_ce + F.binary_cross_entropy_with_logits(q_logits, q_target)
-
-            # Optional early stop if model is confident enough
-            q_prob = torch.sigmoid(q_logits).mean().item()
-            if q_prob > q_threshold:
-                N_supervision = s + 1
-                break
+            loss = self.ce_hard(logits, y_answer) + F.binary_cross_entropy_with_logits(q_logits, q_target)
 
             # Important if doing deep supervision (>1 step):
             if s < N_supervision - 1:
-                solution = solution.detach()
-                latent = latent.detach()
-
                 self._trainer.accelerator.backward(loss)
                 self._trainer.optimizer.step()
                 self._trainer.optimizer.zero_grad(set_to_none=True)
                 loss = loss.detach()
+                loss_list.append(loss.cpu().item()/len(x))
+                solution = solution.detach()
+                latent = latent.detach()
 
-        # loss = loss / N_supervision
-        logd["train/loss"] = loss.detach()
+            # Optional early stop if model is confident enough
+            q_prob = torch.sigmoid(q_logits)
+            keep_idx = (q_prob < q_threshold).flatten()
+            
+            x = x[keep_idx]
+            y_answer = y_answer[keep_idx]
+            solution = solution[keep_idx]
+            latent = latent[keep_idx]
 
-        y_idx = y_answer.argmax(dim=1) if y_answer.ndim == 2 else y_answer
-        acc = (logits.argmax(dim=1) == y_idx).float().mean()
-        logd["train/acc"] = acc.detach()
-
+            if keep_idx.sum() == 0:
+                acc_list.append(acc.flatten())    
+                break
+            elif keep_idx.sum() > 0 and s == N_supervision - 1:
+                acc_list.append(acc.flatten())
+            else:
+                acc_list.append(acc[~keep_idx].flatten())
+ 
+        logd["train/loss"] = torch.Tensor(loss_list).mean()
+        logd["train/acc"] = torch.cat(acc_list, dim=0).mean()
         return Metrics(loss=loss, metrics=logd)
     
     @torch.no_grad()
@@ -155,8 +196,10 @@ class LitNetViT(LitBit):
         x, y = x.to(self.device), y.to(self.device)
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y 
 
-        z_fp = self.student(x,n=1,T=2)
-        z_tern = self._ternary_snapshot(x,n=1,T=2)
+        # z_fp = self.student.thinking(x,n=1,T=2)
+        # z_tern = self._ternary_snapshot.thinking(x,n=1,T=2)
+        z_fp = self.student(x,n=0,T=1)
+        z_tern = self._ternary_snapshot(x,n=0,T=1)
 
         vloss = F.cross_entropy(z_fp, y_idx.long())
         acc_fp = (z_fp.argmax(dim=1) == y_idx).float().mean()
@@ -181,7 +224,7 @@ class Config(CommonTrainConfig):
     dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_tViT_mnist"
     epochs:int=1023
-    batch_size:int=512
+    batch_size:int=1024*4
     num_workers:int=8
     lr:float=3e-4
     wd:float=1e-4
@@ -202,10 +245,10 @@ def main():
 
     trainer = AccelTrainer(
         max_epochs=args.epochs,
-        # mixed_precision="bf16" if args.amp else "no",
+        mixed_precision="bf16" if args.amp else "no",
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
-        # enable_ema=0.99**(args.batch_size//128)
+        enable_ema=0.99**(args.batch_size//128)
     )
     trainer.fit(lit, datamodule=dm.build())
 

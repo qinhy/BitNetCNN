@@ -663,7 +663,8 @@ class AccelTrainer:
                         if m.loss is None:
                             raise ValueError("training_step must return Metrics with loss (got loss=None)")
 
-                        accelerator.backward(m.loss)
+                        if m.loss.requires_grad:
+                            accelerator.backward(m.loss)
 
                         if accelerator.sync_gradients:
                             if self.max_grad_norm is not None:
