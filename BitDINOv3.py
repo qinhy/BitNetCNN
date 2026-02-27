@@ -310,14 +310,13 @@ class DinoV3Distill(LitBit):
         x, y = batch
         logd = {}
         # loss_hint, logd, logits = self._ce_hint_training_step(x, y)
-        N_supervision_max = 2
-        N_supervision = random.randint(1, N_supervision_max)
+        N_supervision = 16#random.randint(1, 2)
+        T = 6#random.randint(1, 2)
+        n = 3#random.randint(1, 2)    
         loss_kd_kl = 0.0
         z_t = self.teacher.forward_features(x)["x_norm_patchtokens"]
         solution, latent = None, None
         for step in range(N_supervision):            
-            T = random.randint(1, 2)
-            n = random.randint(1, 2)    
             out = self.student.forward_features(
                     x, solution=solution, latent=latent, n=n, T=T,
                     # track_latent_grads=True,  # if your patched TRM class supports it
@@ -326,8 +325,14 @@ class DinoV3Distill(LitBit):
             latent   = out["z_latent"]    # latent state
             z_s = out["x_norm_patchtokens"]
 
-            loss_kd_kl += self.relational_kd_kl(z_s, z_t)
-        loss_kd_kl /= N_supervision
+            loss_kd_kl = self.relational_kd_kl(z_s, z_t)
+            
+            if step<N_supervision-1:
+                self._trainer.accelerator.backward(loss_kd_kl)
+                self._trainer.optimizer.step()
+                self._trainer.optimizer.zero_grad(set_to_none=True)
+
+        # loss_kd_kl /= N_supervision
         logd = {**logd,**{"train/kd_kl": loss_kd_kl.detach()}}
         return Metrics(loss=loss_kd_kl, metrics=logd)
     

@@ -141,7 +141,7 @@ class DataSetModule:
             pin_memory=True,
             persistent_workers=(self.num_workers > 0),
             collate_fn=collate_fn,
-            prefetch_factor=4,
+            prefetch_factor=4 if self.num_workers > 0 else None,
         )
 
     def val_dataloader(self):
@@ -155,7 +155,7 @@ class DataSetModule:
             pin_memory=True,
             persistent_workers=(self.num_workers > 0),
             collate_fn=collate_fn,
-            prefetch_factor=4,
+            prefetch_factor=4 if self.num_workers > 0 else None,
         )
 
     @staticmethod
