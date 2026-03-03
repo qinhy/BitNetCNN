@@ -73,7 +73,10 @@ def make_epoch_persistent_loader(
 class DataSetModule:
     def __init__(self, config: "DataModuleConfig"):
         self.data_dir = config.data_dir
-        self.batch_size = config.batch_size
+        if type(config.batch_size) is int:
+            self.batch_size = (config.batch_size, config.batch_size)
+        else:
+            self.batch_size = config.batch_size
         self.num_workers = config.num_workers
 
         self.mixup = config.mixup
@@ -134,7 +137,7 @@ class DataSetModule:
         collate_fn = self.collate_fn if self._collate_transform is not None else None
         return DataLoader(
             self.train_ds,
-            batch_size=self.batch_size,
+            batch_size=self.batch_size[0],
             shuffle=True,
             drop_last=True,
             num_workers=self.num_workers,
@@ -148,7 +151,7 @@ class DataSetModule:
         collate_fn = self.collate_fn if self._collate_transform is not None else None
         return DataLoader(
             self.val_ds,
-            batch_size=self.batch_size,
+            batch_size=self.batch_size[1],
             shuffle=False,
             drop_last=False,
             num_workers=self.num_workers,

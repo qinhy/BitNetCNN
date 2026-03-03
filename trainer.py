@@ -73,7 +73,7 @@ class Metrics(BaseModel):
     stage: Literal["train", "val"] = "train"
     epoch: int = -1
     step: Optional[int] = None
-    batch_size: Optional[int] = None
+    batch_size: Optional[Union[int,Tuple[int, int]]] = None
 
     # excluded from pydantic serialization; still used in to_dict()
     loss: Optional[Any] = Field(default=None, exclude=True)
@@ -739,7 +739,7 @@ class CommonTrainConfig(BaseModel):
     )
 
     epochs: int = Field(200, ge=1)
-    batch_size: int = Field(512, ge=1)
+    batch_size: Union[int,Tuple[int, int]] = Field(512, ge=1)
 
     lr: float = Field(2e-1, gt=0)
     wd: float = Field(5e-4, ge=0)

@@ -110,7 +110,7 @@ class TinyViT(nn.Module):
     def get_best_combo(self) -> Tuple[int, int, int]:
         # Important: validation may run before any training steps
         if not self.combo:
-            return (1, 1, 1)
+            return (0, 1, 1)
 
         def acc(item):
             correct, total = item[1]
@@ -198,6 +198,9 @@ class LitNetViT(LitBit):
         self._trainer.optimizer.step()
         self._trainer.optimizer.zero_grad(set_to_none=True)
 
+    def on_train_epoch_start(self, epoch: int):
+        self.current_epoch = epoch
+
     def training_step(self, batch, batch_idx):
         # If not TRM, defer to base
         if type(self.student.back) is DinoVisionTransformer:
@@ -211,6 +214,11 @@ class LitNetViT(LitBit):
         q_threshold = 0.99
 
         # Randomize recursion / refinement / supervision depth
+        # if self.current_epoch<1:
+        #     N_supervision = 1
+        #     T = 1
+        #     n = 0
+        # else:
         N_supervision = random.randint(1, 16)
         T = random.randint(1, 8)
         n = random.randint(0, 4)
@@ -230,7 +238,7 @@ class LitNetViT(LitBit):
 
         final_loss = None
 
-        for s in range(N_supervision):
+        for step in range(N_supervision):
             solution, latent, logits, q_logits = student(
                 x_cur, n=n, T=T,
                 solution=solution,
@@ -243,7 +251,7 @@ class LitNetViT(LitBit):
             q_target = correct.unsqueeze(-1)         # [B_cur, 1]
 
             # Record combo stats on the current subset
-            student.record_combo(n, T, s + 1, correct.sum().item(), int(correct.numel()))
+            student.record_combo(n, T, step + 1, correct.sum().item(), int(correct.numel()))
 
             loss = self.ce_hard(logits, y_cur) + F.binary_cross_entropy_with_logits(q_logits, q_target)
             step_losses.append(loss.detach())
@@ -254,7 +262,7 @@ class LitNetViT(LitBit):
             done = ~keep
 
             # If we're at the last supervision step, force all remaining samples to be "done"
-            if s == N_supervision - 1:
+            if step == N_supervision - 1:
                 done = torch.ones_like(done, dtype=torch.bool)
                 keep = ~done
 
@@ -326,18 +334,19 @@ class LitNetViT(LitBit):
         metrics = {"val/acc_fp": acc_fp, "val/acc_tern": acc_tern}
         return Metrics(loss=vloss, metrics=metrics)
 
-    def configure_optimizers(self, trainer=None):
-        # AdamW for MNIST
-        opt = torch.optim.AdamW(
-            self.configure_optimizer_params(),
-            lr=self.lr,
-            weight_decay=self.wd,
-        )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=self.epochs, eta_min=self.lr * 0.01
-        )
-        return opt, sched, "epoch"
-
+    # def configure_optimizers(self, trainer=None):
+    #     # AdamW for MNIST
+    #     self.lr: float = 3e-4
+    #     self.wd: float = 1e-4
+    #     opt = torch.optim.AdamW(
+    #         self.configure_optimizer_params(),
+    #         lr=self.lr,
+    #         weight_decay=self.wd,
+    #     )
+    #     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #         opt, T_max=self.epochs, eta_min=self.lr * 0.01
+    #     )
+    #     return opt, sched, "epoch"
 
 # ----------------------------
 # CLI / main
@@ -348,11 +357,9 @@ class Config(CommonTrainConfig):
     export_dir: Optional[str] = "./ckpt_tViT_mnist"
 
     epochs: int = 1023
-    batch_size: int = 128
+    batch_size: Union[int,Tuple[int, int]] = (512, 1024*8)
     num_workers: int = 8
 
-    lr: float = 3e-4
-    wd: float = 1e-4
     label_smoothing: float = 0.0
     amp: bool = True
 
@@ -375,15 +382,15 @@ def main():
     config.model_size = "femto"
 
     lit = LitNetViT(config)
-
+    datamodule=dm.build()
     trainer = AccelTrainer(
         max_epochs=args.epochs,
-        mixed_precision="bf16" if args.amp else "no",
+        # mixed_precision="bf16" if args.amp else "no",
         gradient_accumulation_steps=1,
         log_every_n_steps=10,
-        enable_ema=0.99 ** (args.batch_size // 128),
+        enable_ema=0.99** (datamodule.batch_size[0] // (128 if datamodule.batch_size[0] > 128 else datamodule.batch_size[0])),
     )
-    trainer.fit(lit, datamodule=dm.build())
+    trainer.fit(lit, datamodule=datamodule, val_first=True)
 
 
 if __name__ == "__main__":

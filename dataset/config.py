@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Tuple, Union
 
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -8,7 +8,7 @@ class DataModuleConfig(BaseModel):
     dataset_name: str = ""
     num_classes: int = -1
 
-    batch_size: int
+    batch_size: Union[int,Tuple[int,int]]
     num_workers: int = 0
 
     mixup: bool = False

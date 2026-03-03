@@ -6,7 +6,7 @@
 import math
 from typing import Callable, Tuple, Union
 
-from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d
+from bitlayers.dinov3.layers.bitlayers import Conv2d as BitConv2d, Linear
 from torch import Tensor, nn
 
 
@@ -102,6 +102,7 @@ class PatchEmbedNoConv(nn.Module):
         embed_dim: int = 768,
         norm_layer: Callable | None = None,
         flatten_embedding: bool = True,
+        bias=True,
     ) -> None:
         super().__init__()
 
@@ -124,7 +125,7 @@ class PatchEmbedNoConv(nn.Module):
         patch_dim = in_chans * patch_HW[0] * patch_HW[1]
 
         # If you have a quantized/bit linear layer, replace nn.Linear with BitLinear
-        self.proj = nn.Linear(patch_dim, embed_dim, bias=True)
+        self.proj = Linear(patch_dim, embed_dim, bias=bias)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:

@@ -14,6 +14,7 @@ from torch import Tensor, nn
 from bitlayers.dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
 from bitlayers.dinov3.layers.bitlayers import Linear as BitLinear
 from bitlayers.dinov3.layers.block import SelfAttentionTRMStage
+from bitlayers.dinov3.layers.patch_embed import PatchEmbedNoConv
 from bitlayers.dinov3.utils import named_apply
 
 logger = logging.getLogger("dinov3")
@@ -89,6 +90,7 @@ class DinoVisionTransformer(nn.Module):
         untie_cls_and_patch_norms: bool = False,
         untie_global_and_local_cls_norm: bool = False,
         device: Any | None = None,
+        no_conv: bool = False,
         **ignored_kwargs,
     ):
         super().__init__()
@@ -123,6 +125,7 @@ class DinoVisionTransformer(nn.Module):
         self.untie_cls_and_patch_norms = untie_cls_and_patch_norms
         self.untie_global_and_local_cls_norm = untie_global_and_local_cls_norm
         self.device = device
+        self.no_conv = no_conv
         
         norm_layer_cls = norm_layer_dict[norm_layer]
 
@@ -131,7 +134,7 @@ class DinoVisionTransformer(nn.Module):
         self.num_heads = num_heads
         self.patch_size = patch_size
 
-        self.patch_embed = PatchEmbed(
+        self.patch_embed = (PatchEmbed if not self.no_conv else PatchEmbedNoConv)(
             img_size=img_size,
             patch_size=patch_size,
             in_chans=in_chans,
@@ -238,6 +241,7 @@ class DinoVisionTransformer(nn.Module):
             untie_cls_and_patch_norms=self.untie_cls_and_patch_norms,
             untie_global_and_local_cls_norm=self.untie_global_and_local_cls_norm,
             device=self.device,
+            no_conv=self.no_conv,
         )
     
     def init_weights(self):
