@@ -47,6 +47,7 @@ class TinyViT(nn.Module):
             depth=3,
             num_heads=3,
             ffn_ratio=2.5,
+            no_conv=True,
         )
         self.back.init_weights()
 
