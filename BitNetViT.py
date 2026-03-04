@@ -335,19 +335,19 @@ class LitNetViT(LitBit):
         metrics = {"val/acc_fp": acc_fp, "val/acc_tern": acc_tern}
         return Metrics(loss=vloss, metrics=metrics)
 
-    # def configure_optimizers(self, trainer=None):
-    #     # AdamW for MNIST
-    #     self.lr: float = 3e-4
-    #     self.wd: float = 1e-4
-    #     opt = torch.optim.AdamW(
-    #         self.configure_optimizer_params(),
-    #         lr=self.lr,
-    #         weight_decay=self.wd,
-    #     )
-    #     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #         opt, T_max=self.epochs, eta_min=self.lr * 0.01
-    #     )
-    #     return opt, sched, "epoch"
+    def configure_optimizers(self, trainer=None):
+        # AdamW for MNIST
+        self.lr: float = 3e-4
+        self.wd: float = 1e-4
+        opt = torch.optim.AdamW(
+            self.configure_optimizer_params(),
+            lr=self.lr,
+            weight_decay=self.wd,
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=self.epochs, eta_min=self.lr * 0.01
+        )
+        return opt, sched, "epoch"
 
 # ----------------------------
 # CLI / main
@@ -358,7 +358,7 @@ class Config(CommonTrainConfig):
     export_dir: Optional[str] = "./ckpt_tViT_mnist"
 
     epochs: int = 1023
-    batch_size: Union[int,Tuple[int, int]] = (512, 1024*8)
+    batch_size: Union[int,Tuple[int, int]] = (128, 1024*8)
     num_workers: int = 8
 
     label_smoothing: float = 0.0
