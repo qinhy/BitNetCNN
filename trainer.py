@@ -19,6 +19,16 @@ from tqdm.auto import tqdm
 from bitlayers.ema import EMA
 from dataset import DataModuleConfig, DataSetModule
 
+def torch_save(model,path,meta={},opt=None,epoch=None,step=None):
+    s = {"model": model,**meta}
+    if opt is not None:
+        s["opt"] = opt
+    if epoch is not None:
+        s["epoch"] = epoch
+    if step is not None:
+        s["step"] = step
+    torch.save(s,path)
+
 # ----------------------------
 # Model-wide conversion helpers
 # ----------------------------
@@ -226,7 +236,11 @@ class ExportBestTernary:
         # ---- save FP state_dict on CPU (cheap & safe) ----
         fp_path = os.path.join(export_dir, f"bit_{model_name}_{model_size}_{dataset_name}_best_fp.pt")
         fp_state = {k: v.detach().cpu() for k, v in unwrapped.student.state_dict().items()}
-        torch.save({"model": fp_state, "acc_tern": acc_tern}, fp_path)
+        
+        # torch.save({"model": fp_state, "acc_tern": acc_tern}, fp_path)
+        torch_save(model=fp_state,path=fp_path,meta={"acc_tern": acc_tern},
+                   opt=trainer.optimizer.state_dict(),epoch=metrics.epoch,step=metrics.step)
+        
         trainer.print(f"[OK] saved {fp_path} (val/acc_tern={acc_tern*100:.2f}%)")
 
         # ---- export ternary PoT (convert CPU copy) ----
@@ -235,7 +249,9 @@ class ExportBestTernary:
             export_dir,
             f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_acc@{acc_tern*100:.2f}.pt",
         )
-        torch.save({"model": ternary_model.state_dict(), "acc_tern": acc_tern}, tern_path)
+        # torch.save({"model": ternary_model.state_dict(), "acc_tern": acc_tern}, tern_path)
+        torch_save(model=ternary_model.state_dict(),path=tern_path,meta={"acc_tern": acc_tern})
+                   
         trainer.print(f"[OK] exported ternary PoT -> {tern_path}")
 
 
@@ -449,7 +465,10 @@ class AccelTrainer:
                 ]
             )
         self.metrics_manager = metrics_manager
-        self.logger = logger
+        self.logger = logger        
+        self.opt_stats = None
+        self.sched_stats = None
+        self.current_epoch = 0
 
     # -----------------------------
     # Public API
@@ -469,10 +488,17 @@ class AccelTrainer:
             except Exception:
                 pass
 
+        raw_model = self.accelerator.unwrap_model(model)
+        raw_model.on_fit_start(self)
+
         train_dataloader, val_dataloader = self._resolve_dataloaders(datamodule, train_dataloader, val_dataloader)
 
         optimizer, scheduler, interval = model.configure_optimizers(self)
         self.scheduler_interval = interval or "epoch"
+        if self.opt_stats:
+            optimizer.load_state_dict(self.opt_stats)
+        if self.sched_stats:
+            scheduler.load_state_dict(self.sched_stats)
 
         model, optimizer, train_dataloader, val_dataloader, scheduler = self._prepare(
             model, optimizer, train_dataloader, val_dataloader, scheduler
@@ -483,11 +509,9 @@ class AccelTrainer:
         self.scheduler = scheduler
 
         # hooks on unwrapped model are fine
-        raw_model = self.accelerator.unwrap_model(model)
         self.ema = EMA(raw_model.student, decay=self.ema_decay) if self.enable_ema else None
-        raw_model.on_fit_start(self)
 
-        for epoch in range(self.max_epochs):
+        for epoch in range(self.current_epoch,self.max_epochs):
             # Run validation first if requested, otherwise train first
             if val_first and val_dataloader is not None:
                 self._run_epoch(stage="val", epoch=epoch, loader=val_dataloader)
@@ -801,11 +825,19 @@ class LitBit(AccelLightningModule):
         # --- core ---
         self.scale_op = config.scale_op
         self.student: nn.Module = config.student
+        self.stats = {}
         if os.path.exists(self.config.model_weights):
-            stats = torch.load(self.config.model_weights,weights_only=False)
+            # torch.save({
+            #     "model": model.state_dict(),
+            #     "opt": opt.state_dict(),
+            #     "epoch": epoch,
+            #     "step": step,
+            # }, "ckpt.pt")
+            self.stats = stats = torch.load(self.config.model_weights,weights_only=False)
             stats = stats['model'] if 'model' in stats else stats
             print(f"[LitBit]: load student weights of {self.config.model_weights}")
             self.student.load_state_dict(state_dict=stats)
+
         self.teacher: Optional[nn.Module] = config.teacher
         self.has_teacher = True if config.teacher is not None else False
 
@@ -877,7 +909,11 @@ class LitBit(AccelLightningModule):
     @torch.no_grad()
     def on_fit_start(self, trainer: 'AccelTrainer'):
         self._accel = accel = trainer.accelerator
-        self._trainer = trainer
+        self._trainer = trainer        
+        self._trainer.opt_stats = self.stats.get("opt")
+        self._trainer.sched_stats = self.stats.get("sched")  
+        self._trainer.current_epoch = self.stats.get("epoch",-1)+1
+        # self.step = stats.get("step")
 
         if self.has_teacher and self.teacher is not None:
             self.teacher.eval()

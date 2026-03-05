@@ -131,6 +131,7 @@ class Config(CommonTrainConfig):
     lr:float=2e-3
     wd:float=1e-4
     label_smoothing:float=0.0
+    model_weights: str = ""
 
 def main():
     parser = ArgumentParser(model=Config)
