@@ -216,3 +216,4 @@ tmp.sh
 /data/*
 
 *.onnx
+.cache_papers

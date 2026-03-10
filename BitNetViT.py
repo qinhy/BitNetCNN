@@ -11,6 +11,7 @@ from bitlayers.dinov3.models.vision_transformer import (
     DinoVisionTransformerTRM,
     vit_femto,
 )
+from dataset.base import DataSetModule
 from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 
 # Project-local imports
@@ -383,7 +384,7 @@ def main():
     config.model_size = "femto"
 
     lit = LitNetViT(config)
-    datamodule=dm.build()
+    datamodule:DataSetModule=dm.build()
     trainer = AccelTrainer(
         max_epochs=args.epochs,
         # mixed_precision="bf16" if args.amp else "no",
@@ -391,7 +392,9 @@ def main():
         log_every_n_steps=10,
         enable_ema=0.99** (datamodule.batch_size[0] // (128 if datamodule.batch_size[0] > 128 else datamodule.batch_size[0])),
     )
-    trainer.fit(lit, datamodule=datamodule, val_first=True)
+    datamodule.setup()
+    tl,vl = datamodule.train_dataloader(repeats=10),datamodule.val_dataloader()
+    trainer.fit(lit, train_dataloader=tl, val_dataloaders=vl, first=True)
 
 
 if __name__ == "__main__":
