@@ -133,10 +133,15 @@ class DataSetModule:
             x, y = self._collate_transform(x, y)
         return x, y
 
-    def train_dataloader(self):
+    def train_dataloader(self, repeats=1):
+        if repeats==1:
+            train_ds = self.train_ds
+        else:
+            from torch.utils.data import ConcatDataset
+            train_ds = ConcatDataset([self.train_ds] * repeats)
         collate_fn = self.collate_fn if self._collate_transform is not None else None
         return DataLoader(
-            self.train_ds,
+            train_ds,
             batch_size=self.batch_size[0],
             shuffle=True,
             drop_last=True,
