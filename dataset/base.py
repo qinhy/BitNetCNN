@@ -133,17 +133,35 @@ class DataSetModule:
             x, y = self._collate_transform(x, y)
         return x, y
 
-    def train_dataloader(self, repeats=1):
-        if repeats==1:
-            train_ds = self.train_ds
-        else:
-            from torch.utils.data import ConcatDataset
-            train_ds = ConcatDataset([self.train_ds] * repeats)
+    def train_dataloader(self, repeats=1.0):
+        if repeats <= 0:
+            raise ValueError(f"repeats must be > 0, got {repeats}")
+
+        train_ds = self.train_ds
+        n = len(train_ds)
+        num_samples = max(1, int(round(n * repeats)))
+
+        # For repeats <= 1, sample without replacement:
+        #   repeats=0.5 -> half the dataset each epoch
+        # For repeats > 1, sample with replacement:
+        #   repeats=2.0 -> 2x dataset size worth of samples per epoch
+        sampler = None
+        shuffle = True
+        if repeats != 1.0:
+            sampler = RandomSampler(
+                train_ds,
+                replacement=(repeats > 1.0),
+                num_samples=num_samples,
+            )
+            shuffle = False  # cannot use shuffle together with sampler
+
         collate_fn = self.collate_fn if self._collate_transform is not None else None
+
         return DataLoader(
             train_ds,
             batch_size=self.batch_size[0],
-            shuffle=True,
+            shuffle=shuffle,
+            sampler=sampler,
             drop_last=True,
             num_workers=self.num_workers,
             pin_memory=True,

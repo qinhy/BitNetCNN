@@ -1,3 +1,4 @@
+from fractions import Fraction
 import random
 from typing import Optional, Tuple
 
@@ -12,7 +13,7 @@ from bitlayers.dinov3.models.vision_transformer import (
     vit_femto,
 )
 from dataset.base import DataSetModule
-from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
+from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics, RawFraction
 
 # Project-local imports
 from common_utils import *  # noqa: F403
@@ -221,7 +222,7 @@ class LitNetViT(LitBit):
         #     T = 1
         #     n = 0
         # else:
-        N_supervision = random.randint(1, 16)
+        N_supervision = 16#random.randint(1, 16)
         T = random.randint(1, 8)
         n = random.randint(0, 4)
 
@@ -301,10 +302,12 @@ class LitNetViT(LitBit):
         if correct_parts:
             corr_all = torch.cat(correct_parts, dim=0)
             idx_all = torch.cat(idx_parts, dim=0)
-            acc = corr_all[idx_all.argsort()].mean()
+            corr_all = corr_all[idx_all.argsort()]
+            # acc = corr_all[idx_all.argsort()].mean()
+            acc = RawFraction.acc(corr_all)
         else:
             # Extremely unlikely, but keep it defined
-            acc = torch.tensor(0.0, device=self.device)
+            acc = RawFraction(0,0)
 
         n,T,S = student.get_best_combo()
         logd = {
@@ -323,15 +326,15 @@ class LitNetViT(LitBit):
         x, y = batch
         x, y = x.to(self.device), y.to(self.device)
         y_idx = y.argmax(dim=1) if y.ndim == 2 else y
-
+        
         n, T, S = self.student.get_best_combo()
 
         z_fp = self.student.thinking(x, n=n, T=T, max_supervision=S, q_threshold=0.99)
         z_tern = self._ternary_snapshot.thinking(x, n=n, T=T, max_supervision=S, q_threshold=0.99)
 
         vloss = F.cross_entropy(z_fp, y_idx.long())
-        acc_fp = (z_fp.argmax(dim=1) == y_idx).float().mean()
-        acc_tern = (z_tern.argmax(dim=1) == y_idx).float().mean()
+        acc_fp = RawFraction.acc(z_fp.argmax(dim=1) == y_idx)
+        acc_tern = RawFraction.acc(z_tern.argmax(dim=1) == y_idx)
 
         metrics = {"val/acc_fp": acc_fp, "val/acc_tern": acc_tern}
         return Metrics(loss=vloss, metrics=metrics)
@@ -359,7 +362,7 @@ class Config(CommonTrainConfig):
     export_dir: Optional[str] = "./ckpt_tViT_mnist"
 
     epochs: int = 1023
-    batch_size: Union[int,Tuple[int, int]] = (128, 1024*8)
+    batch_size: Union[int,Tuple[int, int]] = (128, 5000)
     num_workers: int = 8
 
     label_smoothing: float = 0.0
@@ -393,8 +396,8 @@ def main():
         enable_ema=0.99** (datamodule.batch_size[0] // (128 if datamodule.batch_size[0] > 128 else datamodule.batch_size[0])),
     )
     datamodule.setup()
-    tl,vl = datamodule.train_dataloader(repeats=10),datamodule.val_dataloader()
-    trainer.fit(lit, train_dataloader=tl, val_dataloaders=vl, first=True)
+    tl,vl = datamodule.train_dataloader(repeats=0.1),datamodule.val_dataloader()
+    trainer.fit(lit, train_dataloader=tl, val_dataloader=vl, val_first=False)
 
 
 if __name__ == "__main__":

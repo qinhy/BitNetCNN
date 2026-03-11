@@ -79,6 +79,43 @@ class AccelLightningModule(nn.Module):
 # ----------------------------
 # Metrics
 # ----------------------------
+class RawFraction:
+    def __init__(self, numerator, denominator):
+        if denominator == 0:
+            raise ValueError("denominator cannot be 0")
+        self.numerator = numerator
+        self.denominator = denominator
+
+    @property
+    def value(self):
+        return self.numerator / self.denominator
+
+    def __float__(self):
+        return self.value
+
+    def __repr__(self):
+        return f"{self.__float__()}"
+    
+    @staticmethod
+    def acc(pred_bool:torch.Tensor):
+        return RawFraction(pred_bool.sum().item(), len(pred_bool))
+
+
+def _as_float(x: Any) -> Optional[Union[float, RawFraction]]:
+    if x is None:
+        return None
+    if type(x) is RawFraction:
+        return x
+    if torch.is_tensor(x):
+        x = x.detach().float().cpu().item()
+    # try:
+    #     x = float(x)
+    # except Exception:
+    #     return None
+    if math.isnan(x):
+        return None
+    return x
+
 class Metrics(BaseModel):
     stage: Literal["train", "val"] = "train"
     epoch: int = -1
@@ -90,42 +127,20 @@ class Metrics(BaseModel):
     metrics: Dict[str, Any] = Field(default_factory=dict)
 
     def set(self, key: str, value: float) -> None:
-        self.metrics[key] = float(value)
+        self.metrics[key] = _as_float(value)
 
     def get(self, key: str, default: Optional[float] = None) -> Any:
         return self.metrics.get(key, default)
 
-    def to_dict(self,digits=7) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         res: Dict[str, Any] = {f"{self.stage}/loss": self.loss}
         res.update(self.metrics)
-
         out: Dict[str, Any] = {}
         for k, v in res.items():
-            if v is None:
-                continue
-            if torch.is_tensor(v):
-                out[k] = float(v.detach().cpu().item())
-            else:
-                out[k] = v
-            try:                
-                out[k] = float((f'{out[k]}')[:digits])
-            except:
-                pass
+            v = _as_float(v)
+            if v is None: continue
+            out[k] = v
         return out
-
-
-def _as_float(x: Any) -> Optional[float]:
-    if x is None:
-        return None
-    if torch.is_tensor(x):
-        x = x.detach().float().cpu().item()
-    try:
-        x = float(x)
-    except Exception:
-        return None
-    if math.isnan(x):
-        return None
-    return x
 
 
 class MetricsTracer(BaseModel):
@@ -142,13 +157,12 @@ class MetricsTracer(BaseModel):
 
     def compare(self, val: Any) -> bool:
         v = _as_float(val)
-        if v is None:
-            return False
+        if v is None: return False
+        v = float(v)
         if self._is_better(v):
-            self.best = float(v)
+            self.best = v
             return True
         return False
-
 
 class MetricsManager(BaseModel):
     metrics_list: List[Metrics] = Field(default_factory=list)
@@ -192,10 +206,13 @@ class MetricsManager(BaseModel):
         for k in keys:
             vals = [_as_float(d.get(k)) for d in dict_rows]
             vals = [v for v in vals if v is not None]
-            if not vals:
-                continue
-
-            avg = sum(vals) / len(vals)
+            if not vals: continue
+            assert len(set([type(v) for v in vals])) == 1
+            if type(vals[0]) is RawFraction:
+                print("avg RawFraction")
+                avg = sum([v.numerator for v in vals]) / sum([v.denominator for v in vals])
+            else:
+                avg = sum(vals) / len(vals)
             out_key = k if k.endswith("_mean") else f"{k}_mean"
             mean_metrics[out_key] = avg
 
@@ -218,9 +235,10 @@ class ExportBestTernary:
         # IMPORTANT: global main process only (prevents multi-node duplicates/overwrites)
         if not trainer.accelerator.is_main_process:
             return
-
-        acc_tern = _as_float(metrics.get("val/acc_tern_mean"))
+        base = "acc"
+        acc_tern = _as_float(metrics.get(f"val/acc_tern_mean"))
         if acc_tern is None:
+            base = "loss"
             acc_tern = _as_float(metrics.get("val/loss_mean"))
 
         unwrapped: "LitBit" = trainer.accelerator.unwrap_model(model)
@@ -238,19 +256,19 @@ class ExportBestTernary:
         fp_state = {k: v.detach().cpu() for k, v in unwrapped.student.state_dict().items()}
         
         # torch.save({"model": fp_state, "acc_tern": acc_tern}, fp_path)
-        torch_save(model=fp_state,path=fp_path,meta={"acc_tern": acc_tern},
+        torch_save(model=fp_state,path=fp_path,meta={f"{base}_tern": acc_tern},
                    opt=trainer.optimizer.state_dict(),epoch=metrics.epoch,step=metrics.step)
         
-        trainer.print(f"[OK] saved {fp_path} (val/acc_tern={acc_tern*100:.2f}%)")
+        trainer.print(f"[OK] saved {fp_path} (val/{base}_tern={acc_tern*100:.2f}%)")
 
         # ---- export ternary PoT (convert CPU copy) ----
         ternary_model = convert_to_ternary(copy.deepcopy(unwrapped.student).cpu()).cpu()
         tern_path = os.path.join(
             export_dir,
-            f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_acc@{acc_tern*100:.2f}.pt",
+            f"bit_{model_name}_{model_size}_{dataset_name}_ternary_val_{base}@{acc_tern*100:.2f}.pt",
         )
         # torch.save({"model": ternary_model.state_dict(), "acc_tern": acc_tern}, tern_path)
-        torch_save(model=ternary_model.state_dict(),path=tern_path,meta={"acc_tern": acc_tern})
+        torch_save(model=ternary_model.state_dict(),path=tern_path,meta={f"{base}_tern": acc_tern})
                    
         trainer.print(f"[OK] exported ternary PoT -> {tern_path}")
 
@@ -573,11 +591,15 @@ class AccelTrainer:
     # -----------------------------
     # Printing / tqdm / logging
     # -----------------------------
-    def print(self, msg: str) -> None:
+    def print(self, msg: str, log=True) -> None:
         if self.accelerator.is_main_process:
             tqdm.write(msg)
-            if self.logger:
-                self.logger(msg)
+            if log: self.log(msg)
+    
+    def log(self, msg) -> None:
+        if self.logger:
+            self.logger(msg)
+
 
     def _pbar(self, loader: DataLoader, stage: str, epoch: int):
         if not (self.show_progress_bar and self.accelerator.is_main_process):
@@ -592,14 +614,17 @@ class AccelTrainer:
         if self.metrics_manager is not None:
             self.metrics_manager.log(metrics, self, trainer_model)
 
-        postfix = metrics.to_dict(7)
+        postfix = metrics.to_dict()
+        postfix = {k: f"{float(v):.4f}" for k, v in postfix.items()}
         if hasattr(pbar, "set_postfix"):
             pbar.set_postfix(postfix, refresh=False)
 
         step = metrics.step or 0
         if (step % self.log_every_n_steps == 0) or force_print:
             h = f"[{metrics.stage}]epoch={metrics.epoch} step={step}"
-            self.print(f"{h} {str(postfix).replace(metrics.stage+'/','')}")
+            self.print(f"{h} {str(postfix).replace(metrics.stage+'/','')}", log=False)
+            self.log(f"{h} {str({k: float(v) for k, v in metrics.to_dict().items()}).replace(metrics.stage+'/','')}")
+
 
     # -----------------------------
     # Utilities
@@ -953,7 +978,7 @@ class LitBit(AccelLightningModule):
                 trainer.print(f"{str10('Scheduler')} : enable ({class_name(sch)})")
 
             if trainer.enable_ema:
-                trainer.print(f"{str10('EMA')} : enable decay={trainer.ema.decay}")
+                trainer.print(f"{str10('EMA')} : enable decay={trainer.ema_decay}")
                
             trainer.print(
                 f"{str10('Accelerate')} : device={trainer.accelerator.device} "
