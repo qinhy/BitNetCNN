@@ -79,39 +79,12 @@ class AccelLightningModule(nn.Module):
 # ----------------------------
 # Metrics
 # ----------------------------
-class RawFraction:
-    def __init__(self, numerator, denominator):
-        if denominator == 0:
-            raise ValueError("denominator cannot be 0")
-        self.numerator = numerator
-        self.denominator = denominator
 
-    @property
-    def value(self):
-        return self.numerator / self.denominator
-
-    def __float__(self):
-        return self.value
-
-    def __repr__(self):
-        return f"{self.__float__()}"
-    
-    @staticmethod
-    def acc(pred_bool:torch.Tensor):
-        return RawFraction(pred_bool.sum().item(), len(pred_bool))
-
-
-def _as_float(x: Any) -> Optional[Union[float, RawFraction]]:
+def _as_float(x: Any) -> Optional[float]:
     if x is None:
         return None
-    if type(x) is RawFraction:
-        return x
     if torch.is_tensor(x):
         x = x.detach().float().cpu().item()
-    # try:
-    #     x = float(x)
-    # except Exception:
-    #     return None
     if math.isnan(x):
         return None
     return x
@@ -208,11 +181,7 @@ class MetricsManager(BaseModel):
             vals = [v for v in vals if v is not None]
             if not vals: continue
             assert len(set([type(v) for v in vals])) == 1
-            if type(vals[0]) is RawFraction:
-                print("avg RawFraction")
-                avg = sum([v.numerator for v in vals]) / sum([v.denominator for v in vals])
-            else:
-                avg = sum(vals) / len(vals)
+            avg = sum(vals) / len(vals)
             out_key = k if k.endswith("_mean") else f"{k}_mean"
             mean_metrics[out_key] = avg
 
@@ -510,6 +479,10 @@ class AccelTrainer:
         raw_model.on_fit_start(self)
 
         train_dataloader, val_dataloader = self._resolve_dataloaders(datamodule, train_dataloader, val_dataloader)
+        for dl,name in zip([train_dataloader, val_dataloader],["train_dataloader","val_dataloader"]):
+            if not dl.drop_last and len(dl.dataset) % dl.batch_size != 0:
+                raise ValueError(f"[warning]: {name} dataset size {len(dl.dataset)} "
+                        f"is not divisible by batch_size {dl.batch_size}. ")
 
         optimizer, scheduler, interval = model.configure_optimizers(self)
         self.scheduler_interval = interval or "epoch"

@@ -13,7 +13,7 @@ from bitlayers.dinov3.models.vision_transformer import (
     vit_femto,
 )
 from dataset.base import DataSetModule
-from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics, RawFraction
+from trainer import AccelTrainer, CommonTrainConfig, LitBit, LitBitConfig, Metrics
 
 # Project-local imports
 from common_utils import *  # noqa: F403
@@ -129,12 +129,12 @@ class TinyViT(nn.Module):
         n: int = 1,
         T: int = 2,
         max_supervision: int = 16,
-        q_threshold: float = 0.99,
+        conf: float = 0.99,
     ) -> torch.Tensor:
         """
         Early-exit inference:
         - Run up to max_supervision steps
-        - At each step, accept samples with sigmoid(q_logits) >= q_threshold
+        - At each step, accept samples with sigmoid(q_logits) >= conf
         - Return logits in original order, shape [B, num_classes]
         """
         logits_parts = []
@@ -152,7 +152,7 @@ class TinyViT(nn.Module):
             )
 
             q_prob = torch.sigmoid(q_logits).view(-1)
-            keep = q_prob < q_threshold
+            keep = q_prob < conf
             done = ~keep
 
             if done.any():
@@ -214,7 +214,7 @@ class LitNetViT(LitBit):
 
         student: TinyViT = self.student
 
-        q_threshold = 0.99
+        conf = 0.99
 
         # Randomize recursion / refinement / supervision depth
         # if self.current_epoch<1:
@@ -261,7 +261,7 @@ class LitNetViT(LitBit):
 
             # Early-exit decision on current subset
             q_prob = torch.sigmoid(q_logits).view(-1)
-            keep = q_prob < q_threshold
+            keep = q_prob < conf
             done = ~keep
 
             # If we're at the last supervision step, force all remaining samples to be "done"
@@ -299,15 +299,10 @@ class LitNetViT(LitBit):
             final_loss = step_losses[-1].to(self.device)
 
         # Compute final accuracy over the original batch
-        if correct_parts:
-            corr_all = torch.cat(correct_parts, dim=0)
-            idx_all = torch.cat(idx_parts, dim=0)
-            corr_all = corr_all[idx_all.argsort()]
-            # acc = corr_all[idx_all.argsort()].mean()
-            acc = RawFraction.acc(corr_all)
-        else:
-            # Extremely unlikely, but keep it defined
-            acc = RawFraction(0,0)
+        corr_all = torch.cat(correct_parts, dim=0)
+        idx_all = torch.cat(idx_parts, dim=0)
+        corr_all = corr_all[idx_all.argsort()]
+        acc = corr_all[idx_all.argsort()].mean()
 
         n,T,S = student.get_best_combo()
         logd = {
@@ -329,12 +324,12 @@ class LitNetViT(LitBit):
         
         n, T, S = self.student.get_best_combo()
 
-        z_fp = self.student.thinking(x, n=n, T=T, max_supervision=S, q_threshold=0.99)
-        z_tern = self._ternary_snapshot.thinking(x, n=n, T=T, max_supervision=S, q_threshold=0.99)
+        z_fp = self.student.thinking(x, n=n, T=T, max_supervision=S, conf=0.99)
+        z_tern = self._ternary_snapshot.thinking(x, n=n, T=T, max_supervision=S, conf=0.99)
 
         vloss = F.cross_entropy(z_fp, y_idx.long())
-        acc_fp = RawFraction.acc(z_fp.argmax(dim=1) == y_idx)
-        acc_tern = RawFraction.acc(z_tern.argmax(dim=1) == y_idx)
+        acc_fp = (z_fp.argmax(dim=1) == y_idx).float().mean()
+        acc_tern = (z_tern.argmax(dim=1) == y_idx).float().mean()
 
         metrics = {"val/acc_fp": acc_fp, "val/acc_tern": acc_tern}
         return Metrics(loss=vloss, metrics=metrics)
@@ -396,8 +391,8 @@ def main():
         enable_ema=0.99** (datamodule.batch_size[0] // (128 if datamodule.batch_size[0] > 128 else datamodule.batch_size[0])),
     )
     datamodule.setup()
-    tl,vl = datamodule.train_dataloader(repeats=0.1),datamodule.val_dataloader()
-    trainer.fit(lit, train_dataloader=tl, val_dataloader=vl, val_first=False)
+    tl,vl = datamodule.train_dataloader(),datamodule.val_dataloader()
+    trainer.fit(lit, train_dataloader=tl, val_dataloader=vl, val_first=True)
 
 
 if __name__ == "__main__":
