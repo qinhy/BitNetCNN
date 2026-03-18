@@ -194,9 +194,9 @@ class SimpleImageTrainAugment(BaseModel):
     def build(self):
         rmin, rmax = self.cout_ratio_range
         return  A.Compose([
-            A.Rotate(limit=(-10,10), p=0.5),
-            AutoRandomResizedCrop(scale=(0.8, 1.0), ratio=(0.75, 1.33),p=0.5),
-            A.HorizontalFlip() if self.flip else A.NoOp(),
+            A.Rotate(limit=(-10,10), p=self.p),
+            AutoRandomResizedCrop(scale=(0.8, 1.0), ratio=(0.75, 1.33),p=self.p),
+            A.HorizontalFlip(p=self.p) if self.flip else A.NoOp(),
             A.OneOf([
                 A.ColorJitter(p=1.0,brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
                 A.ToGray(p=1.0),

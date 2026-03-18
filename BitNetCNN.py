@@ -127,7 +127,7 @@ class Config(CommonTrainConfig):
     dataset_name:str='mnist'
     export_dir:Optional[str]="./ckpt_mnist"
     epochs:int=50
-    batch_size:int=(512,5000)
+    batch_size:Union[int,Tuple[int,int]]=(512,5000)
     lr:float=2e-3
     wd:float=1e-4
     label_smoothing:float=0.0

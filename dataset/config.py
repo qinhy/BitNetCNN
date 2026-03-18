@@ -7,6 +7,8 @@ class DataModuleConfig(BaseModel):
     data_dir: str
     dataset_name: str = ""
     num_classes: int = -1
+    img_size: int = -1
+    color_channels: int = -1
 
     batch_size: Union[int,Tuple[int,int]]
     num_workers: int = 0
@@ -36,18 +38,28 @@ class DataModuleConfig(BaseModel):
         if ds in ["c100", "cifar100"]:
             self.num_classes = 100
             self.dataset_name = "c100"
+            self.img_size = 32
+            self.color_channels = 3
         elif ds in ["timnet", "tiny", "tinyimagenet", "tiny-imagenet"]:
             self.num_classes = 200
             self.dataset_name = "timnet"
+            self.img_size = 64
+            self.color_channels = 3
         elif ds in ["imnet", "imagenet", "in1k", "imagenet1k"]:
             self.num_classes = 1000
-            self.dataset_name = "imnet"
+            self.dataset_name = "imnet"            
+            self.img_size = -1
+            self.color_channels = 3
         elif ds in ["mnist"]:
             self.num_classes = 10
-            self.dataset_name = "mnist"
+            self.dataset_name = "mnist"            
+            self.img_size = 28
+            self.color_channels = 1
         elif ds in ["retinaface", "wider-face", "wider"]:
             self.num_classes = -1
-            self.dataset_name = "retinaface"
+            self.dataset_name = "retinaface"            
+            self.img_size = -1
+            self.color_channels = 3
         else:
             raise ValueError(f"Unsupported dataset: {ds}")
 

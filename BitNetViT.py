@@ -31,6 +31,8 @@ class TinyViT(nn.Module):
         drop_p: float = 0.1,
         bias: bool = True,
         scale_op: str = "median",
+        img_size=28,
+        in_chans=1,
     ):
         super().__init__()
         self.model_size = model_size
@@ -38,12 +40,14 @@ class TinyViT(nn.Module):
         self.drop_p = drop_p
         self.bias = bias
         self.scale_op = scale_op
+        self.img_size = img_size
+        self.in_chans = in_chans
 
         # MNIST-ish settings
         self.back = DinoVisionTransformerTRM(
-            img_size=28,
+            img_size=img_size,
+            in_chans=in_chans,
             patch_size=4,
-            in_chans=1,
             drop_path_rate=0.0,  # no drop for recursion
             embed_dim=72,
             depth=3,
@@ -180,6 +184,8 @@ class TinyViT(nn.Module):
             drop_p=self.drop_p,
             bias=self.bias,
             scale_op=self.scale_op,
+            img_size=self.img_size,
+            in_chans=self.in_chans,
         )
 
 
@@ -353,8 +359,8 @@ class LitNetViT(LitBit):
 # ----------------------------
 class Config(CommonTrainConfig):
     data: str = "./data"
-    dataset_name: str = "mnist"
-    export_dir: Optional[str] = "./ckpt_tViT_mnist"
+    dataset_name: str = "c100"
+    export_dir: Optional[str] = "./ckpt_tViT_c100"
 
     epochs: int = 1023
     batch_size: Union[int,Tuple[int, int]] = (128, 5000)
@@ -376,6 +382,8 @@ def main():
         model_size=vit_femto,
         num_classes=dm.num_classes,
         scale_op=config.scale_op,
+        img_size=dm.img_size,
+        in_chans=dm.color_channels,
     )
 
     config.model_name = "vit"
