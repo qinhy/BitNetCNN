@@ -77,7 +77,8 @@ class Convs:
         def module_init(self):
             super().module_init()
             if inspect.isclass(self.norm):
-                self.norm = self.norm(num_features=self.out_channels)
+                self.norm = self.norm(num_features=self.out_channels,
+                                      device=self.device)
         
         def forward(self, x):
             return self.norm(super().forward(x))
@@ -154,7 +155,7 @@ class Convs:
         noskip: bool = False
         drop_path_rate: float = 0.0
 
-        conv_s2d_layer: Optional[Union['Convs.Conv2dNormAct']] = None
+        conv_s2d_layer: Optional['Convs.Conv2dNormAct'] = None
 
         conv_dw_layer: Union['Convs.Conv2dDepthwiseNormAct'] = Field(
             default_factory=lambda: Convs.Conv2dDepthwiseNormAct(
@@ -176,7 +177,7 @@ class Convs:
         )
 
         has_skip: bool = False
-        drop_path: nn.Module = nn.Identity()
+        drop_path: nn.Module = None
 
         @model_validator(mode='after')
         def valid_model(self, module_init=True):
@@ -193,13 +194,17 @@ class Convs:
                 self.conv_s2d_layer.kernel_size = 2
                 self.conv_s2d_layer.stride = 2
                 self.conv_s2d_layer.padding = 'same'
-                self.conv_s2d_layer.bias = self.bias
+                if type(self.conv_s2d_layer.bias) is not torch.nn.Parameter:
+                    self.conv_s2d_layer.bias = self.bias
+                self.conv_s2d_layer.device = self.device
+                self.conv_s2d_layer.dtype = self.dtype
+                
                 if dw_kernel_local in (3,4):
                     dw_pad_type = 'same'
                 # we already downsampled
                 self.aa_layer = None
             else:
-                self.conv_s2d_layer = nn.Identity()
+                self.conv_s2d_layer = None
 
             use_aa = (self.aa_layer is None)
             in_channels = self.conv_s2d_layer.in_channels if hasattr(self.conv_s2d_layer, 'in_channels') else self.in_channels
@@ -212,7 +217,10 @@ class Convs:
             self.conv_dw_layer.stride = 1 if use_aa else self.stride
             self.conv_dw_layer.padding = 1 if dw_kernel_local==3 else dw_pad_type
             self.conv_dw_layer.group_size = self.group_size
-            self.conv_dw_layer.bias = self.bias
+            if type(self.conv_dw_layer.bias) is not torch.nn.Parameter:
+                self.conv_dw_layer.bias = self.bias
+            self.conv_dw_layer.device = self.device
+            self.conv_dw_layer.dtype = self.dtype
 
             # Pointwise conv
             self.conv_pw_layer.in_channels = in_channels
@@ -222,7 +230,10 @@ class Convs:
             self.conv_pw_layer.stride = 1
             self.conv_pw_layer.padding = self.padding
             self.conv_pw_layer.groups = 1
-            self.conv_pw_layer.bias = self.bias
+            if type(self.conv_pw_layer.bias) is not torch.nn.Parameter:
+                self.conv_pw_layer.bias = self.bias
+            self.conv_pw_layer.device = self.device
+            self.conv_pw_layer.dtype = self.dtype
              
             if self.se_layer:
                 if self.aa_layer:
@@ -234,6 +245,8 @@ class Convs:
                                                                   rd_ratio=self.se_layer.rd_ratio,
                                                                   rd_channels=self.se_layer.rd_channels,
                 )
+                self.se_layer.device = self.device
+                self.se_layer.dtype = self.dtype
 
             # ---- DropPath / stochastic depth ----
             self.drop_path = nn.DropPath(drop_prob=self.drop_path_rate) if self.drop_path_rate > 0 else nn.Identity()
@@ -242,12 +255,6 @@ class Convs:
             )
             if module_init:
                 self.module_init()
-
-            if self.aa_layer is None:
-                self.aa_layer = nn.Identity()
-
-            if self.se_layer is None:
-                self.se_layer = nn.Identity()
                 
             return self
         
@@ -257,12 +264,12 @@ class Convs:
             if self.conv_pw_layer:self.conv_pw_layer.module_init()        
 
         def pre_conv(self,x):
-            x = self.conv_s2d_layer(x) # with norm and act OR Identity
+            if self.conv_s2d_layer:x = self.conv_s2d_layer(x) # with norm and act OR Identity
             return x
         
         def mid_conv(self,x):
-            x = self.aa_layer(x)
-            x = self.se_layer(x)
+            if self.aa_layer:x = self.aa_layer(x)
+            if self.se_layer:x = self.se_layer(x)
             return x
 
         def end_conv(self,x,shortcut):
@@ -315,7 +322,8 @@ class Convs:
             self.conv_pw_exp_layer.stride = 1 if self.aa_layer else self.stride
             self.conv_pw_exp_layer.padding = self.padding
             self.conv_pw_exp_layer.dilation = self.dilation
-            self.conv_pw_exp_layer.bias = self.bias
+            if type(self.conv_pw_exp_layer.bias) is not torch.nn.Parameter:
+                self.conv_pw_exp_layer.bias = self.bias
 
             # Depth-wise convolution
             self.conv_dw_layer.in_channels = mid_chs
@@ -324,7 +332,8 @@ class Convs:
             # Point-wise linear projection
             self.conv_pw_layer.in_channels = mid_chs
             self.conv_pw_layer.padding = self.padding
-            self.conv_pw_layer.bias = self.bias
+            if type(self.conv_pw_layer.bias) is not torch.nn.Parameter:
+                self.conv_pw_layer.bias = self.bias
 
             if module_init:
                 self.module_init()

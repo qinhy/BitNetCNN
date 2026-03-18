@@ -192,6 +192,8 @@ class Bit:
             groups=1,
             bias: bool = True,
             scale_op: str = "median",
+            device=None,
+            dtype=None,
         ):
             super().__init__()
             kh, kw = to_2tuple(kernel_size)
@@ -248,7 +250,7 @@ class Bit:
                 padding_value = self.padding_value
 
             bias = self.bias if scale is None else None
-            if weight.device != bias.device:
+            if bias is not None and weight.device != bias.device:
                 bias = bias.to(weight.device)
 
             y = F.conv2d(
@@ -312,6 +314,8 @@ class Bit:
             groups=1,
             bias: bool = True,
             scale_op: str = "median",
+            device=None,
+            dtype=None,
         ):
             super().__init__(
                 in_channels=in_channels,
@@ -324,6 +328,8 @@ class Bit:
                 groups=groups,
                 bias=bias,
                 scale_op=scale_op,
+                device=device,
+                dtype=dtype,
             )
             self.init_weights(bias)
 
@@ -666,13 +672,16 @@ class Bit:
     # Train-time Linear & Inference Linear (unchanged from old working code)
     # ------------------------------------------------------------------
     class Linear(nn.Module):
-        def __init__(self, in_f: int, out_f: int, bias: bool = True, scale_op: str = "median"):
+        def __init__(self, in_f: int, out_f: int, bias: bool = True, scale_op: str = "median",
+                device=None,
+                dtype=None,
+            ):
             super().__init__()
             self.in_features = in_f
             self.out_features = out_f
-            self.weight = nn.Parameter(torch.empty(out_f, in_f))
+            self.weight = nn.Parameter(torch.empty(out_f, in_f).to(device=device, dtype=dtype))
             nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-            self.bias = nn.Parameter(torch.zeros(out_f)) if bias else None
+            self.bias = nn.Parameter(torch.zeros(out_f).to(device=device, dtype=dtype)) if bias else None
             # self.w_q = Bit.Bit1p58Weight(dim=0, scale_op=scale_op)
             self.scale_op = scale_op
 

@@ -36,6 +36,7 @@ class Norms:
         def module_init(self):
             del self.num_batches_tracked
             torch.nn.BatchNorm2d.__init__(self, **self.model_dump(exclude=["uuid"]))
+            torch.nn.BatchNorm2d.to(self, device=self.device)
 
     class BatchNorm3d(_BatchNormBase, torch.nn.BatchNorm3d):
         def model_post_init(self, __context):

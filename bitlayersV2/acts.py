@@ -280,15 +280,15 @@ class Acts:
     class Sigmoid(nn.Module, _InplaceActBase, torch.nn.Sigmoid):
         def model_post_init(self, __context):
             super().model_post_init(__context)
-            torch.nn.Sigmoid.__init__(self, inplace=self.inplace)
+            torch.nn.Sigmoid.__init__(self)
     class Tanh(nn.Module, _InplaceActBase, torch.nn.Tanh):
         def model_post_init(self, __context):
             super().model_post_init(__context)
-            torch.nn.Tanh.__init__(self, inplace=self.inplace)
+            torch.nn.Tanh.__init__(self)
     class Identity(nn.Module, _InplaceActBase, torch.nn.Identity):
         def model_post_init(self, __context):
             super().model_post_init(__context)
-            torch.nn.Identity.__init__(self, inplace=self.inplace)
+            torch.nn.Identity.__init__(self)
 
     type = Union[ReLU,ReLU6,LeakyReLU,ELU,CELU,SELU,GELU,GELUTanh,QuickGELU,PReLU,SiLU,Swish,Mish,HardMish,
                 #  HardSigmoid,HardSwish,

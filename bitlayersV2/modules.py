@@ -36,7 +36,10 @@ class Module(BaseModel, torch.nn.Module):
     # keep training settable (torch.nn.Module.train()/eval() assigns this)
     training: bool = Field(default=True, exclude=True)
     uuid: str = Field(default=None)
-    
+
+    device: str = Field(default="cpu", exclude=True)
+    dtype: Any = Field(default=torch.float32, exclude=True)
+
     def __getattr__(self, name: str) -> Any:
         try:
             return torch.nn.Module.__getattr__(self, name)
@@ -56,20 +59,27 @@ class Module(BaseModel, torch.nn.Module):
         self.register_buffer("running", torch.zeros(3))
         super().model_post_init(__context)
 
-    def clone(self) -> Module:
+    def clone(self,**kwargs) -> Module:
         state = deepcopy(self.state_dict())
-        model = self.__class__(**self.model_dump())
+        args = self.model_dump()
+        args.update(kwargs)
+        model = self.__class__(**args)
         model.load_state_dict(state)
         return model
     
-    def save_file(self, path: str) -> None:
+    def save_file(self, path: str,**kwargs) -> None:
         weights = self.state_dict()
         config = self.model_dump()
         state = {"model": weights, "model_dump": config}
-        torch.save(state, path)
+        state.update(kwargs)
+        try:
+            torch.save(state, path)
+        except Exception as e:
+            print(e)
+            torch.save({"model": weights, "model_dump": config}, path)
 
     @classmethod
-    def load_file(cls, path: str) -> None:
+    def load_file(cls, path: str):
         state = torch.load(path)
         weights = state.get("model", {})
         config = state.get("model_dump", None)
@@ -78,7 +88,7 @@ class Module(BaseModel, torch.nn.Module):
         else:
             model = cls()
         model.load_state_dict(weights)
-        return model
+        return model,{k:v for k,v in state.items() if k not in ["model", "model_dump"]}
 
 class Linear(Module, Bit.Linear):
     in_features: int = Field(default=10, ge=1)
@@ -96,6 +106,8 @@ class Linear(Module, Bit.Linear):
             in_f=self.in_features,
             out_f=self.out_features,
             bias=True,
+            device=self.device,
+            dtype=self.dtype,
         )
         if bias is None or not bias:
             self.bias = None
@@ -115,7 +127,7 @@ class Conv2d(Module, Bit.Conv2d):
     bias: Optional[Union[torch.Tensor, torch.nn.Parameter, bool]] = Field(default=True, exclude=True)
 
     scale_op: Literal["mean", "median"] = "median"
-    padding_value: Tuple[int, int] = Field(default=(0, 0))
+    padding_value: Union[int, Tuple[int, int]] = Field(default=(0, 0))
     dynamic_pad: bool = Field(default=False)
     pad_layer: Optional[PadSame] = None
     w_q: Bit.Bit1p58Weight = Field(default=None, exclude=True)
@@ -138,6 +150,8 @@ class Conv2d(Module, Bit.Conv2d):
             groups=self.groups,
             bias=True,
             padding_mode=self.padding_mode,
+            device=self.device,
+            dtype=self.dtype,
         )
         if bias is None or (type(bias) is bool and not bias):
             self.bias = None
@@ -172,6 +186,8 @@ class BatchNorm2d(Module, torch.nn.BatchNorm2d):
             momentum=self.momentum,
             affine=True,
             track_running_stats=self.track_running_stats,
+            device=self.device,
+            dtype=self.dtype,
         )
         if not affine:
             self.affine = False
@@ -228,6 +244,8 @@ class Embedding(Module, torch.nn.Embedding):
             scale_grad_by_freq=self.scale_grad_by_freq,
             sparse=self.sparse,
             _freeze=self.freeze,
+            device=self.device,
+            dtype=self.dtype,
         )
 
 class GELU(Module, torch.nn.GELU):
