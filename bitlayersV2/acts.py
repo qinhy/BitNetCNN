@@ -5,6 +5,8 @@ from typing import Optional, Type, Union
 
 from pydantic import BaseModel, Field
 import torch
+
+from .helpers import Cls_parse
 from . import nn
 import torch.nn.functional as F
 
@@ -293,7 +295,13 @@ class Acts:
     type = Union[ReLU,ReLU6,LeakyReLU,ELU,CELU,SELU,GELU,GELUTanh,QuickGELU,PReLU,SiLU,Swish,Mish,HardMish,
                 #  HardSigmoid,HardSwish,
                  Sigmoid,Tanh,Identity,]
+    cls_dict = {"ReLU":ReLU,"ReLU6":ReLU6,"LeakyReLU":LeakyReLU,"ELU":ELU,"CELU":CELU,"SELU":SELU,"GELU":GELU,"GELUTanh":GELUTanh,"QuickGELU":QuickGELU,
+                "PReLU":PReLU,"SiLU":SiLU,"Swish":Swish,"Mish":Mish,"HardMish":HardMish,}
+                # "HardSigmoid":HardSigmoid,"HardSwish":HardSwish,}
     cls = Union[Type[ReLU],Type[ReLU6],Type[LeakyReLU],Type[ELU],Type[CELU],Type[SELU],Type[GELU],Type[GELUTanh],Type[QuickGELU],
                 Type[PReLU],Type[SiLU],Type[Swish],Type[Mish],Type[HardMish],
                 # Type[HardSigmoid],Type[HardSwish],
                 Type[Sigmoid],Type[Tanh],Type[Identity],]
+    
+    @staticmethod
+    def parse(v):return Cls_parse(v,Acts.cls_dict)

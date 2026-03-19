@@ -63,7 +63,8 @@ class NetCNN(nn.Module):
     stage1:InvertedResidual = None
     stage2:InvertedResidual = None
     stage3:InvertedResidual = None
-    head:List[nn.Module] = []
+    head_pre:List[nn.Module] = []
+    head:nn.Linear = None
 
     def model_post_init(self, __context):
         super().model_post_init(__context)
@@ -104,21 +105,21 @@ class NetCNN(nn.Module):
         self.stage3 = InvertedResidual(in_channels=2**(expand_ratio+2),out_channels=2**(expand_ratio+3),
                                         **cconvs())
 
-        self.head = [
+        self.head_pre = [
             nn.AdaptiveAvgPool2d(output_size=1),
             nn.Flatten(),
             nn.Dropout(p=drop_p),
-            nn.Linear(in_features=2**(expand_ratio+3), out_features=num_classes, bias=bias, device=self.device),
         ]
+        self.head = nn.Linear(in_features=2**(expand_ratio+3), out_features=num_classes, bias=bias, device=self.device)
 
     def forward(self, x):
         x = self.stem(x)
         x = self.stage1(x)
         x = self.stage2(x)
         x = self.stage3(x)
-        for blk in self.head:
+        for blk in self.head_pre:
             x = blk(x)
-        return x
+        return self.head(x)
     
 # summ(convert_to_ternary(NetCNN()))
 # ----------------------------

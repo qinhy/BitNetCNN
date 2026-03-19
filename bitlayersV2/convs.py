@@ -3,7 +3,7 @@
 import inspect
 from typing import Optional, Sequence, Tuple, Union
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 import torch
 
 from .pool import Pools
@@ -74,6 +74,13 @@ class Convs:
     class Conv2dNorm(nn.Conv2d):
         norm: Union[Norms.type, Norms.cls]
         
+        @field_validator("norm", mode="before")
+        @classmethod
+        def parse_norm(cls, v):
+            if inspect.isclass(v):
+                return v
+            return Norms.parse(v)
+        
         def module_init(self):
             super().module_init()
             if inspect.isclass(self.norm):
@@ -85,19 +92,26 @@ class Convs:
 
     class Conv2dAct(nn.Conv2d):
         act: Union[Acts.type, Acts.cls]
-        def model_post_init(self, __context):
-            super().model_post_init(__context)
-            if inspect.isclass(self.act):
-                self.act = self.act(inplace=True)
+        @field_validator("act", mode="before")
+        @classmethod
+        def parse_act(cls, v):
+            if inspect.isclass(v):
+                return v(inplace=True)
+            return Acts.parse(v)
+        
         def forward(self, x):
             return self.act(super().forward(x))
 
     class Conv2dNormAct(Conv2dNorm):
         act: Union[Acts.type, Acts.cls]
-        def model_post_init(self, __context):
-            super().model_post_init(__context)
-            if inspect.isclass(self.act):
-                self.act = self.act(inplace=True)
+        
+        @field_validator("act", mode="before")
+        @classmethod
+        def parse_act(cls, v):
+            if inspect.isclass(v):
+                return v(inplace=True)
+            return Acts.parse(v)
+
         def forward(self, x):
             return self.act(super().forward(x))
 
@@ -113,11 +127,11 @@ class Convs:
     class SqueezeExcite(nn.Module):
         in_channels: int
 
-        conv_reduce_layer: Union['Convs.Conv2dAct'] = Field(
+        conv_reduce_layer: Optional['Convs.Conv2dAct'] = Field(
                 default_factory=lambda:Convs.Conv2dAct(
                                             in_channels=-1, act=Acts.ReLU(),))
         
-        conv_expand_layer: Union['Convs.Conv2dAct'] = Field(
+        conv_expand_layer: Optional['Convs.Conv2dAct'] = Field(
                 default_factory=lambda:Convs.Conv2dAct(
                                             in_channels=-1, act=Acts.Sigmoid(),))
         rd_ratio: float = 0.25
@@ -157,7 +171,7 @@ class Convs:
 
         conv_s2d_layer: Optional['Convs.Conv2dNormAct'] = None
 
-        conv_dw_layer: Union['Convs.Conv2dDepthwiseNormAct'] = Field(
+        conv_dw_layer: Optional['Convs.Conv2dDepthwiseNormAct'] = Field(
             default_factory=lambda: Convs.Conv2dDepthwiseNormAct(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
@@ -168,7 +182,7 @@ class Convs:
         se_layer: Optional['Convs.SqueezeExcite'] = None
         aa_layer: Optional[Pools.type] = None
 
-        conv_pw_layer: Union['Convs.Conv2dPointwiseNormAct'] = Field(
+        conv_pw_layer: Optional['Convs.Conv2dPointwiseNormAct'] = Field(
             default_factory=lambda: Convs.Conv2dPointwiseNormAct(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
@@ -292,7 +306,7 @@ class Convs:
         exp_ratio: float = 1.0
         exp_kernel_size: int = 1
 
-        conv_pw_exp_layer: Union['Convs.Conv2dPointwiseNormAct'] = None
+        conv_pw_exp_layer: Optional['Convs.Conv2dPointwiseNormAct'] = None
         # Field(
         #     default_factory=lambda: Convs.Conv2dPointwiseNormAct(
         #         in_channels=-1,
@@ -301,7 +315,7 @@ class Convs:
         #     )
         # )
 
-        conv_pw_layer: Union['Convs.Conv2dPointwiseNorm'] = None
+        conv_pw_layer: Optional['Convs.Conv2dPointwiseNorm'] = None
         # Field(
         #     default_factory=lambda: Convs.Conv2dPointwiseNorm(
         #         in_channels=-1,
@@ -368,7 +382,7 @@ class Convs:
         bias: bool = False
 
 
-        conv_pw_layer: Union['Convs.Conv2dPointwiseNormAct'] = Field(
+        conv_pw_layer: Optional['Convs.Conv2dPointwiseNormAct'] = Field(
             default_factory=lambda: Convs.Conv2dPointwiseNormAct(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
@@ -410,20 +424,20 @@ class Convs:
         noskip: bool = False
         act_layer: Acts.type = Field(default_factory=Acts.ReLU)
 
-        conv1_layer: Union['Convs.Conv2dNormAct'] = Field(
+        conv1_layer: Optional['Convs.Conv2dNormAct'] = Field(
             default_factory=lambda: Convs.Conv2dNormAct(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
                 act=Acts.ReLU(),
             )
         )
-        conv2_layer: Union['Convs.Conv2dNorm'] = Field(
+        conv2_layer: Optional['Convs.Conv2dNorm'] = Field(
             default_factory=lambda: Convs.Conv2dNorm(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
             )
         )
-        shortcut_layer: Optional[Union['Convs.Conv2dNorm']] = Field(default=None)
+        shortcut_layer: Optional['Convs.Conv2dNorm'] = Field(default=None)
 
         @model_validator(mode='after')
         def valid_model(self):
@@ -475,27 +489,27 @@ class Convs:
         mid_channels: Optional[int] = None
         act_layer: Acts.type = Field(default_factory=Acts.ReLU)
 
-        conv_reduce_layer: Union['Convs.Conv2dNormAct'] = Field(
+        conv_reduce_layer: Optional['Convs.Conv2dNormAct'] = Field(
             default_factory=lambda: Convs.Conv2dNormAct(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
                 act=Acts.ReLU(),
             )
         )
-        conv_transform_layer: Union['Convs.Conv2dNormAct'] = Field(
+        conv_transform_layer: Optional['Convs.Conv2dNormAct'] = Field(
             default_factory=lambda: Convs.Conv2dNormAct(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
                 act=Acts.ReLU(),
             )
         )
-        conv_expand_layer: Union['Convs.Conv2dNorm'] = Field(
+        conv_expand_layer: Optional['Convs.Conv2dNorm'] = Field(
             default_factory=lambda: Convs.Conv2dNorm(
                 in_channels=-1,
                 norm=Norms.BatchNorm2d(num_features=-1),
             )
         )
-        shortcut_layer: Optional[Union['Convs.Conv2dNorm']] = Field(default=None)
+        shortcut_layer: Optional['Convs.Conv2dNorm'] = Field(default=None)
 
         @model_validator(mode='after')
         def valid_model(self):

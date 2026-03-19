@@ -7,6 +7,8 @@ from typing import List, Optional, Tuple, Type, Union
 from pydantic import BaseModel, Field
 import torch
 from torchvision.ops.misc import FrozenBatchNorm2d
+
+from bitlayersV2.helpers import Cls_parse
 from . import nn
 
 class Norms:
@@ -224,9 +226,16 @@ class Norms:
     type = Union[BatchNorm1d,BatchNorm2d,BatchNorm3d,SyncBatchNorm,
                  InstanceNorm1d,InstanceNorm2d,InstanceNorm3d,GroupNorm,LayerNorm,
                  RMSNorm,RMSNorm2d,FrozenBatchNorm2d,Identity]
+    
+    cls_dict = {'BatchNorm1d':BatchNorm1d,'BatchNorm2d':BatchNorm2d,'BatchNorm3d':BatchNorm3d,'SyncBatchNorm':SyncBatchNorm,
+                'InstanceNorm1d':InstanceNorm1d,'InstanceNorm2d':InstanceNorm2d,'InstanceNorm3d':InstanceNorm3d,'GroupNorm':GroupNorm,'LayerNorm':LayerNorm,
+                'RMSNorm':RMSNorm,'RMSNorm2d':RMSNorm2d,'FrozenBatchNorm2d':FrozenBatchNorm2d,'Identity':Identity}    
 
     cls = Union[Type[BatchNorm1d],Type[BatchNorm2d],Type[BatchNorm3d],Type[SyncBatchNorm],
                 Type[InstanceNorm1d],Type[InstanceNorm2d],Type[InstanceNorm3d],Type[GroupNorm],Type[LayerNorm],
                 Type[RMSNorm],Type[RMSNorm2d],Type[FrozenBatchNorm2d],Type[Identity]]
+        
+    @staticmethod
+    def parse(v):return Cls_parse(v,Norms.cls_dict)
 
 
