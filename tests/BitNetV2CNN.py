@@ -98,7 +98,7 @@ class NetCNN(nn.Module):
         
         self.stage1 = InvertedResidual(in_channels=2**expand_ratio,out_channels=2**(expand_ratio+1),
                                         **cconvs())
-        
+                
         self.stage2 = InvertedResidual(in_channels=2**(expand_ratio+1),out_channels=2**(expand_ratio+2),
                                         **cconvs())
         
@@ -119,7 +119,8 @@ class NetCNN(nn.Module):
         x = self.stage3(x)
         for blk in self.head_pre:
             x = blk(x)
-        return self.head(x)
+        x = self.head(x)
+        return x
     
 # summ(convert_to_ternary(NetCNN()))
 # ----------------------------
@@ -162,7 +163,6 @@ def main():
     lit.student = student = NetCNN(in_channels=1, num_classes=dm.num_classes,
                             expand_ratio=5, scale_op=config.scale_op,
                             device="cuda:0")
-    print(student.model_dump())
     student = student.clone()
 
     trainer = AccelTrainer(

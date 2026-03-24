@@ -12,7 +12,7 @@ from bitlayersV2.helpers import Cls_parse
 from . import nn
 
 class Norms:
-    class _BatchNormBase(nn.Module):
+    class _NormBase(nn.Module):
         num_features: int
         eps: float = 1e-5
         momentum: float = 0.1
@@ -21,14 +21,31 @@ class Norms:
         weight: torch.Tensor = Field(default=None, exclude=True)
         bias: Optional[Union[torch.Tensor, torch.nn.Parameter, bool]] = Field(default=True, exclude=True)
 
-    class BatchNorm1d(_BatchNormBase, torch.nn.BatchNorm1d):
+        # BatchNorm2d
+        track_running_stats: bool = False
+        num_batches_tracked: torch.Tensor = Field(default=None, exclude=True)
+
+        # SyncBatchNorm
+        process_group: Optional[object] = Field(default=None, exclude=True)
+
+        # GroupNorm
+        num_groups: int = 32
+
+        # LayerNorm
+        elementwise_affine: bool = True
+        data_format:str = "channels_last"
+
+        # LayerNorm2D
+        norm_layer:Type[nn.LayerNorm] = Field(default=nn.LayerNorm, exclude=True)
+
+    class BatchNorm1d(_NormBase, torch.nn.BatchNorm1d):
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.BatchNorm1d.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class BatchNorm2d(_BatchNormBase, torch.nn.BatchNorm2d):
-        track_running_stats: bool = False
-        num_batches_tracked: torch.Tensor = Field(default=None, exclude=True)
+    class BatchNorm2d(_NormBase, torch.nn.BatchNorm2d):
+        # track_running_stats: bool = False
+        # num_batches_tracked: torch.Tensor = Field(default=None, exclude=True)
 
         def model_post_init(self, __context):
             super().model_post_init(__context)
@@ -37,59 +54,58 @@ class Norms:
 
         def module_init(self):
             del self.num_batches_tracked
-            torch.nn.BatchNorm2d.__init__(self, **self.model_dump(exclude=["uuid"]))
-            torch.nn.BatchNorm2d.to(self, device=self.device)
+            torch.nn.BatchNorm2d.__init__(self, 
+                                        num_features = self.num_features,
+                                        eps = self.eps,
+                                        momentum = self.momentum,
+                                        affine = self.affine,
+                                        track_running_stats = self.track_running_stats,
+                                        device = self.device,
+                                        dtype = self.dtype,)
 
-    class BatchNorm3d(_BatchNormBase, torch.nn.BatchNorm3d):
+    class BatchNorm3d(_NormBase, torch.nn.BatchNorm3d):
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.BatchNorm3d.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class SyncBatchNorm(_BatchNormBase, torch.nn.SyncBatchNorm):
-        process_group: Optional[object] = None
+    class SyncBatchNorm(_NormBase, torch.nn.SyncBatchNorm):
+        # process_group: Optional[objects] = None
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.SyncBatchNorm.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class _InstanceNormBase(BaseModel):
-        num_features: int
-        eps: float = 1e-5
-        momentum: float = 0.1
-        affine: bool = False
-        track_running_stats: bool = False
-
-    class InstanceNorm1d(_InstanceNormBase, torch.nn.InstanceNorm1d):
+    class InstanceNorm1d(_NormBase, torch.nn.InstanceNorm1d):
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.InstanceNorm1d.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class InstanceNorm2d(_InstanceNormBase, torch.nn.InstanceNorm2d):
+    class InstanceNorm2d(_NormBase, torch.nn.InstanceNorm2d):
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.InstanceNorm2d.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class InstanceNorm3d(_InstanceNormBase, torch.nn.InstanceNorm3d):
+    class InstanceNorm3d(_NormBase, torch.nn.InstanceNorm3d):
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.InstanceNorm3d.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class GroupNorm(nn.Module, torch.nn.GroupNorm):
-        num_features: int
-        num_groups: int = 32
-        eps: float = 1e-5
-        affine: bool = True
+    class GroupNorm(_NormBase, torch.nn.GroupNorm):
+        # num_features: int
+        # num_groups: int = 32
+        # eps: float = 1e-5
+        # affine: bool = True
 
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.GroupNorm.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class LayerNorm(nn.Module):
+    class LayerNorm(_NormBase):
         """ LayerNorm that supports two data formats: channels_last (default) or channels_first. """
-        num_features: int  # as same as normalized_shape
-        eps: float = 1e-5
-        elementwise_affine: bool = True
-        bias: bool = True
-        data_format:str = "channels_last"
+        # num_features: int  # as same as normalized_shape
+        # eps: float = 1e-5
+        # elementwise_affine: bool = True
+        # bias: bool = True
+        # data_format:str = "channels_last"
         
         def model_post_init(self, __context):
             super().model_post_init(__context)
@@ -112,8 +128,8 @@ class Norms:
                     x = x + self.bias[:, None, None]
                 return x
             
-    class GlobalResponseNorm(nn.Module):
-        num_features: int
+    class GlobalResponseNorm(_NormBase):
+        # num_features: int
 
         """ GRN (Global Response Normalization) layer """
         def model_post_init(self, __context):
@@ -127,9 +143,9 @@ class Norms:
             Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
             return self.gamma * (x * Nx) + self.beta + x
         
-    class LayerNorm2D(nn.Module):
-        num_features: int
-        norm_layer:Type[nn.LayerNorm] = nn.LayerNorm
+    class LayerNorm2D(_NormBase):
+        # num_features: int
+        # norm_layer:Type[nn.LayerNorm] = nn.LayerNorm
 
         def model_post_init(self, __context):
             super().model_post_init(__context)
@@ -144,29 +160,29 @@ class Norms:
             x = x.permute(0, 3, 1, 2)
             return x
         
-    class RMSNorm(nn.Module, torch.nn.RMSNorm):
-        num_features: int
-        eps: float = 1e-6
-        affine: bool = True
+    class RMSNorm(_NormBase, torch.nn.RMSNorm):
+        # num_features: int
+        # eps: float = 1e-6
+        # affine: bool = True
 
         def model_post_init(self, __context):
             super().model_post_init(__context)
             torch.nn.RMSNorm.__init__(self, **self.model_dump(exclude=["uuid"]))
 
-    class RMSNorm2d(nn.Module):
+    class RMSNorm2d(_NormBase):
         """ RMSNorm2D for NCHW tensors, w/ fast apex or cast norm if available
 
         NOTE: It's currently (2025-05-10) faster to use an eager 2d kernel that does reduction
         on dim=1 than to permute and use internal PyTorch F.rms_norm, this may change if something
         like https://github.com/pytorch/pytorch/pull/150576 lands.
         """
-        num_features: int
-        eps: float = 1e-6
-        affine: bool = True
-        normalized_shape: Tuple[int, ...]
-        eps: float = 1e-6
-        elementwise_affine: bool = False
-        _fast_norm: bool = False
+        # num_features: int
+        # eps: float = 1e-6
+        # affine: bool = True
+        # normalized_shape: Tuple[int, ...]
+        # eps: float = 1e-6
+        # elementwise_affine: bool = False
+        # _fast_norm: bool = False
 
         def model_post_init(self, __context):
             super().model_post_init(__context)
@@ -212,28 +228,19 @@ class Norms:
                 x = self.rms_norm2d(x, self.normalized_shape, self.weight, self.eps)
             return x
 
-    class FrozenBatchNorm2d(BaseModel):
-        num_features: int
-        eps: float = 1e-5
-
-        def build(self) -> nn.Module:
-            return FrozenBatchNorm2d(**self.model_dump(exclude=["uuid"]))
-
-    class Identity(BaseModel):
-        def build(self) -> nn.Module:
-            return nn.Identity(**self.model_dump(exclude=["uuid"]))
+    class Identity(nn.Identity):pass
 
     type = Union[BatchNorm1d,BatchNorm2d,BatchNorm3d,SyncBatchNorm,
                  InstanceNorm1d,InstanceNorm2d,InstanceNorm3d,GroupNorm,LayerNorm,
-                 RMSNorm,RMSNorm2d,FrozenBatchNorm2d,Identity]
+                 RMSNorm,RMSNorm2d,Identity]
     
     cls_dict = {'BatchNorm1d':BatchNorm1d,'BatchNorm2d':BatchNorm2d,'BatchNorm3d':BatchNorm3d,'SyncBatchNorm':SyncBatchNorm,
                 'InstanceNorm1d':InstanceNorm1d,'InstanceNorm2d':InstanceNorm2d,'InstanceNorm3d':InstanceNorm3d,'GroupNorm':GroupNorm,'LayerNorm':LayerNorm,
-                'RMSNorm':RMSNorm,'RMSNorm2d':RMSNorm2d,'FrozenBatchNorm2d':FrozenBatchNorm2d,'Identity':Identity}    
+                'RMSNorm':RMSNorm,'RMSNorm2d':RMSNorm2d,'Identity':Identity}    
 
     cls = Union[Type[BatchNorm1d],Type[BatchNorm2d],Type[BatchNorm3d],Type[SyncBatchNorm],
                 Type[InstanceNorm1d],Type[InstanceNorm2d],Type[InstanceNorm3d],Type[GroupNorm],Type[LayerNorm],
-                Type[RMSNorm],Type[RMSNorm2d],Type[FrozenBatchNorm2d],Type[Identity]]
+                Type[RMSNorm],Type[RMSNorm2d],Type[Identity]]
         
     @staticmethod
     def parse(v):return Cls_parse(v,Norms.cls_dict)

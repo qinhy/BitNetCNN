@@ -3,7 +3,7 @@
 import inspect
 from typing import Optional, Sequence, Tuple, Union
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_serializer, field_validator, model_validator
 import torch
 
 from .pool import Pools
@@ -81,11 +81,19 @@ class Convs:
                 return v
             return Norms.parse(v)
         
+        @field_serializer("norm")
+        def serialize_norm(self, v):            
+            if inspect.isclass(v):
+                return {"class": v.__class__.__name__,}
+            else:
+                return v.model_dump()
+        
         def module_init(self):
             super().module_init()
             if inspect.isclass(self.norm):
                 self.norm = self.norm(num_features=self.out_channels,
                                       device=self.device)
+                self.add_module("norm",self.norm)
         
         def forward(self, x):
             return self.norm(super().forward(x))
@@ -102,7 +110,8 @@ class Convs:
         def forward(self, x):
             return self.act(super().forward(x))
 
-    class Conv2dNormAct(Conv2dNorm):
+    class Conv2dNormAct(nn.Conv2d):
+        norm: Union[Norms.type, Norms.cls]
         act: Union[Acts.type, Acts.cls]
         
         @field_validator("act", mode="before")
@@ -112,8 +121,29 @@ class Convs:
                 return v(inplace=True)
             return Acts.parse(v)
 
+        @field_validator("norm", mode="before")
+        @classmethod
+        def parse_norm(cls, v):
+            if inspect.isclass(v):
+                return v
+            return Norms.parse(v)
+        
+        @field_serializer("norm")
+        def serialize_norm(self, v):            
+            if inspect.isclass(v):
+                return {"class": v.__class__.__name__,}
+            else:
+                return v.model_dump()
+        
+        def module_init(self):
+            super().module_init()
+            if inspect.isclass(self.norm):
+                self.norm = self.norm(num_features=self.out_channels,
+                                      device=self.device)
+                self.add_module("norm",self.norm)
+                
         def forward(self, x):
-            return self.act(super().forward(x))
+            return self.act(self.norm(super().forward(x)))
 
     class Conv2dDepthwiseNorm(Conv2dDepthwise,Conv2dNorm):pass
     class Conv2dDepthwiseAct(Conv2dDepthwise,Conv2dAct):pass
