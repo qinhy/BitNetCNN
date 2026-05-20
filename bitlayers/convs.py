@@ -375,7 +375,6 @@ class Conv2dModels:
         dilation: int = 1
         padding: PadArg = 'same'
         drop_path_rate: float = 0.0
-        noskip: bool = False
         act_layer: ActModels.type = Field(default_factory=ActModels.ReLU)
 
         conv1_layer: Union['Conv2dModels.Conv2dNormAct'] = Field(
@@ -391,7 +390,7 @@ class Conv2dModels:
                 norm=NormModels.BatchNorm2d(num_features=-1),
             )
         )
-        shortcut_layer: Optional[Union['Conv2dModels.Conv2dNorm']] = Field(default=None)
+        shortcut_layer: Union['Conv2dModels.Conv2dNorm',NormModels.Identity] = Field(default_factory=NormModels.Identity)
 
         @model_validator(mode='after')
         def valid_model(self):
@@ -415,19 +414,19 @@ class Conv2dModels:
             self.conv2_layer.bias = False
 
             need_downsample = self.stride != 1 or self.in_channels != self.out_channels
-            if self.shortcut_layer is None and need_downsample:
+            if need_downsample:
                 self.shortcut_layer = Conv2dModels.Conv2dNorm(
                     in_channels=-1,
                     norm=NormModels.BatchNorm2d(num_features=-1),
                 )
-
-            if self.shortcut_layer is not None:
                 self.shortcut_layer.in_channels = self.in_channels
                 self.shortcut_layer.out_channels = self.out_channels
                 self.shortcut_layer.kernel_size = 1
                 self.shortcut_layer.stride = self.stride
                 self.shortcut_layer.padding = 0
                 self.shortcut_layer.bias = False
+            else:
+                self.shortcut_layer = NormModels.Identity()
 
             return self
 
@@ -438,7 +437,6 @@ class Conv2dModels:
         dilation: int = 1
         padding: PadArg = 'same'
         drop_path_rate: float = 0.0
-        noskip: bool = False
         bottleneck_ratio: int = 4
         mid_channels: Optional[int] = None
         act_layer: ActModels.type = Field(default_factory=ActModels.ReLU)
@@ -463,7 +461,7 @@ class Conv2dModels:
                 norm=NormModels.BatchNorm2d(num_features=-1),
             )
         )
-        shortcut_layer: Optional[Union['Conv2dModels.Conv2dNorm']] = Field(default=None)
+        shortcut_layer: Union['Conv2dModels.Conv2dNorm',NormModels.Identity] = Field(default_factory=NormModels.Identity)
 
         @model_validator(mode='after')
         def valid_model(self):
@@ -498,22 +496,92 @@ class Conv2dModels:
             self.conv_expand_layer.bias = False
 
             need_downsample = self.stride != 1 or self.in_channels != self.out_channels
-            if self.shortcut_layer is None and need_downsample:
+            if need_downsample:
                 self.shortcut_layer = Conv2dModels.Conv2dNorm(
                     in_channels=-1,
                     norm=NormModels.BatchNorm2d(num_features=-1),
                 )
-
-            if self.shortcut_layer is not None:
                 self.shortcut_layer.in_channels = self.in_channels
                 self.shortcut_layer.out_channels = self.out_channels
                 self.shortcut_layer.kernel_size = 1
                 self.shortcut_layer.stride = self.stride
                 self.shortcut_layer.padding = 0
                 self.shortcut_layer.bias = False
+            else:
+                self.shortcut_layer = NormModels.Identity()
 
             return self
     
+
+    class ConvNeXtV2Block(BasicModel):
+        dim: int = Field(..., gt=0)
+        kernel_size: IntOrPair = 7
+        mlp_ratio: int = Field(default=4, gt=0)
+        drop_path: float = Field(default=0.0, ge=0.0)
+        scale_op: str = "median"
+
+        conv_dw_layer: Union['Conv2dModels.Conv2dDepthwise'] = Field(
+            default_factory=lambda: Conv2dModels.Conv2dDepthwise(
+                in_channels=-1,
+                out_channels=-1,
+                kernel_size=7,
+                padding=3,
+                group_size=1,
+            )
+        )
+        
+        norm: NormModels.LayerNorm = Field(
+            default_factory=lambda: NormModels.LayerNorm(num_features=-1)
+        )
+
+        pwconv1_layer: LinearModels.Linear = Field(
+            default_factory=lambda: LinearModels.Linear(in_features=-1)
+        )
+        
+        act: ActModels.type = Field(
+            default_factory=lambda: ActModels.GELU()
+        )
+        grn: NormModels.type = Field(
+            default_factory=lambda: NormModels.GlobalResponseNorm(num_features=-1)
+        )
+
+        pwconv2_layer: LinearModels.Linear = Field(
+            default_factory=lambda: LinearModels.Linear(in_features=-1)
+        )
+
+        @model_validator(mode='after')
+        def valid_model(self):
+            kernel_size = to_2tuple(self.kernel_size)
+            if kernel_size[0] != kernel_size[1]:
+                raise ValueError("ConvNeXtV2Block expects a square depthwise kernel.")
+            self.kernel_size = kernel_size
+
+            hidden_dim = self.mlp_ratio * self.dim
+
+            self.conv_dw_layer.update(
+                in_channels=self.dim,
+                out_channels=self.dim,
+                kernel_size=kernel_size,
+                padding=(kernel_size[0] // 2, kernel_size[1] // 2),
+                group_size=1,
+                scale_op=self.scale_op,
+            )
+            self.norm.num_features = self.conv_dw_layer.out_channels
+
+            self.pwconv1_layer.update(
+                in_features=self.dim,
+                out_features=hidden_dim,
+                scale_op=self.scale_op,
+            )
+
+            self.grn.num_features = hidden_dim
+
+            self.pwconv2_layer.update(
+                in_features=hidden_dim,
+                out_features=self.dim,
+                scale_op=self.scale_op,
+            )
+            return self
 
 class Conv2dModules:
     class Module(CommonModule):
@@ -797,19 +865,16 @@ class Conv2dModules:
             self.para:Conv2dModels.ResNetBasicBlock = self.para
             self.conv1 = self.para.conv1_layer.build()
             self.conv2 = self.para.conv2_layer.build()
-            self.shortcut = self.para.shortcut_layer.build() if self.para.shortcut_layer else nn.Identity()
+            self.shortcut_layer = self.para.shortcut_layer.build()
             self.act = self.para.act_layer.build()
             self.drop_path = DropPath(self.para.drop_path_rate) if self.para.drop_path_rate > 0 else nn.Identity()
-            self.has_skip = not self.para.noskip
 
         def forward(self, x):
             shortcut = x
             x = self.conv1(x)
             x = self.conv2(x)
             x = self.drop_path(x)
-            if self.has_skip:
-                shortcut = self.shortcut(shortcut)
-                x = x + shortcut
+            x = x + self.shortcut_layer(shortcut)
             x = self.act(x)
             return x
 
@@ -825,10 +890,9 @@ class Conv2dModules:
             self.conv_reduce = self.para.conv_reduce_layer.build()
             self.conv_transform = self.para.conv_transform_layer.build()
             self.conv_expand = self.para.conv_expand_layer.build()
-            self.shortcut = self.para.shortcut_layer.build() if self.para.shortcut_layer else nn.Identity()
+            self.shortcut_layer = self.para.shortcut_layer.build()
             self.act = self.para.act_layer.build()
             self.drop_path = DropPath(self.para.drop_path_rate) if self.para.drop_path_rate > 0 else nn.Identity()
-            self.has_skip = not self.para.noskip
 
         def forward(self, x):
             shortcut = x
@@ -836,9 +900,7 @@ class Conv2dModules:
             x = self.conv_transform(x)
             x = self.conv_expand(x)
             x = self.drop_path(x)
-            if self.has_skip:
-                shortcut = self.shortcut(shortcut)
-                x = x + shortcut
+            x = x + self.shortcut_layer(shortcut)
             x = self.act(x)
             return x
 
@@ -847,7 +909,28 @@ class Conv2dModules:
             self.convert_to_ternary(self,mods)
             return self
         
+    class ConvNeXtV2Block(Module):
+        def __init__(self, para):
+            super().__init__(para)
+            self.para:Conv2dModels.ConvNeXtV2Block=self.para
+            self.conv_dw_layer = self.para.conv_dw_layer.build()
+            self.norm = self.para.norm.build()
+            self.pwconv1_layer = self.para.pwconv1_layer.build()
+            self.act = self.para.act.build()
+            self.grn = self.para.grn.build()
+            self.pwconv2_layer = self.para.pwconv2_layer.build()
+            self.drop_path = DropPath(self.para.drop_path) if self.para.drop_path > 0.0 else nn.Identity()
 
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            shortcut = x
 
+            x = self.conv_dw_layer(x)
+            x = x.permute(0, 2, 3, 1)  # NCHW -> NHWC
+            x = self.norm(x)
+            x = self.pwconv1_layer(x)
+            x = self.act(x)
+            x = self.grn(x)
+            x = self.pwconv2_layer(x)
+            x = x.permute(0, 3, 1, 2)  # NHWC -> NCHW
 
-
+            return shortcut + self.drop_path(x)

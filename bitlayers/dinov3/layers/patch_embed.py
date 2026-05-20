@@ -63,17 +63,17 @@ class PatchEmbed(nn.Module):
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x: Tensor) -> Tensor:
-        _, _, H, W = x.shape
+        # _, _, H, W = x.shape
         # patch_H, patch_W = self.patch_size
         # assert H % patch_H == 0, f"Input image height {H} is not a multiple of patch height {patch_H}"
         # assert W % patch_W == 0, f"Input image width {W} is not a multiple of patch width: {patch_W}"
 
-        x = self.proj(x)  # B C H W
+        x = self.proj(x)  # B C Hp Wp
         H, W = x.size(2), x.size(3)
-        x = x.flatten(2).transpose(1, 2)  # B HW C
+        x = x.flatten(2).transpose(1, 2)  # B HpxWp C
         x = self.norm(x)
         if not self.flatten_embedding:
-            x = x.reshape(-1, H, W, self.embed_dim)  # B H W C
+            x = x.reshape(-1, H, W, self.embed_dim)  # B Hp Wp C
         return x
 
     def flops(self) -> float:

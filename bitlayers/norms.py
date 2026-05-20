@@ -148,7 +148,7 @@ class NormModels:
         data_format:str = "channels_last"
 
         def build(self) -> nn.Module:
-            return NormModels._LayerNormModule(**self.model_dump())
+            return NormModels._LayerNormModule(**self.model_dump(exclude=["elementwise_affine"]))
 
     class _LayerNormModule(nn.Module):
         """ LayerNorm that supports two data formats: channels_last (default) or channels_first. """

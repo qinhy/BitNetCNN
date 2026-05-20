@@ -23,6 +23,10 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from collections import OrderedDict
+import json
+import torch
+
 def snap_model(model):
     def snapshot_params(m):
         return {k: v.detach().clone().cpu() for k, v in m.named_parameters()}
@@ -503,6 +507,37 @@ def load_zip_weights(
         except Exception as e:
             print(f"[warn] Could not load local checkpoint '{checkpoint_path}': {e}")
     return state_dict
+
+
+def save_tensor_only_state(model, tensor_path, key_path):
+    state = model.state_dict()
+
+    keys = list(state.keys())
+    tensors = [state[k].detach().cpu() for k in keys]
+
+    # keys outside
+    with open(key_path, "w") as f:
+        json.dump(keys, f, indent=2)
+
+    # only tensors inside
+    torch.save(tensors, tensor_path)
+
+
+def load_tensor_only_state(model, tensor_path, key_path, map_location="cpu", strict=True):
+    with open(key_path, "r") as f:
+        keys = json.load(f)
+
+    tensors = torch.load(
+        tensor_path,
+        map_location=map_location,
+        weights_only=True,
+    )
+
+    if len(keys) != len(tensors):
+        raise ValueError(f"Key/tensor count mismatch: {len(keys)} keys vs {len(tensors)} tensors")
+
+    state = OrderedDict(zip(keys, tensors))
+    return model.load_state_dict(state, strict=strict)
 
 # if __name__ == '__main__':
 #     freeze_support()
